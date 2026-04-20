@@ -1,29 +1,48 @@
-# Declarative deny rules for the permission learner.
+# Declarative permission rules for the learner hook.
 #
-# Evaluated by learners/permission/deny.py alongside procedural rules.
-# The list is deliberately wider than "strict minimum" — we'd rather
-# prompt the user on an edge case than auto-allow something destructive.
+# Two tiers:
+#
+# - **denied_***: hard block. The hook emits permissionDecision=deny with no
+#   override path. Reserved for truly catastrophic / irreversible operations
+#   (partition destruction, system halt, privilege escalation). Sudo is
+#   enforced procedurally in deny.py.
+# - **ask_***: user-confirmable. The hook emits permissionDecision=ask and
+#   the user decides per-call. Used for file ops, process control, package
+#   managers, and anything destructive-but-recoverable.
+#
+# Procedural guardrails in deny.py:
+# - `sudo` always hard-denied.
+# - Redirections (>, >>) into guarded system paths always hard-denied.
+# - Truncate-redirect (>) over an existing file → ask.
 
 denied_verbs:
+  - dd
+  - mkfs
+  - fdisk
+  - parted
+  - shutdown
+  - reboot
+  - halt
+  - su
+
+denied_subcommands:
+  systemctl:
+    - reboot
+    - poweroff
+
+denied_flag_patterns: {}
+
+ask_verbs:
   - rm
   - mv
-  - dd
   - chmod
   - chown
   - chgrp
   - kill
   - killall
   - pkill
-  - shutdown
-  - reboot
-  - halt
-  - mkfs
-  - fdisk
-  - parted
   - mount
   - umount
-  - sudo
-  - su
   - apt
   - apt-get
   - yay
@@ -35,23 +54,21 @@ denied_verbs:
   - snap
   - flatpak
 
-denied_subcommands:
+ask_subcommands:
   git:
     - push
-    - reset        # reset --hard is the killer; deny all reset for now
+    - reset
     - clean
-    - rebase       # interactive risk
+    - rebase
   docker:
     - rm
     - rmi
-    - system       # docker system prune, etc.
-    - volume       # destructive subcommands
+    - system
+    - volume
   systemctl:
     - stop
     - disable
     - mask
-    - reboot
-    - poweroff
   npm:
     - install
     - uninstall
@@ -64,7 +81,7 @@ denied_subcommands:
   cargo:
     - publish
 
-denied_flag_patterns:
+ask_flag_patterns:
   git:
     - "--force"
     - "-f"

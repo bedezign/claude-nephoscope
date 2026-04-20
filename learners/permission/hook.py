@@ -32,7 +32,7 @@ from learners.permission.canonicalize import (  # noqa: E402
     CanonicalLeaf,
     parse_command,
 )
-from learners.permission.deny import is_denied  # noqa: E402
+from learners.permission.deny import evaluate  # noqa: E402
 
 
 def _db_path() -> Path:
@@ -195,15 +195,24 @@ def main() -> int:
         _emit(None)
         return 0
 
-    # Deny-first: if any leaf fires a deny rule, block the whole command.
+    # Deny-first: scan all leaves; a "deny" on any leaf blocks the whole
+    # command. If no deny hits but at least one leaf asks, surface "ask" so
+    # the user can confirm per-call.
+    ask_reason: str | None = None
     for leaf in leaves:
-        denied, reason = is_denied(leaf)
-        if denied:
+        decision, reason = evaluate(leaf)
+        if decision == "deny":
             tool_use_id = data.get("tool_use_id")
             if isinstance(tool_use_id, str) and tool_use_id:
                 _mark_denied(tool_use_id)
             _emit("deny", reason or "matched deny list")
             return 0
+        if decision == "ask" and ask_reason is None:
+            ask_reason = reason
+
+    if ask_reason is not None:
+        _emit("ask", ask_reason)
+        return 0
 
     # Active-allowlist: every leaf must be in the active table.
     db = _db_path()

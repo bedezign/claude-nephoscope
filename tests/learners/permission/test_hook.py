@@ -110,26 +110,62 @@ def test_unparseable_command_falls_through(tmp_db, monkeypatch, capsys):
 
 def test_deny_fires_on_verb(tmp_db, monkeypatch, capsys):
     result = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+        {"tool_name": "Bash", "tool_input": {"command": "dd if=/dev/zero of=/dev/sda"}},
         monkeypatch,
         capsys,
     )
     spec = result.get("hookSpecificOutput") or {}
     assert spec.get("permissionDecision") == "deny"
     assert spec.get("hookEventName") == "PreToolUse"
-    assert "rm" in (spec.get("permissionDecisionReason") or "")
+    assert "dd" in (spec.get("permissionDecisionReason") or "")
 
 
 def test_deny_fires_on_subcommand(tmp_db, monkeypatch, capsys):
     result = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}},
+        {"tool_name": "Bash", "tool_input": {"command": "systemctl reboot"}},
         monkeypatch,
         capsys,
     )
     spec = result.get("hookSpecificOutput") or {}
     assert spec.get("permissionDecision") == "deny"
     reason = (spec.get("permissionDecisionReason") or "").lower()
-    assert "push" in reason or "git" in reason
+    assert "reboot" in reason
+
+
+def test_ask_fires_on_rm(tmp_db, monkeypatch, capsys):
+    result = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "rm /tmp/scratch"}},
+        monkeypatch,
+        capsys,
+    )
+    spec = result.get("hookSpecificOutput") or {}
+    assert spec.get("permissionDecision") == "ask"
+    assert "rm" in (spec.get("permissionDecisionReason") or "")
+
+
+def test_ask_fires_on_git_push(tmp_db, monkeypatch, capsys):
+    result = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}},
+        monkeypatch,
+        capsys,
+    )
+    spec = result.get("hookSpecificOutput") or {}
+    assert spec.get("permissionDecision") == "ask"
+    assert "push" in (spec.get("permissionDecisionReason") or "").lower()
+
+
+def test_deny_beats_ask_on_compound_command(tmp_db, monkeypatch, capsys):
+    # Mix an ask-tier leaf with a deny-tier leaf. Deny must win.
+    result = _run_hook(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm /tmp/x; dd if=/dev/zero of=/dev/sda"},
+        },
+        monkeypatch,
+        capsys,
+    )
+    spec = result.get("hookSpecificOutput") or {}
+    assert spec.get("permissionDecision") == "deny"
 
 
 def test_allow_fires_on_single_active_leaf(tmp_db, monkeypatch, capsys):
@@ -203,7 +239,7 @@ def test_deny_marks_pending_row_as_denied(tmp_db, monkeypatch, capsys):
     result = _run_hook(
         {
             "tool_name": "Bash",
-            "tool_input": {"command": "rm -rf /"},
+            "tool_input": {"command": "dd if=/dev/zero of=/dev/sda"},
             "tool_use_id": tool_use_id,
         },
         monkeypatch,
@@ -226,7 +262,7 @@ def test_deny_marks_pending_row_as_denied(tmp_db, monkeypatch, capsys):
 
 def test_deny_without_tool_use_id_still_denies(tmp_db, monkeypatch, capsys):
     result = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+        {"tool_name": "Bash", "tool_input": {"command": "dd if=/dev/zero of=/dev/sda"}},
         monkeypatch,
         capsys,
     )

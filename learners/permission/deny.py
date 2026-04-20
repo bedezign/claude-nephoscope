@@ -1,13 +1,16 @@
-"""Deny-list evaluation for canonicalized leaves.
+"""Permission evaluation for canonicalized leaves.
 
-Two-layer model:
+Three-valued outcome: ``"deny"`` (hard block), ``"ask"`` (user-confirmable),
+or ``None`` (no opinion — fall through to the learner's allowlist check).
 
-1. **Declarative** — ``config/deny.yaml`` lists denied verbs, verb+subcommand
-   pairs, and verb+flag-pattern pairs. Easy to extend without code changes.
-2. **Procedural** — ``is_denied`` also applies rules that are awkward to
-   express in YAML: the universal ``sudo`` ban, destructive redirections
-   into guarded system paths, and truncate-writes (``>``) that would
-   overwrite an existing regular file.
+Two configuration layers:
+
+1. **Declarative** — ``config/deny.yaml`` splits rules into ``denied_*``
+   (hard block) and ``ask_*`` (confirmable) tiers. Easy to extend without
+   code changes.
+2. **Procedural** — rules awkward to express in YAML: the universal
+   ``sudo`` ban, destructive redirections into guarded system paths
+   (hard deny), and truncate-writes (``>``) over existing files (ask).
 
 Appending (``>>``) is not denied on its own — it's typically log growth,
 not data destruction — unless the target sits under a guarded path.
@@ -25,7 +28,7 @@ from .canonicalize import CanonicalLeaf
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "deny.yaml"
 
-# Redirections into any of these prefixes are always denied, regardless
+# Redirections into any of these prefixes are always hard-denied, regardless
 # of whether the target currently exists. These are the paths whose
 # integrity we never want a learned pattern to be able to corrupt.
 _GUARDED_WRITE_PREFIXES: tuple[str, ...] = (
@@ -64,24 +67,26 @@ def _reset_cache() -> None:
     _cached_config = None
 
 
-def is_denied(leaf: CanonicalLeaf) -> tuple[bool, str | None]:
-    """Return ``(True, reason)`` if any deny rule fires, else ``(False, None)``.
+def evaluate(leaf: CanonicalLeaf) -> tuple[str | None, str | None]:
+    """Evaluate a leaf against the deny + ask tiers.
 
-    Rules are checked in order from cheapest to most expensive (filesystem
-    stat last) so common allow-paths stay fast.
+    Returns ``("deny", reason)`` for hard blocks, ``("ask", reason)`` for
+    user-confirmable operations, or ``(None, None)`` when no rule fires.
+    Deny is always checked before ask so a catastrophic pattern can never
+    be downgraded by an overlapping ask rule.
     """
     config = _load_config()
 
-    # 1. Procedural: sudo is never allowed.
-    if leaf.verb == "sudo":
-        return True, "verb 'sudo' is never auto-allowed"
+    # --- Hard deny tier ---
 
-    # 2. Declarative: denied verbs.
+    # Procedural: sudo is never allowed.
+    if leaf.verb == "sudo":
+        return "deny", "verb 'sudo' is never auto-allowed"
+
     denied_verbs = config.get("denied_verbs") or []
     if isinstance(denied_verbs, list) and leaf.verb in denied_verbs:
-        return True, f"verb '{leaf.verb}' is in deny list"
+        return "deny", f"verb '{leaf.verb}' is in deny list"
 
-    # 3. Declarative: denied verb+subcommand pairs.
     denied_subcommands = config.get("denied_subcommands") or {}
     if isinstance(denied_subcommands, dict):
         subs = denied_subcommands.get(leaf.verb) or []
@@ -90,49 +95,87 @@ def is_denied(leaf: CanonicalLeaf) -> tuple[bool, str | None]:
             and leaf.subcommand is not None
             and leaf.subcommand in subs
         ):
-            return True, f"subcommand '{leaf.verb} {leaf.subcommand}' is in deny list"
+            return (
+                "deny",
+                f"subcommand '{leaf.verb} {leaf.subcommand}' is in deny list",
+            )
 
-    # 4. Declarative: denied flag patterns for this verb.
     denied_flag_patterns = config.get("denied_flag_patterns") or {}
     if isinstance(denied_flag_patterns, dict):
         patterns = denied_flag_patterns.get(leaf.verb) or []
         if isinstance(patterns, list):
             for pattern in patterns:
                 if pattern in leaf.flags:
-                    return True, (
-                        f"flag '{pattern}' on '{leaf.verb}' is in deny list"
+                    return (
+                        "deny",
+                        f"flag '{pattern}' on '{leaf.verb}' is in deny list",
                     )
 
-    # 5. Procedural: redirection guards.
+    # Procedural: redirections into guarded system paths are hard-denied.
     for redir in leaf.redirections:
-        reason = _redirect_reason(redir.op, redir.target)
-        if reason is not None:
-            return True, reason
+        if redir.op in (">", ">>"):
+            for prefix in _GUARDED_WRITE_PREFIXES:
+                if redir.target.startswith(prefix):
+                    return (
+                        "deny",
+                        f"redirection '{redir.op} {redir.target}' targets guarded path",
+                    )
 
-    return False, None
+    # --- Ask tier ---
 
+    ask_verbs = config.get("ask_verbs") or []
+    if isinstance(ask_verbs, list) and leaf.verb in ask_verbs:
+        return "ask", f"verb '{leaf.verb}' needs confirmation"
 
-def _redirect_reason(op: str, target: str) -> str | None:
-    """Classify a redirection as denied or acceptable.
+    ask_subcommands = config.get("ask_subcommands") or {}
+    if isinstance(ask_subcommands, dict):
+        subs = ask_subcommands.get(leaf.verb) or []
+        if (
+            isinstance(subs, list)
+            and leaf.subcommand is not None
+            and leaf.subcommand in subs
+        ):
+            return (
+                "ask",
+                f"subcommand '{leaf.verb} {leaf.subcommand}' needs confirmation",
+            )
 
-    - Any write (``>`` or ``>>``) into a guarded prefix is denied.
-    - A truncate-write (``>``) over an existing regular file is denied.
-    - Append (``>>``) outside guarded paths is acceptable.
-    - Reads (``<``) and fd dups are acceptable.
-    """
-    if op in (">", ">>"):
-        for prefix in _GUARDED_WRITE_PREFIXES:
-            if target.startswith(prefix):
-                return f"redirection '{op} {target}' targets guarded path"
-    if op == ">":
-        try:
-            # Resolve symlinks so the stat reflects the ultimate target.
-            # os.path.isfile handles broken symlinks gracefully (returns False).
-            if os.path.isfile(target):
+    ask_flag_patterns = config.get("ask_flag_patterns") or {}
+    if isinstance(ask_flag_patterns, dict):
+        patterns = ask_flag_patterns.get(leaf.verb) or []
+        if isinstance(patterns, list):
+            for pattern in patterns:
+                if pattern in leaf.flags:
+                    return (
+                        "ask",
+                        f"flag '{pattern}' on '{leaf.verb}' needs confirmation",
+                    )
+
+    # Procedural: truncate over an existing file — user can confirm.
+    for redir in leaf.redirections:
+        if redir.op == ">":
+            try:
+                if os.path.isfile(redir.target):
+                    return (
+                        "ask",
+                        f"redirection '> {redir.target}' would overwrite existing file",
+                    )
+            except OSError:
                 return (
-                    f"redirection '> {target}' would overwrite existing file"
+                    "ask",
+                    f"redirection '> {redir.target}' could not be stat'd",
                 )
-        except OSError:
-            # Unreadable parent dirs etc. — treat as "cannot confirm safe".
-            return f"redirection '> {target}' could not be stat'd"
-    return None
+
+    return None, None
+
+
+def is_denied(leaf: CanonicalLeaf) -> tuple[bool, str | None]:
+    """Backward-compat wrapper: True iff ``evaluate()`` returns ``"deny"``.
+
+    Ask-tier matches return ``(False, None)`` — callers that only care about
+    hard blocks (e.g. the learner's candidate filter) keep their old semantics.
+    """
+    decision, reason = evaluate(leaf)
+    if decision == "deny":
+        return True, reason
+    return False, None

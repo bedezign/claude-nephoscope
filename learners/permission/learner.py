@@ -45,11 +45,11 @@ if __package__ in (None, ""):  # pragma: no cover - script-entry fallback
     from learners.permission import deny as _deny_mod
 
     parse_command = _canonicalize_mod.parse_command
-    is_denied = _deny_mod.is_denied
+    evaluate = _deny_mod.evaluate
     CanonicalLeaf = _canonicalize_mod.CanonicalLeaf
 else:
     from .canonicalize import CanonicalLeaf, parse_command
-    from .deny import is_denied
+    from .deny import evaluate
 
 
 CONSUMER_NAME = "permission-learner"
@@ -199,12 +199,13 @@ def scan_candidates(conn: sqlite3.Connection) -> int:
             continue
 
         for leaf_index, leaf in enumerate(leaves):
-            denied, _reason = is_denied(leaf)
-            if denied:
-                # Never promote denied shapes — also means we don't create a
-                # command_shape row or junction entry for them. The hook still
-                # evaluates the deny-list at runtime, so the shape registry
-                # doesn't need to know about them.
+            decision, _reason = evaluate(leaf)
+            if decision is not None:
+                # Skip deny AND ask tiers. Promoting an ask-tier shape would
+                # silently turn a user-confirmed call into an auto-allow,
+                # defeating the confirmation checkpoint. No command_shape
+                # row or junction entry is created — the hook re-evaluates
+                # rules at runtime, so the registry needn't know about them.
                 continue
 
             flags_json = db.minify_json(sorted(leaf.flags))
