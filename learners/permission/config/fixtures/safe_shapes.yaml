@@ -1,0 +1,73 @@
+# Permission-learner fixture.
+#
+# Captures every durable user judgment about command shapes. Two lists:
+#
+#   active:   shapes to auto-approve (-> permission_active)
+#   rejected: shapes to never re-propose (-> permission_rejected)
+#
+# Managed round-trip: apply with `python -m learners.permission.seed`,
+# regenerate with `python -m learners.permission.seed --export`. Export
+# overwrites this file deterministically (entries sorted by verb then
+# flags). Hand-edits survive only if you never run --export again.
+#
+# The permission hook's allow branch matches on (verb, subcommand, flags);
+# CONTENT_VERBS in canonicalize.py drops the first positional from the
+# shape, so `ls /foo` and `ls /bar` share the `verb: ls` shape here.
+#
+# Destructive flag combos (sed -i, find -delete, awk -i inplace, etc.)
+# are deliberately absent from `active`. Those still go through the normal
+# prompt (or can be added to `rejected` to suppress them from review).
+#
+# Entry schema (both lists):
+#   - verb: <str>            required
+#     flags: [<str>, ...]    optional; order-independent, sorted on import
+#     subcommand: <str>      optional; almost never set for CONTENT_VERBS
+#     source: manual|learner active only; defaults to 'manual'
+#     reason: <str>          rejected only; free-text note
+
+active:
+- {verb: cat}
+- {verb: echo}
+- {verb: grep}
+- verb: grep
+  flags: [-E]
+- verb: grep
+  flags: [-i]
+- verb: grep
+  flags: [-n]
+- verb: grep
+  flags: [-r]
+- verb: grep
+  flags: [-v]
+- verb: grep
+  flags: [-n, -r]
+- {verb: head}
+- verb: head
+  flags: ['-5']
+- verb: head
+  flags: ['-10']
+- verb: head
+  flags: ['-20']
+- verb: head
+  flags: ['-30']
+- verb: head
+  flags: ['-200']
+- {verb: ls}
+- verb: ls
+  flags: [-a, -l]
+- {verb: sort}
+- verb: sort
+  flags: [-u]
+- verb: tail
+  flags: ['-5']
+- verb: tail
+  flags: ['-10']
+- verb: tail
+  flags: ['-20']
+- verb: tail
+  flags: ['-30']
+- verb: tail
+  flags: ['-50']
+- verb: wc
+  flags: [-l]
+- {verb: whoami}

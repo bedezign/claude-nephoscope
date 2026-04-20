@@ -1,0 +1,14 @@
+# Permission learner thresholds.
+#
+# min_observations:       a candidate must be seen at least this many times
+#                         across the scanning window before promotion.
+# min_distinct_sessions:  observations must span at least this many sessions
+#                         — guards against "same session just looped 100x".
+# promotion_window_days:  reserved for future use; the scanner currently
+#                         processes all rows past its cursor but the value
+#                         is surfaced so Phase 4's review command can apply
+#                         a time filter without a schema change.
+
+min_observations = 5
+min_distinct_sessions = 2
+promotion_window_days = 30

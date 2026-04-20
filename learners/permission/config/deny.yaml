@@ -1,0 +1,82 @@
+# Declarative deny rules for the permission learner.
+#
+# Evaluated by learners/permission/deny.py alongside procedural rules.
+# The list is deliberately wider than "strict minimum" — we'd rather
+# prompt the user on an edge case than auto-allow something destructive.
+
+denied_verbs:
+  - rm
+  - mv
+  - dd
+  - chmod
+  - chown
+  - chgrp
+  - kill
+  - killall
+  - pkill
+  - shutdown
+  - reboot
+  - halt
+  - mkfs
+  - fdisk
+  - parted
+  - mount
+  - umount
+  - sudo
+  - su
+  - apt
+  - apt-get
+  - yay
+  - pacman
+  - dnf
+  - yum
+  - zypper
+  - brew
+  - snap
+  - flatpak
+
+denied_subcommands:
+  git:
+    - push
+    - reset        # reset --hard is the killer; deny all reset for now
+    - clean
+    - rebase       # interactive risk
+  docker:
+    - rm
+    - rmi
+    - system       # docker system prune, etc.
+    - volume       # destructive subcommands
+  systemctl:
+    - stop
+    - disable
+    - mask
+    - reboot
+    - poweroff
+  npm:
+    - install
+    - uninstall
+    - publish
+  pip:
+    - install
+    - uninstall
+  uv:
+    - publish
+  cargo:
+    - publish
+
+denied_flag_patterns:
+  git:
+    - "--force"
+    - "-f"
+    - "--hard"
+  rm:
+    - "-r"
+    - "-R"
+    - "--recursive"
+    - "-f"
+    - "--force"
+  curl:
+    - "--upload-file"
+    - "-T"
+  wget:
+    - "--post-file"
