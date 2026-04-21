@@ -16,6 +16,7 @@ once per test and set whatever columns still exist, so the suite passes
 in either schema state. Once v8 lands this helper is effectively
 post-v8-only (the legacy-column branch becomes unreachable).
 """
+
 from __future__ import annotations
 
 from lib.db import (
@@ -42,9 +43,8 @@ def _tool_call_columns(conn) -> set[str]:
 def _pcs_columns(conn) -> set[str]:
     """Return the live column names on ``permission_candidate_sessions``."""
     return {
-        row[1] for row in conn.execute(
-            "PRAGMA table_info(permission_candidate_sessions);"
-        )
+        row[1]
+        for row in conn.execute("PRAGMA table_info(permission_candidate_sessions);")
     }
 
 
@@ -79,14 +79,28 @@ def _insert_tool_call(
     cols = _tool_call_columns(conn)
     # Base column list — always present post-v2.
     names = [
-        "ts", "project_id", "ok", "command", "args_json",
-        "tool_use_id", "completed_ts", "status_id", "permission_mode_id",
+        "ts",
+        "project_id",
+        "ok",
+        "command",
+        "args_json",
+        "tool_use_id",
+        "completed_ts",
+        "status_id",
+        "permission_mode_id",
         "tool_id",
     ]
     values: list = [
-        now, project_id, 1, command, "{}",
-        f"use::{command}::{session_id}::{status}", now, status_id,
-        permission_mode_id, tool_id,
+        now,
+        project_id,
+        1,
+        command,
+        "{}",
+        f"use::{command}::{session_id}::{status}",
+        now,
+        status_id,
+        permission_mode_id,
+        tool_id,
     ]
 
     # Session FK column name flipped in v8: `session_id_new` (v7 staging
@@ -113,9 +127,7 @@ def _insert_tool_call(
         values.append(session_id)
 
     placeholders = ",".join(["?"] * len(names))
-    sql = (
-        f"INSERT INTO tool_calls ({', '.join(names)}) VALUES ({placeholders});"
-    )
+    sql = f"INSERT INTO tool_calls ({', '.join(names)}) VALUES ({placeholders});"
     cur = conn.execute(sql, values)
     return int(cur.lastrowid or 0)
 
@@ -270,18 +282,19 @@ def test_active_pattern_is_excluded_from_proposals(tmp_db):
         ("git", "status", _flags_json([])),
     ).fetchone()
     assert shape_id is not None
+    any_id = tmp_db.execute(
+        "SELECT id FROM tool_call_scopes WHERE name = 'any';"
+    ).fetchone()[0]
     tmp_db.execute(
         """
-        INSERT INTO permission_active(command_shape_id, promoted_at, source)
-        VALUES (?, '2026-04-20T00:00:00.000Z', 'manual');
+        INSERT INTO permission_active(command_shape_id, scope_id, promoted_at, source)
+        VALUES (?, ?, '2026-04-20T00:00:00.000Z', 'manual');
         """,
-        (shape_id[0],),
+        (shape_id[0], any_id),
     )
 
     promotions = learner.propose_promotions(tmp_db)
-    assert not any(
-        c.verb == "git" and c.subcommand == "status" for c in promotions
-    )
+    assert not any(c.verb == "git" and c.subcommand == "status" for c in promotions)
 
 
 def test_scan_advances_cursor(tmp_db):
@@ -601,9 +614,7 @@ def test_pending_status_rows_excluded_from_candidates(tmp_db):
 
 def test_err_status_rows_excluded_from_candidates(tmp_db):
     for _ in range(5):
-        _insert_tool_call(
-            tmp_db, command="git log", session_id="sess-A", status="err"
-        )
+        _insert_tool_call(tmp_db, command="git log", session_id="sess-A", status="err")
 
     processed = learner.scan_candidates(tmp_db)
     assert processed == 0
@@ -632,9 +643,7 @@ def test_tool_call_shapes_junction_populated_on_scan(tmp_db):
         _insert_tool_call(tmp_db, command="git status", session_id="sess-A")
     learner.scan_candidates(tmp_db)
 
-    count = tmp_db.execute(
-        "SELECT COUNT(*) FROM tool_call_shapes;"
-    ).fetchone()[0]
+    count = tmp_db.execute("SELECT COUNT(*) FROM tool_call_shapes;").fetchone()[0]
     assert count == 3
 
 
@@ -644,16 +653,12 @@ def test_multi_leaf_command_produces_multi_row_junction(tmp_db):
     # this stays honest if bashlex's parsing of ``;`` ever changes.
     leaves = learner.parse_command("git status; echo done")
     expected_leaves = len(leaves)
-    assert expected_leaves >= 2, (
-        "canonicalize should split `;` into at least 2 leaves"
-    )
+    assert expected_leaves >= 2, "canonicalize should split `;` into at least 2 leaves"
 
     _insert_tool_call(tmp_db, command="git status; echo done", session_id="sess-A")
     learner.scan_candidates(tmp_db)
 
-    count = tmp_db.execute(
-        "SELECT COUNT(*) FROM tool_call_shapes;"
-    ).fetchone()[0]
+    count = tmp_db.execute("SELECT COUNT(*) FROM tool_call_shapes;").fetchone()[0]
     assert count == expected_leaves
 
 
@@ -725,9 +730,7 @@ def test_scan_skips_when_bash_tool_unknown(tmp_db):
         )
 
     # Sanity: 'Bash' is not in the tools table.
-    bash_row = tmp_db.execute(
-        "SELECT id FROM tools WHERE name = 'Bash';"
-    ).fetchone()
+    bash_row = tmp_db.execute("SELECT id FROM tools WHERE name = 'Bash';").fetchone()
     assert bash_row is None
 
     processed = learner.scan_candidates(tmp_db)
@@ -788,7 +791,9 @@ def test_junction_session_id_matches_upserted_id(tmp_db):
 # ---------------------------------------------------------------------------
 
 
-def _shape_id(conn, verb: str, subcommand: str | None = None, flags: list[str] | None = None) -> int | None:
+def _shape_id(
+    conn, verb: str, subcommand: str | None = None, flags: list[str] | None = None
+) -> int | None:
     row = conn.execute(
         """
         SELECT id FROM command_shapes
@@ -799,13 +804,18 @@ def _shape_id(conn, verb: str, subcommand: str | None = None, flags: list[str] |
     return int(row[0]) if row else None
 
 
-def _reject_shape(conn, verb: str, subcommand: str | None = None, flags: list[str] | None = None) -> None:
+def _reject_shape(
+    conn, verb: str, subcommand: str | None = None, flags: list[str] | None = None
+) -> None:
     shape_id = _shape_id(conn, verb, subcommand, flags)
     assert shape_id is not None, "must scan before rejecting"
+    any_id = conn.execute(
+        "SELECT id FROM tool_call_scopes WHERE name = 'any';"
+    ).fetchone()[0]
     conn.execute(
         "INSERT OR REPLACE INTO permission_rejected "
-        "(command_shape_id, rejected_at, reason) VALUES (?, ?, NULL);",
-        (shape_id, "2026-04-20T10:00:00.000Z"),
+        "(command_shape_id, scope_id, rejected_at, reason) VALUES (?, ?, ?, NULL);",
+        (shape_id, any_id, "2026-04-20T10:00:00.000Z"),
     )
     conn.execute(
         "DELETE FROM permission_candidate_sessions WHERE command_shape_id=?;",
@@ -823,9 +833,7 @@ def test_rejected_shape_not_repopulated_on_rescan(tmp_db):
     # observing the same shape. The rejected row must not reappear in
     # permission_candidates no matter how often the learner re-scans.
     for i in range(3):
-        _insert_tool_call(
-            tmp_db, command="ls /tmp", session_id=f"sess-{i}"
-        )
+        _insert_tool_call(tmp_db, command="ls /tmp", session_id=f"sess-{i}")
     learner.scan_candidates(tmp_db)
     assert _candidate_row(tmp_db, "ls", None) is not None
 
@@ -835,9 +843,7 @@ def test_rejected_shape_not_repopulated_on_rescan(tmp_db):
     # Further observations — shape is still in tool_call_shapes history
     # but candidate must stay empty.
     for i in range(5):
-        _insert_tool_call(
-            tmp_db, command="ls /tmp", session_id=f"later-{i}"
-        )
+        _insert_tool_call(tmp_db, command="ls /tmp", session_id=f"later-{i}")
     learner.scan_candidates(tmp_db)
     assert _candidate_row(tmp_db, "ls", None) is None
 
@@ -856,16 +862,17 @@ def test_rejected_shape_excluded_from_propose(tmp_db):
     # rejection (e.g. race, direct DB poke), propose_promotions must still
     # exclude it.
     for i in range(6):
-        _insert_tool_call(
-            tmp_db, command="ls /tmp", session_id=f"sess-{i % 3}"
-        )
+        _insert_tool_call(tmp_db, command="ls /tmp", session_id=f"sess-{i % 3}")
     learner.scan_candidates(tmp_db)
     # Rejection without the candidate purge, to simulate the race.
     shape_id = _shape_id(tmp_db, "ls")
+    any_id = tmp_db.execute(
+        "SELECT id FROM tool_call_scopes WHERE name = 'any';"
+    ).fetchone()[0]
     tmp_db.execute(
         "INSERT INTO permission_rejected "
-        "(command_shape_id, rejected_at, reason) VALUES (?, ?, NULL);",
-        (shape_id, "2026-04-20T10:00:00.000Z"),
+        "(command_shape_id, scope_id, rejected_at, reason) VALUES (?, ?, ?, NULL);",
+        (shape_id, any_id, "2026-04-20T10:00:00.000Z"),
     )
     tmp_db.commit()
 

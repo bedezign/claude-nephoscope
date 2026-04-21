@@ -15,6 +15,7 @@ so the active-allowlist branch can be exercised without running the full
 learner scan. Shape fields must match the canonical form the learner would
 produce (minified flags JSON, sorted) — see ``_flags_json``.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -45,12 +46,15 @@ def _insert_active(conn, verb: str, subcommand: str | None, flags: list[str]) ->
         (verb, subcommand, _flags_json(flags), ts, ts),
     )
     shape_id = int(cur.lastrowid or 0)
+    any_id = conn.execute(
+        "SELECT id FROM tool_call_scopes WHERE name = 'any';"
+    ).fetchone()[0]
     conn.execute(
         """
-        INSERT INTO permission_active(command_shape_id, promoted_at, source)
-        VALUES (?, ?, 'manual');
+        INSERT INTO permission_active(command_shape_id, scope_id, promoted_at, source)
+        VALUES (?, ?, ?, 'manual');
         """,
-        (shape_id, ts),
+        (shape_id, any_id, ts),
     )
     return shape_id
 
@@ -82,9 +86,7 @@ def test_non_bash_tool_falls_through(tmp_db, monkeypatch, capsys):
 
 def test_empty_command_falls_through(tmp_db, monkeypatch, capsys):
     # Missing command key — tool_input is the empty dict.
-    result = _run_hook(
-        {"tool_name": "Bash", "tool_input": {}}, monkeypatch, capsys
-    )
+    result = _run_hook({"tool_name": "Bash", "tool_input": {}}, monkeypatch, capsys)
     assert result == {}
     # Whitespace-only command.
     result2 = _run_hook(
@@ -223,9 +225,7 @@ def test_deny_marks_pending_row_as_denied(tmp_db, monkeypatch, capsys):
     pending_id = tmp_db.execute(
         "SELECT id FROM call_statuses WHERE name='pending';"
     ).fetchone()[0]
-    cur = tmp_db.execute(
-        "INSERT INTO tools (name) VALUES ('Bash') RETURNING id;"
-    )
+    cur = tmp_db.execute("INSERT INTO tools (name) VALUES ('Bash') RETURNING id;")
     tool_id = int(cur.fetchone()[0])
     tmp_db.execute(
         """

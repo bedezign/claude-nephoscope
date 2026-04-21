@@ -23,6 +23,7 @@ Design notes
   the caller treats that as "fall through to the user prompt" — the command
   will not be auto-allowed, but it will not be blocked either.
 """
+
 from __future__ import annotations
 
 import re
@@ -34,12 +35,18 @@ import bashlex.ast
 import bashlex.errors
 
 
+# Purely-numeric flag tokens (single dash, one or more digits) collapse to the
+# sentinel ``-<N>`` so numeric variants like ``head -40`` and ``head -100``
+# canonicalize identically. This keeps numeric arguments distinct from real flag
+# tokens that happen to be letters (e.g. ``wget -N``, ``ssh -N``, ``ls -N``).
+_NUMERIC_FLAG_RE = re.compile(r"^-\d+$")
+
 # Pure-letter POSIX short-flag cluster: single dash, two or more ASCII letters,
 # no `=`, no digits. We split these into per-letter flags so that ``rm -rf`` and
 # ``rm -r -f`` canonicalize identically and so per-flag deny patterns can match
 # (e.g. ``-f`` inside ``-rf``). Conservative on purpose: we never split tokens
-# with digits (``-10``, ``-O3``), mixed-case optimization flags (``-Wall``),
-# long flags (``--force``), or value-bearing forms (``-f=value``).
+# with letters+digits (``-O3``, ``-j4``), long flags (``--force``), or value-bearing
+# forms (``-f=value``). Purely-numeric tokens are handled by ``_NUMERIC_FLAG_RE`` above.
 #
 # This assumes POSIX cluster convention. It works for ``tar -xvf`` (clustered
 # shorts) and ``find`` (mixed, but ``find`` flags mostly don't cluster under a
@@ -53,16 +60,18 @@ _SHORT_FLAG_CLUSTER_RE = re.compile(r"^-[A-Za-z]{2,}$")
 _SUBSTITUTION_PREFIXES: tuple[str, ...] = ("<(", ">(", "$(")
 
 
-TASK_RUNNERS: frozenset[tuple[str, ...]] = frozenset({
-    ("npm", "run"),
-    ("pnpm", "run"),
-    ("yarn", "run"),
-    ("pdm", "run"),
-    ("uv", "run"),
-    ("cargo", "run"),
-    ("make",),
-    ("just",),
-})
+TASK_RUNNERS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("npm", "run"),
+        ("pnpm", "run"),
+        ("yarn", "run"),
+        ("pdm", "run"),
+        ("uv", "run"),
+        ("cargo", "run"),
+        ("make",),
+        ("just",),
+    }
+)
 
 # Verbs whose first positional argument is content (a path, pattern, message,
 # file, or script body) rather than a subcommand. For these, ``_resolve_sub-
@@ -73,23 +82,72 @@ TASK_RUNNERS: frozenset[tuple[str, ...]] = frozenset({
 # Destructive potential (``sed -i``, ``find -delete``, ``awk -i inplace``)
 # lives in flags, which are still captured — the deny-list can target those
 # flag combinations independently.
-CONTENT_VERBS: frozenset[str] = frozenset({
-    # Display / print
-    "echo", "printf",
-    # Read & filter text
-    "cat", "head", "tail", "grep", "egrep", "fgrep", "zgrep",
-    "wc", "sort", "uniq", "tr", "cut", "tac", "paste",
-    # Script-arg text processors
-    "sed", "awk",
-    # List / query filesystem & processes
-    "ls", "find", "ps", "df", "du", "free", "pwd",
-    # Inspect files
-    "stat", "file", "readlink", "realpath",
-    # Resolve names
-    "which", "type", "command", "whereis", "basename", "dirname",
-    # System info
-    "date", "uname", "uptime", "whoami", "hostname", "id", "groups",
-})
+CONTENT_VERBS: frozenset[str] = frozenset(
+    {
+        # Display / print
+        "echo",
+        "printf",
+        # Read & filter text
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "egrep",
+        "fgrep",
+        "zgrep",
+        "wc",
+        "sort",
+        "uniq",
+        "tr",
+        "cut",
+        "tac",
+        "paste",
+        # Script-arg text processors
+        "sed",
+        "awk",
+        # List / query filesystem & processes
+        "ls",
+        "find",
+        "ps",
+        "df",
+        "du",
+        "free",
+        "pwd",
+        # Inspect files
+        "stat",
+        "file",
+        "readlink",
+        "realpath",
+        # Resolve names
+        "which",
+        "type",
+        "command",
+        "whereis",
+        "basename",
+        "dirname",
+        # System info
+        "date",
+        "uname",
+        "uptime",
+        "whoami",
+        "hostname",
+        "id",
+        "groups",
+        # File ops — first positional is a path, not a subcommand. Adding these
+        # collapses ``rm /a`` / ``rm /b`` / ``rm /c`` into one shape keyed on
+        # (rm, None, flags) and lets the scope classifier see all paths.
+        "rm",
+        "mv",
+        "cp",
+        "ln",
+        "touch",
+        "mkdir",
+        "rmdir",
+        "chmod",
+        "chown",
+        "chgrp",
+    }
+)
 
 # Redirections we consider uninteresting for deny-list evaluation.
 # "2>&1" has no file target; "> /dev/null" and ">> /dev/null" are harmless.
@@ -111,13 +169,21 @@ class Redirection:
 
 @dataclass(frozen=True)
 class CanonicalLeaf:
-    """One leaf command canonicalized into its pattern shape."""
+    """One leaf command canonicalized into its pattern shape.
+
+    ``positional_paths`` carries the path-looking positional arguments
+    (anything not a flag, not a known subcommand, not a substitution
+    expression). The scope module uses these to classify the leaf against
+    the session's project root. They are NOT part of the canonical shape
+    — shapes stay keyed on (verb, subcommand, flags).
+    """
 
     verb: str
     subcommand: str | None
     flags: frozenset[str]
     redirections: tuple[Redirection, ...]
     raw_leaf: str
+    positional_paths: tuple[str, ...] = ()
 
 
 def parse_command(raw: str) -> list[CanonicalLeaf]:
@@ -198,6 +264,7 @@ def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
 
     subcommand, positional_start = _resolve_subcommand(verb, words)
     flags = _collect_flags(words[positional_start:])
+    positional_paths = _collect_positional_paths(words[positional_start:])
     redirections = tuple(_canonical_redirections(redirects))
     raw_leaf = _raw_leaf(node)
 
@@ -208,6 +275,7 @@ def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
             flags=flags,
             redirections=redirections,
             raw_leaf=raw_leaf,
+            positional_paths=positional_paths,
         )
     )
 
@@ -228,7 +296,9 @@ def _word_literal(word_node: bashlex.ast.node) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _resolve_subcommand(verb: str, words: list[bashlex.ast.node]) -> tuple[str | None, int]:
+def _resolve_subcommand(
+    verb: str, words: list[bashlex.ast.node]
+) -> tuple[str | None, int]:
     """Pick a subcommand and report how many positional words to skip.
 
     Returns ``(subcommand, positional_start_index)`` where
@@ -241,12 +311,20 @@ def _resolve_subcommand(verb: str, words: list[bashlex.ast.node]) -> tuple[str |
         second = _word_literal(words[1])
         if (verb, second) in TASK_RUNNERS and len(words) >= 3:
             target = _word_literal(words[2])
-            if target and not target.startswith("-") and not target.startswith(_SUBSTITUTION_PREFIXES):
+            if (
+                target
+                and not target.startswith("-")
+                and not target.startswith(_SUBSTITUTION_PREFIXES)
+            ):
                 return target, 3
             return None, 2
     if (verb,) in TASK_RUNNERS and len(words) >= 2:
         target = _word_literal(words[1])
-        if target and not target.startswith("-") and not target.startswith(_SUBSTITUTION_PREFIXES):
+        if (
+            target
+            and not target.startswith("-")
+            and not target.startswith(_SUBSTITUTION_PREFIXES)
+        ):
             return target, 2
         return None, 1
 
@@ -279,6 +357,9 @@ def _collect_flags(words: Iterable[bashlex.ast.node]) -> frozenset[str]:
     POSIX short-flag clusters (``-rf``, ``-la``, ``-xvf``) are split into
     per-letter flags so ``rm -rf`` and ``rm -r -f`` produce the same shape
     and per-flag deny patterns can match clustered forms.
+
+    Purely-numeric flag tokens (``-10``, ``-40``, ``-100``) collapse to the
+    sentinel ``-<N>`` so numeric variants canonicalize identically.
     """
     out: set[str] = set()
     for word in words:
@@ -296,6 +377,9 @@ def _collect_flags(words: Iterable[bashlex.ast.node]) -> frozenset[str]:
         if "=" in literal:
             out.add(literal.split("=", 1)[0])
             continue
+        if _NUMERIC_FLAG_RE.match(literal):
+            out.add("-<N>")
+            continue
         if _SHORT_FLAG_CLUSTER_RE.match(literal):
             # Pure-letter POSIX cluster: split each letter into its own flag.
             for ch in literal[1:]:
@@ -303,6 +387,33 @@ def _collect_flags(words: Iterable[bashlex.ast.node]) -> frozenset[str]:
             continue
         out.add(literal)
     return frozenset(out)
+
+
+def _collect_positional_paths(words: Iterable[bashlex.ast.node]) -> tuple[str, ...]:
+    """Return positional args that look like paths — for scope classification.
+
+    Skips flags, flag-values-that-happen-to-be-adjacent (we don't know which
+    flags take values without a command database), substitution expressions
+    (``$(...)``, ``<(...)``, ``>(...)``), and empty strings. The output is
+    the set of literal tokens the caller will feed into ``classify_paths``.
+
+    Conservative: any token that isn't clearly a flag or substitution ends
+    up here, including URLs, hostnames, and non-filesystem args. That's OK
+    — ``classify_paths`` resolves each to an absolute filesystem path; a
+    URL resolves outside the project root and contributes to ``mixed`` /
+    ``outside_project``, which is the safe default.
+    """
+    out: list[str] = []
+    for word in words:
+        literal = _word_literal(word)
+        if not literal:
+            continue
+        if literal.startswith("-"):
+            continue
+        if literal.startswith(_SUBSTITUTION_PREFIXES):
+            continue
+        out.append(literal)
+    return tuple(out)
 
 
 def _canonical_redirections(redirects: list[bashlex.ast.node]) -> list[Redirection]:

@@ -34,6 +34,7 @@ tables (``tools``, ``subagent_types``, ``file_paths``) and the INTEGER-PK
 ``sessions`` table. The recorder writes only the FK columns; v8 drops
 the legacy TEXT columns entirely.
 """
+
 from __future__ import annotations
 
 import json
@@ -52,15 +53,23 @@ from lib.db import (  # noqa: E402
     _truncate,
     _upsert_project,
     _upsert_session,
+    drop_pending,
     lookup_or_insert_file_path_id,
     lookup_or_insert_subagent_type_id,
     lookup_or_insert_tool_id,
     lookup_permission_mode_id,
+    lookup_scope_id,
     lookup_status_id,
     minify_json,
+    promote_pending_to_session_approval,
     set_session_transcript_path,
     write_extra,
 )
+from lib.scope import (  # noqa: E402
+    classify_paths,
+    paths_for_tool_call,
+)
+from learners.permission.canonicalize import parse_command  # noqa: E402
 
 # Truncation caps for the two sidecar blobs. Values are generous enough to
 # keep most real payloads intact but cheap on disk per row.
@@ -131,6 +140,25 @@ def _safe_minify(value: Any) -> str:
         return str(value)
 
 
+def _collect_paths(tool: str, tool_input: dict[str, Any]) -> list[str]:
+    """Assemble the path-like inputs for a tool call.
+
+    Bash paths come from canonicalizing the command; everything else has
+    declarative path fields handled by ``paths_for_tool_call``. Returning
+    a list (not a scope name) lets the caller classify once it has the
+    project root.
+    """
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return []
+        out: list[str] = []
+        for leaf in parse_command(command):
+            out.extend(leaf.positional_paths)
+        return out
+    return paths_for_tool_call(tool, tool_input)
+
+
 def _handle(phase: str, data: dict[str, Any]) -> None:
     tool = data.get("tool_name") or data.get("tool") or "unknown"
     tool_input = data.get("tool_input") or data.get("input") or {}
@@ -144,6 +172,7 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         tool_use_id = _synthetic_use_id(session_id, tool, now)
 
     flat = _flatten(tool, tool_input)
+    path_inputs = _collect_paths(tool, tool_input)
 
     conn = _open()
     try:
@@ -155,15 +184,26 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         if project_id is not None and session_id != "unknown":
             session_id_int = _upsert_session(conn, session_id, project_id, now)
 
+        # Classify the call's paths against the project root (v11+). This
+        # happens after the project upsert so we have the (possibly
+        # lazy-backfilled) root on hand. Rows for sessions without a project
+        # get NULL scope_id — no baseline to classify against.
+        scope_id: int | None = None
+        if project_id is not None:
+            root_row = conn.execute(
+                "SELECT root FROM projects WHERE id = ?;", (project_id,)
+            ).fetchone()
+            project_root = root_row[0] if root_row is not None else None
+            scope_name = classify_paths(path_inputs, project_root)
+            scope_id = lookup_scope_id(conn, scope_name)
+
         # Resolve the FK lookup ids for the normalized columns. These replace
         # the legacy TEXT writes — v8 dropped the source columns entirely.
         tool_id = lookup_or_insert_tool_id(conn, tool)
         subagent_type_id = lookup_or_insert_subagent_type_id(
             conn, flat.get("subagent_type")
         )
-        file_path_id = lookup_or_insert_file_path_id(
-            conn, flat.get("file_path"), now
-        )
+        file_path_id = lookup_or_insert_file_path_id(conn, flat.get("file_path"), now)
 
         if phase == "pre":
             # permission_mode_id — lookup returns None for missing/unknown,
@@ -180,8 +220,8 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                    command, pattern, description,
                    args_json, tool_use_id, completed_ts,
                    permission_mode_id, status_id,
-                   tool_id, subagent_type_id, file_path_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?);
+                   tool_id, subagent_type_id, file_path_id, scope_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     now,
@@ -198,6 +238,7 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                     tool_id,
                     subagent_type_id,
                     file_path_id,
+                    scope_id,
                 ),
             )
             tool_call_id = int(cur.lastrowid or 0)
@@ -212,9 +253,7 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
             # keys on sessions.id (INTEGER), so pass the resolved int id.
             transcript_path = data.get("transcript_path")
             if transcript_path and session_id_int is not None:
-                set_session_transcript_path(
-                    conn, session_id_int, transcript_path
-                )
+                set_session_transcript_path(conn, session_id_int, transcript_path)
             return
 
         # -- post phase --------------------------------------------------
@@ -250,8 +289,8 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                   (ts, session_id, project_id, ok,
                    command, pattern, description,
                    args_json, tool_use_id, completed_ts, status_id,
-                   tool_id, subagent_type_id, file_path_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                   tool_id, subagent_type_id, file_path_id, scope_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     now,
@@ -268,6 +307,7 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                     tool_id,
                     subagent_type_id,
                     file_path_id,
+                    scope_id,
                 ),
             )
             tool_call_id = int(cur.lastrowid or 0)
@@ -277,6 +317,18 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         if tool_response and tool_call_id > 0:
             response_blob = _safe_minify(tool_response)[:RESPONSE_MAX]
             write_extra(conn, tool_call_id, "response", response_blob)
+
+        # v12: resolve any pending ask-rows for this tool_use_id. On ok,
+        # promote into permission_session_approvals; on err, just drop.
+        # Synthetic tool_use_ids (from payloads without one) would also
+        # land here — they won't match any pending row since the hook's
+        # lookup was keyed on the same id, so the INSERT was tied to the
+        # real id seen on Pre.
+        if isinstance(tool_use_id, str) and tool_use_id:
+            if status_id == lookup_status_id(conn, "ok"):
+                promote_pending_to_session_approval(conn, tool_use_id, now)
+            else:
+                drop_pending(conn, tool_use_id)
     finally:
         conn.close()
 

@@ -18,6 +18,7 @@ command_shapes. Re-running adds nothing once the table matches.
 Export overwrites the fixture file deterministically — entries are sorted
 by (verb, subcommand, flags) so diffs are stable across runs.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -116,6 +117,16 @@ def apply_fixture(
     Caller using the legacy two-tuple shape can still ignore the rejected key.
     """
     now = _now()
+
+    def _resolve_scope(entry: dict) -> int:
+        name = entry.get("scope") or "any"
+        row = conn.execute(
+            "SELECT id FROM tool_call_scopes WHERE name = ?;", (name,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown scope {name!r} in {entry!r}")
+        return int(row[0])
+
     a_inserted = a_existed = 0
     for entry in active:
         verb = _validate_verb(entry)
@@ -125,10 +136,12 @@ def apply_fixture(
         if source not in ("manual", "learner"):
             raise ValueError(f"invalid source {source!r} in {entry!r}")
         shape_id = upsert_command_shape(conn, verb, subcommand, flags_json, now)
+        scope_id = _resolve_scope(entry)
         cur = conn.execute(
             "INSERT OR IGNORE INTO permission_active "
-            "(command_shape_id, promoted_at, source) VALUES (?, ?, ?);",
-            (shape_id, now, source),
+            "(command_shape_id, scope_id, promoted_at, source) "
+            "VALUES (?, ?, ?, ?);",
+            (shape_id, scope_id, now, source),
         )
         if cur.rowcount:
             a_inserted += 1
@@ -142,10 +155,12 @@ def apply_fixture(
         flags_json = _flags_key(entry.get("flags"))
         reason = entry.get("reason")
         shape_id = upsert_command_shape(conn, verb, subcommand, flags_json, now)
+        scope_id = _resolve_scope(entry)
         cur = conn.execute(
             "INSERT OR IGNORE INTO permission_rejected "
-            "(command_shape_id, rejected_at, reason) VALUES (?, ?, ?);",
-            (shape_id, now, reason),
+            "(command_shape_id, scope_id, rejected_at, reason) "
+            "VALUES (?, ?, ?, ?);",
+            (shape_id, scope_id, now, reason),
         )
         if cur.rowcount:
             r_inserted += 1
@@ -173,25 +188,29 @@ def _parse_flags(flags_text: str | None) -> list[str]:
 
 
 def export_shapes(conn) -> list[dict[str, Any]]:
-    """Read permission_active JOINed with command_shapes, return fixture entries."""
+    """Read permission_active JOINed with command_shapes + scope name."""
     rows = conn.execute(
         """
-        SELECT cs.verb, cs.subcommand, cs.flags, pa.source
+        SELECT cs.verb, cs.subcommand, cs.flags, sc.name, pa.source
           FROM permission_active pa
-          JOIN command_shapes cs ON cs.id = pa.command_shape_id
+          JOIN command_shapes cs     ON cs.id = pa.command_shape_id
+          JOIN tool_call_scopes sc   ON sc.id = pa.scope_id
          ORDER BY cs.verb, IFNULL(cs.subcommand, ''),
-                  LENGTH(cs.flags), cs.flags;
+                  LENGTH(cs.flags), cs.flags, sc.name;
         """
     ).fetchall()
 
     shapes: list[dict[str, Any]] = []
-    for verb, subcommand, flags_text, source in rows:
+    for verb, subcommand, flags_text, scope, source in rows:
         entry: dict[str, Any] = {"verb": verb}
         if subcommand is not None:
             entry["subcommand"] = subcommand
         flags = _parse_flags(flags_text)
         if flags:
             entry["flags"] = flags
+        # Only write scope when non-default — keeps legacy fixtures clean.
+        if scope and scope != "any":
+            entry["scope"] = scope
         # Only write source when it's non-default — keeps manual entries clean.
         if source and source != "manual":
             entry["source"] = source
@@ -200,25 +219,28 @@ def export_shapes(conn) -> list[dict[str, Any]]:
 
 
 def export_rejected(conn) -> list[dict[str, Any]]:
-    """Read permission_rejected JOINed with command_shapes."""
+    """Read permission_rejected JOINed with command_shapes + scope name."""
     rows = conn.execute(
         """
-        SELECT cs.verb, cs.subcommand, cs.flags, r.reason
+        SELECT cs.verb, cs.subcommand, cs.flags, sc.name, r.reason
           FROM permission_rejected r
-          JOIN command_shapes cs ON cs.id = r.command_shape_id
+          JOIN command_shapes cs     ON cs.id = r.command_shape_id
+          JOIN tool_call_scopes sc   ON sc.id = r.scope_id
          ORDER BY cs.verb, IFNULL(cs.subcommand, ''),
-                  LENGTH(cs.flags), cs.flags;
+                  LENGTH(cs.flags), cs.flags, sc.name;
         """
     ).fetchall()
 
     out: list[dict[str, Any]] = []
-    for verb, subcommand, flags_text, reason in rows:
+    for verb, subcommand, flags_text, scope, reason in rows:
         entry: dict[str, Any] = {"verb": verb}
         if subcommand is not None:
             entry["subcommand"] = subcommand
         flags = _parse_flags(flags_text)
         if flags:
             entry["flags"] = flags
+        if scope and scope != "any":
+            entry["scope"] = scope
         if reason:
             entry["reason"] = reason
         out.append(entry)
@@ -265,8 +287,12 @@ def _do_apply() -> int:
     a_ins, a_exi = counts["active"]
     r_ins, r_exi = counts["rejected"]
     print(f"fixture: {len(active)} active, {len(rejected)} rejected")
-    print(f"active   → inserted {a_ins}, already present {a_exi} (total {total_active})")
-    print(f"rejected → inserted {r_ins}, already present {r_exi} (total {total_rejected})")
+    print(
+        f"active   → inserted {a_ins}, already present {a_exi} (total {total_active})"
+    )
+    print(
+        f"rejected → inserted {r_ins}, already present {r_exi} (total {total_rejected})"
+    )
     return 0
 
 
@@ -278,9 +304,7 @@ def _do_export() -> int:
     finally:
         conn.close()
     write_fixture(active, rejected)
-    print(
-        f"exported {len(active)} active + {len(rejected)} rejected → {FIXTURE_PATH}"
-    )
+    print(f"exported {len(active)} active + {len(rejected)} rejected → {FIXTURE_PATH}")
     return 0
 
 

@@ -40,14 +40,6 @@ Speculative items captured during design discussions. Not commitments. Each entr
 
 **Trigger to act:** Specific need to query across both eras (e.g. "show me my tool usage patterns over the last 6 months" before the new DB has 6 months of history).
 
-## Retire continuous-learning-v2's observe.sh
-
-**What:** Stop the parallel-running CL-v2 observer; point CL-v2's analyzer at the new DB as a consumer (cursor-based).
-
-**Why deferred:** Parallel run is the safety net. Once we trust the new module fully, we can collapse to one source.
-
-**Trigger to act:** A few weeks of stable operation on the new DB + Phase 4 wired and observed without surprises.
-
 ## "Find all rm -rf actions" query convenience
 
 **What:** A command/skill that wraps the M2M (`tool_call_shapes`) into ergonomic queries: "show me every tool call that included shape X", "which sessions touched verb Y", "diff command shape distribution between two date ranges".

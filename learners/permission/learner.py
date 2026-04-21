@@ -18,6 +18,7 @@ render the verb/subcommand/flags fields.
 A separate ``review`` UX (Phase 4, not wired here) consumes
 :func:`propose_promotions` to offer confirmations.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,7 +49,7 @@ if __package__ in (None, ""):  # pragma: no cover - script-entry fallback
     evaluate = _deny_mod.evaluate
     CanonicalLeaf = _canonicalize_mod.CanonicalLeaf
 else:
-    from .canonicalize import CanonicalLeaf, parse_command
+    from .canonicalize import parse_command
     from .deny import evaluate
 
 
@@ -321,19 +322,27 @@ def _upsert_candidate_session(
 
 
 def _is_rejected(conn: sqlite3.Connection, shape_id: int) -> bool:
-    """True if the user has previously declined to promote this shape."""
+    """True if the user has a scope=any (blanket) rejection on this shape.
+
+    Scope-qualified rejections (e.g. "rm outside_project") don't disqualify
+    the shape from candidacy — only a blanket ``any`` rejection does. The
+    runtime hook still respects scope-qualified rejections at call time via
+    ``permission_rejected`` lookups.
+    """
     return (
         conn.execute(
-            "SELECT 1 FROM permission_rejected WHERE command_shape_id = ?;",
+            """
+            SELECT 1 FROM permission_rejected
+             WHERE command_shape_id = ?
+               AND scope_id = (SELECT id FROM tool_call_scopes WHERE name = 'any');
+            """,
             (shape_id,),
         ).fetchone()
         is not None
     )
 
 
-def _refresh_distinct_sessions(
-    conn: sqlite3.Connection, *, shape_id: int
-) -> None:
+def _refresh_distinct_sessions(conn: sqlite3.Connection, *, shape_id: int) -> None:
     """Recompute the stored distinct_sessions column from the junction."""
     row = conn.execute(
         """
@@ -376,14 +385,22 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
     ``command_shape_id`` to exclude already-promoted shapes.
     """
     thresholds = load_thresholds()
+    # Exclude shapes already covered by a scope=any active or rejected
+    # rule. Scope-qualified rules don't block proposal — the user may
+    # want to promote the shape for a different scope. ``review.sh``
+    # chooses the target scope at promotion time.
     rows = conn.execute(
         """
         SELECT cs.verb, cs.subcommand, cs.flags,
                c.observations, c.distinct_sessions
           FROM permission_candidates c
           JOIN command_shapes cs ON cs.id = c.command_shape_id
-     LEFT JOIN permission_active a ON a.command_shape_id = c.command_shape_id
-     LEFT JOIN permission_rejected r ON r.command_shape_id = c.command_shape_id
+     LEFT JOIN permission_active a
+            ON a.command_shape_id = c.command_shape_id
+           AND a.scope_id = (SELECT id FROM tool_call_scopes WHERE name = 'any')
+     LEFT JOIN permission_rejected r
+            ON r.command_shape_id = c.command_shape_id
+           AND r.scope_id = (SELECT id FROM tool_call_scopes WHERE name = 'any')
          WHERE a.command_shape_id IS NULL
            AND r.command_shape_id IS NULL
            AND c.observations >= ?
@@ -509,7 +526,7 @@ def _parse_flags_arg(raw: str | None) -> str:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError) as exc:
         raise SystemExit(
-            f"error: --flags must be a JSON array literal (e.g. '[\"-a\",\"-l\"]'): {exc}"
+            f'error: --flags must be a JSON array literal (e.g. \'["-a","-l"]\'): {exc}'
         )
     if not isinstance(parsed, list):
         raise SystemExit("error: --flags must be a JSON array literal, e.g. '[]'")
@@ -545,12 +562,27 @@ def _format_cli_flags(flags_json: str) -> str:
         return flags_json
 
 
-def _cmd_promote(args: argparse.Namespace) -> int:
-    """Promote a candidate (by shape tuple) into ``permission_active``.
+def _resolve_scope_id_arg(conn: sqlite3.Connection, scope_name: str | None) -> int:
+    """Map a CLI ``--scope`` value to its id; defaults to 'any'."""
+    name = scope_name or "any"
+    row = conn.execute(
+        "SELECT id FROM tool_call_scopes WHERE name = ?;", (name,)
+    ).fetchone()
+    if row is None:
+        raise SystemExit(
+            f"error: unknown scope {name!r}; expected one of "
+            "within_project, outside_project, mixed, no_path, any"
+        )
+    return int(row[0])
 
-    ``INSERT OR IGNORE`` so re-promoting is idempotent. Does NOT delete the
-    candidate row — the ``propose_promotions`` view LEFT-JOINs through
-    ``permission_active`` and will stop surfacing it once it's active.
+
+def _cmd_promote(args: argparse.Namespace) -> int:
+    """Promote a shape into ``permission_active`` for a given scope.
+
+    ``INSERT OR IGNORE`` so re-promoting is idempotent; the (shape, scope)
+    PK means multiple scope-qualified entries can coexist for the same
+    shape (e.g. ``rm within_project`` and ``rm outside_project`` as two
+    rows). Default scope is ``any`` — matches any call scope at runtime.
     """
     flags_json = _parse_flags_arg(args.flags)
     conn = _connect()
@@ -563,13 +595,14 @@ def _cmd_promote(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        scope_id = _resolve_scope_id_arg(conn, args.scope)
         conn.execute(
             """
             INSERT OR IGNORE INTO permission_active
-              (command_shape_id, promoted_at, source)
-            VALUES (?, ?, 'manual');
+              (command_shape_id, scope_id, promoted_at, source)
+            VALUES (?, ?, ?, 'manual');
             """,
-            (shape_id, _now()),
+            (shape_id, scope_id, _now()),
         )
     finally:
         conn.close()
@@ -577,6 +610,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     sub = args.subcommand or "-"
     print(
         f"promoted: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
+        f" scope={args.scope or 'any'}"
     )
     return 0
 
@@ -604,32 +638,47 @@ def _cmd_reject(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        scope_id = _resolve_scope_id_arg(conn, args.scope)
         conn.execute(
             """
             INSERT OR REPLACE INTO permission_rejected
-              (command_shape_id, rejected_at, reason)
-            VALUES (?, ?, ?);
+              (command_shape_id, scope_id, rejected_at, reason)
+            VALUES (?, ?, ?, ?);
             """,
-            (shape_id, _now(), args.reason),
+            (shape_id, scope_id, _now(), args.reason),
         )
-        session_cur = conn.execute(
-            "DELETE FROM permission_candidate_sessions WHERE command_shape_id = ?;",
-            (shape_id,),
-        )
-        session_rows = session_cur.rowcount or 0
-        cand_cur = conn.execute(
-            "DELETE FROM permission_candidates WHERE command_shape_id = ?;",
-            (shape_id,),
-        )
-        cand_rows = cand_cur.rowcount or 0
+        # Purge the candidate only when the rejection is scope=any — a
+        # scope-qualified rejection doesn't erase the shape's candidacy
+        # for other scopes. The propose query excludes already-rejected
+        # matches per-scope naturally.
+        any_id = _resolve_scope_id_arg(conn, "any")
+        cand_rows = 0
+        session_rows = 0
+        if scope_id == any_id:
+            session_cur = conn.execute(
+                "DELETE FROM permission_candidate_sessions WHERE command_shape_id = ?;",
+                (shape_id,),
+            )
+            session_rows = session_cur.rowcount or 0
+            cand_cur = conn.execute(
+                "DELETE FROM permission_candidates WHERE command_shape_id = ?;",
+                (shape_id,),
+            )
+            cand_rows = cand_cur.rowcount or 0
     finally:
         conn.close()
 
     sub = args.subcommand or "-"
     reason_part = f" reason={args.reason!r}" if args.reason else ""
+    scope_name = args.scope or "any"
+    purge_part = (
+        f" (purged {cand_rows} candidate, {session_rows} session row(s))"
+        if scope_name == "any"
+        else ""
+    )
     print(
         f"rejected: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f"{reason_part} (purged {cand_rows} candidate, {session_rows} session row(s))"
+        f" scope={scope_name}{reason_part}{purge_part}"
     )
     return 0
 
@@ -651,23 +700,28 @@ def _cmd_unreject(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        scope_id = _resolve_scope_id_arg(conn, args.scope)
         cur = conn.execute(
-            "DELETE FROM permission_rejected WHERE command_shape_id = ?;",
-            (shape_id,),
+            "DELETE FROM permission_rejected"
+            " WHERE command_shape_id = ? AND scope_id = ?;",
+            (shape_id, scope_id),
         )
         rows = cur.rowcount or 0
     finally:
         conn.close()
 
     sub = args.subcommand or "-"
+    scope_name = args.scope or "any"
     if rows == 0:
         print(
             f"no matching rejected entry for verb={args.verb!r} "
             f"subcommand={args.subcommand!r} flags={_format_cli_flags(flags_json)}"
+            f" scope={scope_name}"
         )
         return 0
     print(
         f"unrejected: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
+        f" scope={scope_name}"
     )
     return 0
 
@@ -678,9 +732,11 @@ def _cmd_rejected(_args: argparse.Namespace) -> int:
         rows = conn.execute(
             """
             SELECT cs.verb, cs.subcommand, cs.flags,
+                   sc.name AS scope,
                    r.rejected_at, r.reason
               FROM permission_rejected r
-              JOIN command_shapes cs ON cs.id = r.command_shape_id
+              JOIN command_shapes cs   ON cs.id = r.command_shape_id
+              JOIN tool_call_scopes sc ON sc.id = r.scope_id
              ORDER BY r.rejected_at DESC;
             """
         ).fetchall()
@@ -690,7 +746,7 @@ def _cmd_rejected(_args: argparse.Namespace) -> int:
     if not rows:
         print("permission_rejected is empty")
         return 0
-    for verb, subcommand, flags_json, rejected_at, reason in rows:
+    for verb, subcommand, flags_json, scope, rejected_at, reason in rows:
         sub = subcommand or "-"
         try:
             flags = json.loads(flags_json)
@@ -698,7 +754,7 @@ def _cmd_rejected(_args: argparse.Namespace) -> int:
             flags = []
         reason_part = f" reason={reason!r}" if reason else ""
         print(
-            f"  {verb:<10} {sub:<15} flags={flags} "
+            f"  {verb:<10} {sub:<15} flags={flags} scope={scope} "
             f"rejected_at={rejected_at}{reason_part}"
         )
     return 0
@@ -733,9 +789,7 @@ def _cmd_propose(_args: argparse.Namespace) -> int:
     for c in proposals:
         sub = c.subcommand or ""
         flags_json = db.minify_json(sorted(c.flags))
-        print(
-            f"{c.verb}|{sub}|{flags_json}|{c.observations}|{c.distinct_sessions}"
-        )
+        print(f"{c.verb}|{sub}|{flags_json}|{c.observations}|{c.distinct_sessions}")
     return 0
 
 
@@ -745,9 +799,11 @@ def _cmd_active(_args: argparse.Namespace) -> int:
         rows = conn.execute(
             """
             SELECT cs.verb, cs.subcommand, cs.flags,
+                   sc.name AS scope,
                    a.promoted_at, a.source
               FROM permission_active a
-              JOIN command_shapes cs ON cs.id = a.command_shape_id
+              JOIN command_shapes cs   ON cs.id = a.command_shape_id
+              JOIN tool_call_scopes sc ON sc.id = a.scope_id
              ORDER BY a.promoted_at DESC;
             """
         ).fetchall()
@@ -757,14 +813,14 @@ def _cmd_active(_args: argparse.Namespace) -> int:
     if not rows:
         print("permission_active is empty")
         return 0
-    for verb, subcommand, flags_json, promoted_at, source in rows:
+    for verb, subcommand, flags_json, scope, promoted_at, source in rows:
         sub = subcommand or "-"
         try:
             flags = json.loads(flags_json)
         except (json.JSONDecodeError, TypeError):
             flags = []
         print(
-            f"  {verb:<10} {sub:<15} flags={flags} "
+            f"  {verb:<10} {sub:<15} flags={flags} scope={scope} "
             f"source={source} promoted_at={promoted_at}"
         )
     return 0
@@ -784,37 +840,50 @@ def main(argv: list[str] | None = None) -> int:
         help="Emit eligible promotions as TSV lines (for review.sh).",
     )
 
+    _scope_help = (
+        "Scope to qualify the rule with: within_project, outside_project, "
+        "mixed, no_path, or 'any' (default). The 'any' scope matches every "
+        "call regardless of its scope."
+    )
+
     promote = sub.add_parser(
         "promote",
         help="Graduate a candidate shape into permission_active (manual source).",
     )
     promote.add_argument("--verb", required=True, help="Command verb, e.g. 'head'.")
     promote.add_argument(
-        "--subcommand", default=None,
+        "--subcommand",
+        default=None,
         help="Subcommand (omit for verbs with no subcommand; matches NULL).",
     )
     promote.add_argument(
-        "--flags", default=None,
+        "--flags",
+        default=None,
         help="JSON array literal of flags, e.g. '[\"-a\",\"-l\"]' or '[]'.",
     )
+    promote.add_argument("--scope", default=None, help=_scope_help)
 
     reject = sub.add_parser(
         "reject",
-        help="Persist a shape as rejected; future scans won't re-propose it.",
+        help="Persist a shape as rejected; runtime deny AND excludes from scan.",
     )
     reject.add_argument("--verb", required=True, help="Command verb, e.g. 'head'.")
     reject.add_argument(
-        "--subcommand", default=None,
+        "--subcommand",
+        default=None,
         help="Subcommand (omit for verbs with no subcommand; matches NULL).",
     )
     reject.add_argument(
-        "--flags", default=None,
+        "--flags",
+        default=None,
         help="JSON array literal of flags, e.g. '[\"-a\",\"-l\"]' or '[]'.",
     )
     reject.add_argument(
-        "--reason", default=None,
+        "--reason",
+        default=None,
         help="Optional free-text reason stored with the rejection.",
     )
+    reject.add_argument("--scope", default=None, help=_scope_help)
 
     unreject = sub.add_parser(
         "unreject",
@@ -822,13 +891,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     unreject.add_argument("--verb", required=True, help="Command verb, e.g. 'head'.")
     unreject.add_argument(
-        "--subcommand", default=None,
+        "--subcommand",
+        default=None,
         help="Subcommand (omit for verbs with no subcommand; matches NULL).",
     )
     unreject.add_argument(
-        "--flags", default=None,
+        "--flags",
+        default=None,
         help="JSON array literal of flags, e.g. '[\"-a\",\"-l\"]' or '[]'.",
     )
+    unreject.add_argument("--scope", default=None, help=_scope_help)
 
     sub.add_parser("rejected", help="Dump permission_rejected table.")
 

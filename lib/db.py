@@ -8,6 +8,7 @@ adapted for the new top-level observability tree:
 - ``_migrate(conn)`` walks ``lib/schema/v*.sql`` on disk instead of an inline
   Python list — new schema versions land by dropping a file in place.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -18,10 +19,12 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path(os.environ.get(
-    "OBSERVABILITY_DB",
-    Path.home() / ".cache" / "claude" / "observability" / "observations.db",
-))
+DB_PATH = Path(
+    os.environ.get(
+        "OBSERVABILITY_DB",
+        Path.home() / ".cache" / "claude" / "observability" / "observations.db",
+    )
+)
 
 # Directory holding vN.sql files (walked in order by _migrate).
 SCHEMA_DIR = Path(__file__).resolve().parent / "schema"
@@ -98,16 +101,46 @@ def _project_name(cwd: str) -> str:
 
 
 def _upsert_project(conn: sqlite3.Connection, cwd: str, now: str) -> int:
-    """Insert-or-touch a project row keyed by cwd; returns its id."""
-    row = conn.execute("SELECT id FROM projects WHERE cwd = ?;", (cwd,)).fetchone()
+    """Insert-or-touch a project row keyed by cwd; returns its id.
+
+    On first insertion, resolves and stores the project root (see
+    ``lib.scope.resolve_project_root``). On subsequent touches, if the row
+    is missing a root (pre-v11 data), backfills it lazily — the resolver is
+    cheap enough to amortize and keeps older projects usable.
+    """
+    row = conn.execute(
+        "SELECT id, root FROM projects WHERE cwd = ?;", (cwd,)
+    ).fetchone()
     if row is not None:
-        conn.execute("UPDATE projects SET last_seen = ? WHERE id = ?;", (now, row[0]))
-        return int(row[0])
+        proj_id = int(row[0])
+        if row[1] is None:
+            root = _resolve_project_root(cwd)
+            conn.execute(
+                "UPDATE projects SET last_seen = ?, root = ? WHERE id = ?;",
+                (now, root, proj_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE projects SET last_seen = ? WHERE id = ?;", (now, proj_id)
+            )
+        return proj_id
+    root = _resolve_project_root(cwd)
     cur = conn.execute(
-        "INSERT INTO projects(cwd, name, first_seen, last_seen) VALUES (?, ?, ?, ?);",
-        (cwd, _project_name(cwd), now, now),
+        "INSERT INTO projects(cwd, name, root, first_seen, last_seen)"
+        " VALUES (?, ?, ?, ?, ?);",
+        (cwd, _project_name(cwd), root, now, now),
     )
     return int(cur.lastrowid or 0)
+
+
+def _resolve_project_root(cwd: str) -> str | None:
+    """Thin wrapper so lib/db.py doesn't import lib/scope.py at module load
+    (scope imports subprocess which is heavy-ish, and db.py is used by hot
+    paths that shouldn't pay that cost unless they actually create projects).
+    """
+    from .scope import resolve_project_root
+
+    return resolve_project_root(cwd)
 
 
 def _upsert_session(
@@ -158,9 +191,7 @@ def minify_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
-def lookup_permission_mode_id(
-    conn: sqlite3.Connection, name: str | None
-) -> int | None:
+def lookup_permission_mode_id(conn: sqlite3.Connection, name: str | None) -> int | None:
     """Resolve a permission-mode name to its lookup id.
 
     Returns ``None`` if ``name`` is ``None`` (recorder uses this for payloads
@@ -190,6 +221,89 @@ def lookup_status_id(conn: sqlite3.Connection, name: str) -> int:
     if row is None:
         raise ValueError(f"unknown call status: {name!r}")
     return int(row[0])
+
+
+def lookup_scope_id(conn: sqlite3.Connection, name: str) -> int:
+    """Resolve a tool-call-scope name to its lookup id.
+
+    Closed set (``within_project | outside_project | mixed | no_path |
+    any``); unknown name is a bug, not data to accept. ``any`` is for
+    permission rules and is never written to ``tool_calls.scope_id``.
+    """
+    row = conn.execute(
+        "SELECT id FROM tool_call_scopes WHERE name = ?;", (name,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown tool_call_scope: {name!r}")
+    return int(row[0])
+
+
+def register_ask_pending(
+    conn: sqlite3.Connection,
+    tool_use_id: str,
+    leaf_index: int,
+    session_id: int,
+    command_shape_id: int,
+    scope_id: int,
+    asked_at: str,
+) -> None:
+    """Write one pending row per ask'd leaf. Re-ask of same tool_use_id +
+    leaf is idempotent (INSERT OR IGNORE); the hook only fires once per
+    call so duplicates are unusual, but we guard against weird retries.
+    """
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO permission_ask_pending
+          (tool_use_id, leaf_index, session_id, command_shape_id, scope_id, asked_at)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (tool_use_id, leaf_index, session_id, command_shape_id, scope_id, asked_at),
+    )
+
+
+def promote_pending_to_session_approval(
+    conn: sqlite3.Connection,
+    tool_use_id: str,
+    approved_at: str,
+) -> int:
+    """Move every pending row for ``tool_use_id`` into session_approvals.
+
+    Returns the number of rows promoted. Called by the Post phase on
+    status=ok. Idempotent via composite PK — re-runs never duplicate.
+    Pending rows are always deleted, whether promoted or not (the caller
+    only calls this on ok; err paths call ``drop_pending``).
+    """
+    rows = conn.execute(
+        """
+        SELECT session_id, command_shape_id, scope_id
+          FROM permission_ask_pending
+         WHERE tool_use_id = ?;
+        """,
+        (tool_use_id,),
+    ).fetchall()
+    for session_id, shape_id, scope_id in rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO permission_session_approvals
+              (session_id, command_shape_id, scope_id, approved_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            (session_id, shape_id, scope_id, approved_at),
+        )
+    conn.execute(
+        "DELETE FROM permission_ask_pending WHERE tool_use_id = ?;",
+        (tool_use_id,),
+    )
+    return len(rows)
+
+
+def drop_pending(conn: sqlite3.Connection, tool_use_id: str) -> int:
+    """Delete all ask_pending rows for a tool_use_id (Post phase on err)."""
+    cur = conn.execute(
+        "DELETE FROM permission_ask_pending WHERE tool_use_id = ?;",
+        (tool_use_id,),
+    )
+    return cur.rowcount
 
 
 def upsert_command_shape(
@@ -241,12 +355,13 @@ def link_tool_call_shape(
 
 
 def set_session_transcript_path(
-    conn: sqlite3.Connection, session_id: str, path: str
+    conn: sqlite3.Connection, session_id: int, path: str
 ) -> None:
     """Record the transcript path for a session — set-once semantics.
 
     Only writes when the existing value is NULL, so later payloads with a
-    stale or rotated path don't overwrite the original.
+    stale or rotated path don't overwrite the original. ``session_id`` is
+    the INTEGER ``sessions.id`` (post-v7), not the UUID string.
     """
     conn.execute(
         "UPDATE sessions SET transcript_path = ?"
@@ -281,14 +396,10 @@ def lookup_or_insert_tool_id(conn: sqlite3.Connection, name: str) -> int:
     values auto-register so the recorder never needs a schema update when a
     new tool ships.
     """
-    row = conn.execute(
-        "SELECT id FROM tools WHERE name = ?;", (name,)
-    ).fetchone()
+    row = conn.execute("SELECT id FROM tools WHERE name = ?;", (name,)).fetchone()
     if row is not None:
         return int(row[0])
-    cur = conn.execute(
-        "INSERT INTO tools(name) VALUES (?);", (name,)
-    )
+    cur = conn.execute("INSERT INTO tools(name) VALUES (?);", (name,))
     return int(cur.lastrowid or 0)
 
 
@@ -307,9 +418,7 @@ def lookup_or_insert_subagent_type_id(
     ).fetchone()
     if row is not None:
         return int(row[0])
-    cur = conn.execute(
-        "INSERT INTO subagent_types(name) VALUES (?);", (name,)
-    )
+    cur = conn.execute("INSERT INTO subagent_types(name) VALUES (?);", (name,))
     return int(cur.lastrowid or 0)
 
 
@@ -326,9 +435,7 @@ def lookup_or_insert_file_path_id(
     """
     if path is None:
         return None
-    row = conn.execute(
-        "SELECT id FROM file_paths WHERE path = ?;", (path,)
-    ).fetchone()
+    row = conn.execute("SELECT id FROM file_paths WHERE path = ?;", (path,)).fetchone()
     if row is not None:
         conn.execute(
             "UPDATE file_paths SET last_seen = ? WHERE id = ?;",

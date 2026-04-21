@@ -43,15 +43,7 @@ active:
   flags: [-n, -r]
 - {verb: head}
 - verb: head
-  flags: ['-5']
-- verb: head
-  flags: ['-10']
-- verb: head
-  flags: ['-20']
-- verb: head
-  flags: ['-30']
-- verb: head
-  flags: ['-200']
+  flags: [-<N>]
 - {verb: ls}
 - verb: ls
   flags: [-a, -l]
@@ -59,15 +51,7 @@ active:
 - verb: sort
   flags: [-u]
 - verb: tail
-  flags: ['-5']
-- verb: tail
-  flags: ['-10']
-- verb: tail
-  flags: ['-20']
-- verb: tail
-  flags: ['-30']
-- verb: tail
-  flags: ['-50']
+  flags: [-<N>]
 - verb: wc
   flags: [-l]
 - {verb: whoami}

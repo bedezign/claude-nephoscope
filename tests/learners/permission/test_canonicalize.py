@@ -1,4 +1,5 @@
 """Tests for learners.permission.canonicalize."""
+
 from __future__ import annotations
 
 from learners.permission.canonicalize import Redirection, parse_command
@@ -33,8 +34,8 @@ def test_secret_in_env_var_never_appears_in_output():
     # Pipeline yields two leaves.
     assert len(leaves) == 2
 
-    uv_leaf = next(l for l in leaves if l.verb == "uv")
-    tail_leaf = next(l for l in leaves if l.verb == "tail")
+    uv_leaf = next(leaf for leaf in leaves if leaf.verb == "uv")
+    tail_leaf = next(leaf for leaf in leaves if leaf.verb == "tail")
 
     # uv leaf canonicalized as task runner.
     assert uv_leaf.subcommand == "pytest"
@@ -46,19 +47,18 @@ def test_secret_in_env_var_never_appears_in_output():
         assert "postgresql" not in leaf.raw_leaf
         assert not any("s3cret" in f for f in leaf.flags)
 
-    # Tail: bashlex treats -10 as a flag-shaped token (starts with `-`).
-    # Assert actual behavior rather than idealized behavior per the plan.
+    # Tail: -10 is a numeric flag and is collapsed to -<N>.
     assert tail_leaf.subcommand is None
-    assert tail_leaf.flags == frozenset({"-10"})
+    assert tail_leaf.flags == frozenset({"-<N>"})
 
 
 def test_command_substitution_yields_inner_and_outer_leaves():
     leaves = parse_command("rm -rf $(pwd)")
     # Two leaves: inner pwd plus outer rm.
-    verbs = sorted(l.verb for l in leaves)
+    verbs = sorted(leaf.verb for leaf in leaves)
     assert verbs == ["pwd", "rm"]
 
-    rm_leaf = next(l for l in leaves if l.verb == "rm")
+    rm_leaf = next(leaf for leaf in leaves if leaf.verb == "rm")
     # bashlex tokenizes `-rf` as a single word; we split POSIX clusters so
     # ``rm -rf`` and ``rm -r -f`` produce the same flag set.
     assert rm_leaf.subcommand is None
@@ -67,7 +67,7 @@ def test_command_substitution_yields_inner_and_outer_leaves():
 
 def test_list_operators_produce_one_leaf_per_command():
     leaves = parse_command("a; b && c || d")
-    verbs = [l.verb for l in leaves]
+    verbs = [leaf.verb for leaf in leaves]
     assert verbs == ["a", "b", "c", "d"]
     for leaf in leaves:
         assert leaf.subcommand is None
@@ -171,15 +171,15 @@ def test_short_flag_cluster_tar_xvf_splits_into_three_flags():
 
 def test_numeric_dash_arg_is_not_split_into_per_digit_flags():
     # ``tail -10`` — the -10 token is numeric, not a letter cluster. The point
-    # of the test is that it is NOT split into {-1, -0}. Current behavior
-    # keeps the whole token as a single "flag" (since it starts with "-").
+    # of the test is that it is NOT split into {-1, -0}. Numeric flags collapse
+    # to the sentinel -<N> so numeric variants (head -40, head -100) share a shape.
     leaves = parse_command("tail -10")
     assert len(leaves) == 1
     flags = leaves[0].flags
     assert "-1" not in flags
     assert "-0" not in flags
-    # And the whole token survives intact (matches current behavior).
-    assert flags == frozenset({"-10"})
+    # Numeric flags collapse to -<N>.
+    assert flags == frozenset({"-<N>"})
 
 
 def test_long_flag_is_not_cluster_split():
@@ -207,35 +207,35 @@ def test_mixed_letter_digit_flag_is_not_cluster_split():
 def test_process_substitution_input_is_not_outer_subcommand():
     leaves = parse_command("diff <(ls) <(ls -a)")
     # Outer diff leaf has no subcommand; inner ls leaves still appear.
-    diff_leaves = [l for l in leaves if l.verb == "diff"]
+    diff_leaves = [leaf for leaf in leaves if leaf.verb == "diff"]
     assert len(diff_leaves) == 1
     assert diff_leaves[0].subcommand is None
 
-    ls_leaves = [l for l in leaves if l.verb == "ls"]
+    ls_leaves = [leaf for leaf in leaves if leaf.verb == "ls"]
     # Two inner ``ls`` calls (one plain, one with -a).
     assert len(ls_leaves) == 2
-    flag_sets = sorted(frozenset(l.flags) for l in ls_leaves)
+    flag_sets = sorted(frozenset(leaf.flags) for leaf in ls_leaves)
     assert frozenset() in flag_sets
     assert frozenset({"-a"}) in flag_sets
 
 
 def test_command_substitution_is_not_outer_subcommand():
     leaves = parse_command("cat $(which git)")
-    cat_leaves = [l for l in leaves if l.verb == "cat"]
+    cat_leaves = [leaf for leaf in leaves if leaf.verb == "cat"]
     assert len(cat_leaves) == 1
     assert cat_leaves[0].subcommand is None
 
-    which_leaves = [l for l in leaves if l.verb == "which"]
+    which_leaves = [leaf for leaf in leaves if leaf.verb == "which"]
     assert len(which_leaves) == 1
 
 
 def test_process_substitution_output_is_not_outer_subcommand():
     leaves = parse_command("cat >(tee log)")
-    cat_leaves = [l for l in leaves if l.verb == "cat"]
+    cat_leaves = [leaf for leaf in leaves if leaf.verb == "cat"]
     assert len(cat_leaves) == 1
     assert cat_leaves[0].subcommand is None
 
-    tee_leaves = [l for l in leaves if l.verb == "tee"]
+    tee_leaves = [leaf for leaf in leaves if leaf.verb == "tee"]
     assert len(tee_leaves) == 1
 
 
@@ -326,3 +326,88 @@ def test_sed_script_argument_is_content():
     # Destructive flag still surfaces when present.
     inplace = parse_command("sed -i 's/a/b/' file.txt")
     assert "-i" in inplace[0].flags
+
+
+# ---------------------------------------------------------------------------
+# Numeric flag collapsing (-<N> sentinel)
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_flag_head_40_and_head_100_produce_identical_shape():
+    a = parse_command("head -40")
+    b = parse_command("head -100")
+    assert len(a) == 1 and len(b) == 1
+    assert a[0].flags == frozenset({"-<N>"})
+    assert b[0].flags == frozenset({"-<N>"})
+    assert a[0].flags == b[0].flags
+
+
+def test_numeric_flag_tail_5_yields_sentinel():
+    leaves = parse_command("tail -5")
+    assert len(leaves) == 1
+    assert "-<N>" in leaves[0].flags
+
+
+def test_numeric_flag_boundary_zero_and_leading_zeros_collapse():
+    # -0, -00, -01 are all purely-digit tokens and collapse to the sentinel.
+    # Trade-off accepted: xargs-style -0 (null-delimited) is indistinguishable
+    # from numeric count tokens after collapse. Approve per-shape if you need it.
+    for variant in ("-0", "-00", "-01", "-007"):
+        leaves = parse_command(f"head {variant}")
+        assert len(leaves) == 1
+        assert leaves[0].flags == frozenset({"-<N>"})
+
+
+def test_numeric_flag_with_long_flag_option_stays_positional():
+    # head -n 40: the -n is a flag, 40 stays positional (not a flag)
+    leaves = parse_command("head -n 40")
+    assert len(leaves) == 1
+    assert "-n" in leaves[0].flags
+    assert "-<N>" not in leaves[0].flags
+
+
+def test_letter_digit_mixed_flags_stay_verbatim():
+    # -O3 is letter+digit; not split by cluster splitter (only pure-letter clusters)
+    gcc = parse_command("gcc -O3 foo.c")
+    assert len(gcc) == 1
+    assert "-O3" in gcc[0].flags
+
+    # -j4 is also letter+digit
+    j_flag = parse_command("make -j4")
+    assert len(j_flag) == 1
+    assert "-j4" in j_flag[0].flags
+
+
+def test_long_flag_with_equals_not_affected():
+    leaves = parse_command("some_cmd --jobs=4")
+    assert len(leaves) == 1
+    assert "--jobs" in leaves[0].flags
+    assert "-<N>" not in leaves[0].flags
+
+
+def test_numeric_flag_in_positional_position():
+    # seq 1 -5: the -5 starts with dash so it gets collected as a flag
+    leaves = parse_command("seq 1 -5")
+    assert len(leaves) == 1
+    assert "-<N>" in leaves[0].flags
+
+
+def test_wget_capital_n_flag_literal():
+    leaves = parse_command("wget -N https://example.com")
+    assert len(leaves) == 1
+    assert "-N" in leaves[0].flags
+    assert "-<N>" not in leaves[0].flags
+
+
+def test_ssh_capital_n_flag_literal():
+    leaves = parse_command("ssh -N -L 8080:localhost:80 host")
+    assert len(leaves) == 1
+    assert "-N" in leaves[0].flags
+    assert "-<N>" not in leaves[0].flags
+
+
+def test_ls_capital_n_flag_literal():
+    leaves = parse_command("ls -N")
+    assert len(leaves) == 1
+    assert "-N" in leaves[0].flags
+    assert "-<N>" not in leaves[0].flags
