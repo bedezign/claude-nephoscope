@@ -1,333 +1,246 @@
-"""Safe-shape fixture: apply to permission_active, or export from it.
+"""Fixture seeding and export for permission rules.
 
-The fixture at ``config/fixtures/safe_shapes.yaml`` is the one piece of
-the observability DB that can't be rebuilt from observations — it captures
-human trust judgments about which command shapes are safe to auto-approve.
-The broader permission_active corpus (learner-promoted entries) is also
-non-rebuildable once candidates have been consumed, so the fixture covers
-the full table, not just manual seeds.
+This module manages the round-trip of permission rules between YAML fixtures
+and the database. It supports loading fixtures (applying them to the DB as
+rule_shapes + permissions rows) and exporting the current permissions state
+back to YAML.
 
-CLI:
+Fixture YAML schema:
 
-    python -m learners.permission.seed            # apply fixture → DB
-    python -m learners.permission.seed --apply    # same, explicit
-    python -m learners.permission.seed --export   # DB → fixture (overwrites)
+    - verb: str (required)
+      subcommand: str? (optional)
+      flags: list[str] | "*" (required)
+      path_spec: str? (optional, one of: NULL, "", "$VAR/**", "$VAR/<tail>")
+      tier: str (optional, default "global", one of: "session", "project", "global")
+      decision: str (required, one of: "approved", "rejected")
+      reason: str? (optional)
 
-Apply is idempotent: INSERT OR IGNORE on permission_active, upsert on
-command_shapes. Re-running adds nothing once the table matches.
-Export overwrites the fixture file deterministically — entries are sorted
-by (verb, subcommand, flags) so diffs are stable across runs.
+Round-trip idempotency: applying a fixture to an empty DB and exporting should
+yield equivalent YAML (field order may differ, but content is identical).
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# Allow ``from lib.db import ...`` regardless of invocation cwd.
-sys.path.insert(0, "/home/steve/.claude/observability")
-
-from lib.db import _now, _open, minify_json, upsert_command_shape  # noqa: E402
-
-FIXTURE_PATH = Path(__file__).parent / "config" / "fixtures" / "safe_shapes.yaml"
-
-_HEADER = """\
-# Permission-learner fixture.
-#
-# Captures every durable user judgment about command shapes. Two lists:
-#
-#   active:   shapes to auto-approve (-> permission_active)
-#   rejected: shapes to never re-propose (-> permission_rejected)
-#
-# Managed round-trip: apply with `python -m learners.permission.seed`,
-# regenerate with `python -m learners.permission.seed --export`. Export
-# overwrites this file deterministically (entries sorted by verb then
-# flags). Hand-edits survive only if you never run --export again.
-#
-# The permission hook's allow branch matches on (verb, subcommand, flags);
-# CONTENT_VERBS in canonicalize.py drops the first positional from the
-# shape, so `ls /foo` and `ls /bar` share the `verb: ls` shape here.
-#
-# Destructive flag combos (sed -i, find -delete, awk -i inplace, etc.)
-# are deliberately absent from `active`. Those still go through the normal
-# prompt (or can be added to `rejected` to suppress them from review).
-#
-# Entry schema (both lists):
-#   - verb: <str>            required
-#     flags: [<str>, ...]    optional; order-independent, sorted on import
-#     subcommand: <str>      optional; almost never set for CONTENT_VERBS
-#     source: manual|learner active only; defaults to 'manual'
-#     reason: <str>          rejected only; free-text note
-"""
+from lib.db import _now, insert_permission, minify_json, upsert_rule_shape
+from lib.mirror.writer import MirrorHashMismatch, sync_global, sync_project
 
 
-# ---------------------------------------------------------------------------
-# Apply (YAML → DB)
-# ---------------------------------------------------------------------------
+def _yaml_to_flags(flags: Any) -> str:
+    """Convert flags from YAML (list or "*" string) to minified JSON.
 
+    Args:
+        flags: either a list of strings (e.g., ["-q", "--verbose"]) or
+               the sentinel string "*" (wildcard)
 
-def _load_fixture(
-    path: Path = FIXTURE_PATH,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (active_shapes, rejected_shapes) from the YAML fixture.
-
-    Accepts the legacy single-list format (top-level ``shapes:``) and treats
-    it as ``active`` with an empty rejected list.
+    Returns: minified JSON array string or "*"
     """
-    with path.open() as f:
-        data = yaml.safe_load(f) or {}
-    if "active" in data or "rejected" in data:
-        active = data.get("active") or []
-        rejected = data.get("rejected") or []
-    else:
-        # Legacy: top-level `shapes:` == active only.
-        active = data.get("shapes") or []
-        rejected = []
-    if not isinstance(active, list):
-        raise ValueError(f"{path}: 'active' must be a list")
-    if not isinstance(rejected, list):
-        raise ValueError(f"{path}: 'rejected' must be a list")
-    return active, rejected
+    if isinstance(flags, str) and flags == "*":
+        return "*"
+    if isinstance(flags, list):
+        return minify_json(sorted(flags))
+    raise ValueError(f"invalid flags: {flags!r}")
 
 
-def _flags_key(flags: list[str] | None) -> str:
-    return minify_json(sorted(flags or []))
+def apply_fixtures(
+    conn: sqlite3.Connection,
+    fixture_path: str | Path,
+) -> tuple[int, int]:
+    """Load and apply fixtures from a YAML file.
 
+    For each fixture entry:
+    1. Upsert rule_shape with the given (verb, subcommand, flags, path_spec)
+    2. Insert a permissions row with decision/source='seed'/reason
 
-def _validate_verb(entry: dict[str, Any]) -> str:
-    verb = entry.get("verb")
-    if not isinstance(verb, str) or not verb:
-        raise ValueError(f"shape entry missing 'verb': {entry!r}")
-    return verb
+    Session-tier rows are written to DB only (no JSON analogue).
+    Global and project-tier rows are additionally synced to their JSON mirror
+    via ``lib.mirror.writer``.
 
+    Returns: (rule_shapes_count, permissions_count) inserted or upserted.
 
-def apply_fixture(
-    conn,
-    active: list[dict[str, Any]],
-    rejected: list[dict[str, Any]] | None = None,
-) -> dict[str, tuple[int, int]]:
-    """Apply ``active`` + ``rejected`` shapes. Returns counts per table.
+    Args:
+        conn: SQLite connection
+        fixture_path: path to YAML file
 
-    Return shape: ``{"active": (inserted, existed), "rejected": (inserted, existed)}``.
-    Caller using the legacy two-tuple shape can still ignore the rejected key.
+    Raises:
+        ValueError: if fixture schema is invalid or a mirror hash mismatch occurs.
     """
+    fixture_path = Path(fixture_path)
+    content = fixture_path.read_text(encoding="utf-8")
+    entries = yaml.safe_load(content) or []
+
+    if not isinstance(entries, list):
+        raise ValueError(f"fixture must be a YAML list, got {type(entries).__name__}")
+
     now = _now()
+    shapes_created = 0
+    perms_created = 0
 
-    def _resolve_scope(entry: dict) -> int:
-        name = entry.get("scope") or "any"
-        row = conn.execute(
-            "SELECT id FROM tool_call_scopes WHERE name = ?;", (name,)
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"unknown scope {name!r} in {entry!r}")
-        return int(row[0])
+    # Track which mirrors need syncing after all DB inserts succeed.
+    needs_global_sync = False
+    project_ids_to_sync: set[int] = set()
 
-    a_inserted = a_existed = 0
-    for entry in active:
-        verb = _validate_verb(entry)
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"entry {idx} is not a dict: {entry!r}")
+
+        # Required fields
+        verb = entry.get("verb")
+        decision = entry.get("decision")
+        flags_raw = entry.get("flags")
+
+        if not verb:
+            raise ValueError(f"entry {idx} missing 'verb'")
+        if not decision:
+            raise ValueError(f"entry {idx} missing 'decision'")
+        if flags_raw is None:
+            raise ValueError(f"entry {idx} missing 'flags'")
+        if decision not in ("approved", "rejected"):
+            raise ValueError(f"entry {idx} invalid decision: {decision!r}")
+
+        # Optional fields
         subcommand = entry.get("subcommand")
-        flags_json = _flags_key(entry.get("flags"))
-        source = entry.get("source") or "manual"
-        if source not in ("manual", "learner"):
-            raise ValueError(f"invalid source {source!r} in {entry!r}")
-        shape_id = upsert_command_shape(conn, verb, subcommand, flags_json, now)
-        scope_id = _resolve_scope(entry)
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO permission_active "
-            "(command_shape_id, scope_id, promoted_at, source) "
-            "VALUES (?, ?, ?, ?);",
-            (shape_id, scope_id, now, source),
-        )
-        if cur.rowcount:
-            a_inserted += 1
-        else:
-            a_existed += 1
-
-    r_inserted = r_existed = 0
-    for entry in rejected or []:
-        verb = _validate_verb(entry)
-        subcommand = entry.get("subcommand")
-        flags_json = _flags_key(entry.get("flags"))
+        path_spec = entry.get("path_spec")
+        tier = entry.get("tier", "global")
         reason = entry.get("reason")
-        shape_id = upsert_command_shape(conn, verb, subcommand, flags_json, now)
-        scope_id = _resolve_scope(entry)
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO permission_rejected "
-            "(command_shape_id, scope_id, rejected_at, reason) "
-            "VALUES (?, ?, ?, ?);",
-            (shape_id, scope_id, now, reason),
+
+        if tier not in ("session", "project", "global"):
+            raise ValueError(f"entry {idx} invalid tier: {tier!r}")
+
+        # Convert flags
+        flags_json = _yaml_to_flags(flags_raw)
+
+        # Upsert rule_shape
+        shape_id = upsert_rule_shape(
+            conn,
+            verb=verb,
+            subcommand=subcommand,
+            flags_json=flags_json,
+            path_spec=path_spec,
+            ts=now,
         )
-        if cur.rowcount:
-            r_inserted += 1
+        shapes_created += 1
+
+        # Determine session_id / project_id based on tier
+        session_id: int | None = None
+        project_id: int | None = None
+        # For seed fixtures, we don't have actual session/project ids,
+        # so they're only created as global tier
+        if tier != "global":
+            raise NotImplementedError(
+                f"Seed fixtures are currently global-tier only; "
+                f"entry {idx} requested {tier!r}"
+            )
+
+        # Insert permission row
+        insert_permission(
+            conn,
+            rule_shape_id=shape_id,
+            session_id=session_id,
+            project_id=project_id,
+            decision=decision,
+            source="seed",
+            ts=now,
+            reason=reason,
+        )
+        perms_created += 1
+
+        # Track which mirrors need syncing (session-tier: DB-only, no mirror).
+        if session_id is None:
+            if project_id is None:
+                needs_global_sync = True
+            else:
+                project_ids_to_sync.add(project_id)
+
+    # Sync mirrors for all affected scopes after DB inserts complete.
+    # RuntimeError means the mirror singleton is not yet configured (no path
+    # registered); treat as "mirror not set up" and skip silently so the seed
+    # still works in environments without a configured mirror.
+    if needs_global_sync:
+        try:
+            sync_global(conn)
+        except MirrorHashMismatch as exc:
+            path = str(exc).split(":")[0]
+            raise ValueError(
+                f"settings file at {path} was edited externally — "
+                f"run '/permissions reconcile' and retry"
+            ) from exc
+        except RuntimeError:
+            pass  # global_mirror singleton not configured — skip sync
+
+    for pid in sorted(project_ids_to_sync):
+        try:
+            sync_project(conn, pid)
+        except MirrorHashMismatch as exc:
+            path = str(exc).split(":")[0]
+            raise ValueError(
+                f"settings file at {path} was edited externally — "
+                f"run '/permissions reconcile' and retry"
+            ) from exc
+        except (RuntimeError, ValueError):
+            pass  # project mirror not configured — skip sync
+
+    return shapes_created, perms_created
+
+
+def export_permissions(
+    conn: sqlite3.Connection,
+    output_path: str | Path | None = None,
+) -> str:
+    """Export current permissions from v_permissions view to YAML.
+
+    Returns the YAML string. If output_path is provided, also writes to that file.
+
+    Args:
+        conn: SQLite connection
+        output_path: optional path to write the YAML file to
+
+    Returns: YAML string suitable for round-trip via apply_fixtures
+    """
+    rows = conn.execute(
+        """
+        SELECT verb, subcommand, flags, path_spec, tier, decision, reason
+          FROM v_permissions
+         ORDER BY tier, decision, verb, COALESCE(subcommand, ''), flags, COALESCE(path_spec, '')
+        """
+    ).fetchall()
+
+    entries = []
+    for row in rows:
+        verb, subcommand, flags_str, path_spec, tier, decision, reason = row
+
+        # Reconstruct flags: "*" stays as string, JSON array becomes list
+        if flags_str == "*":
+            flags = "*"
         else:
-            r_existed += 1
+            flags = json.loads(flags_str)
 
-    conn.commit()
-    return {
-        "active": (a_inserted, a_existed),
-        "rejected": (r_inserted, r_existed),
-    }
+        entry: dict[str, Any] = {
+            "verb": verb,
+            "flags": flags,
+            "decision": decision,
+        }
 
-
-# ---------------------------------------------------------------------------
-# Export (DB → YAML)
-# ---------------------------------------------------------------------------
-
-
-def _parse_flags(flags_text: str | None) -> list[str]:
-    try:
-        flags = json.loads(flags_text) if flags_text else []
-    except (json.JSONDecodeError, TypeError):
-        flags = []
-    return list(flags) if isinstance(flags, list) else []
-
-
-def export_shapes(conn) -> list[dict[str, Any]]:
-    """Read permission_active JOINed with command_shapes + scope name."""
-    rows = conn.execute(
-        """
-        SELECT cs.verb, cs.subcommand, cs.flags, sc.name, pa.source
-          FROM permission_active pa
-          JOIN command_shapes cs     ON cs.id = pa.command_shape_id
-          JOIN tool_call_scopes sc   ON sc.id = pa.scope_id
-         ORDER BY cs.verb, IFNULL(cs.subcommand, ''),
-                  LENGTH(cs.flags), cs.flags, sc.name;
-        """
-    ).fetchall()
-
-    shapes: list[dict[str, Any]] = []
-    for verb, subcommand, flags_text, scope, source in rows:
-        entry: dict[str, Any] = {"verb": verb}
         if subcommand is not None:
             entry["subcommand"] = subcommand
-        flags = _parse_flags(flags_text)
-        if flags:
-            entry["flags"] = flags
-        # Only write scope when non-default — keeps legacy fixtures clean.
-        if scope and scope != "any":
-            entry["scope"] = scope
-        # Only write source when it's non-default — keeps manual entries clean.
-        if source and source != "manual":
-            entry["source"] = source
-        shapes.append(entry)
-    return shapes
-
-
-def export_rejected(conn) -> list[dict[str, Any]]:
-    """Read permission_rejected JOINed with command_shapes + scope name."""
-    rows = conn.execute(
-        """
-        SELECT cs.verb, cs.subcommand, cs.flags, sc.name, r.reason
-          FROM permission_rejected r
-          JOIN command_shapes cs     ON cs.id = r.command_shape_id
-          JOIN tool_call_scopes sc   ON sc.id = r.scope_id
-         ORDER BY cs.verb, IFNULL(cs.subcommand, ''),
-                  LENGTH(cs.flags), cs.flags, sc.name;
-        """
-    ).fetchall()
-
-    out: list[dict[str, Any]] = []
-    for verb, subcommand, flags_text, scope, reason in rows:
-        entry: dict[str, Any] = {"verb": verb}
-        if subcommand is not None:
-            entry["subcommand"] = subcommand
-        flags = _parse_flags(flags_text)
-        if flags:
-            entry["flags"] = flags
-        if scope and scope != "any":
-            entry["scope"] = scope
-        if reason:
+        if path_spec is not None:
+            entry["path_spec"] = path_spec
+        if tier != "global":
+            entry["tier"] = tier
+        if reason is not None:
             entry["reason"] = reason
-        out.append(entry)
-    return out
 
+        entries.append(entry)
 
-def write_fixture(
-    active: list[dict[str, Any]],
-    rejected: list[dict[str, Any]] | None = None,
-    path: Path = FIXTURE_PATH,
-) -> None:
-    """Write active + rejected shapes to the fixture with the canonical header."""
-    payload: dict[str, Any] = {"active": active}
-    if rejected:
-        payload["rejected"] = rejected
-    body = yaml.safe_dump(
-        payload,
-        sort_keys=False,
-        default_flow_style=None,
-        width=120,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_HEADER + "\n" + body)
+    yaml_str = yaml.dump(entries, default_flow_style=False, sort_keys=False)
 
+    if output_path is not None:
+        Path(output_path).write_text(yaml_str, encoding="utf-8")
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def _do_apply() -> int:
-    active, rejected = _load_fixture()
-    conn = _open()
-    try:
-        counts = apply_fixture(conn, active, rejected)
-        total_active = conn.execute(
-            "SELECT COUNT(*) FROM permission_active;"
-        ).fetchone()[0]
-        total_rejected = conn.execute(
-            "SELECT COUNT(*) FROM permission_rejected;"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    a_ins, a_exi = counts["active"]
-    r_ins, r_exi = counts["rejected"]
-    print(f"fixture: {len(active)} active, {len(rejected)} rejected")
-    print(
-        f"active   → inserted {a_ins}, already present {a_exi} (total {total_active})"
-    )
-    print(
-        f"rejected → inserted {r_ins}, already present {r_exi} (total {total_rejected})"
-    )
-    return 0
-
-
-def _do_export() -> int:
-    conn = _open()
-    try:
-        active = export_shapes(conn)
-        rejected = export_rejected(conn)
-    finally:
-        conn.close()
-    write_fixture(active, rejected)
-    print(f"exported {len(active)} active + {len(rejected)} rejected → {FIXTURE_PATH}")
-    return 0
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Apply or export the safe-shape fixture."
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--apply",
-        action="store_true",
-        help="Apply fixture to permission_active (default).",
-    )
-    group.add_argument(
-        "--export",
-        action="store_true",
-        help="Export permission_active to the fixture file (overwrites).",
-    )
-    args = parser.parse_args(argv)
-    if args.export:
-        return _do_export()
-    return _do_apply()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return yaml_str

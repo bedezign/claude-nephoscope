@@ -1,76 +1,93 @@
-"""Runtime PreToolUse gate for Bash.
+"""Runtime PreToolUse gate — Phase 8.5 dispatch model.
 
 Reads a Claude Code PreToolUse payload from stdin and emits one of:
 
-- ``{}`` — fall through to the normal prompt path (no opinion).
-- ``permissionDecision=deny`` — hard-blocks via deny.py (deny.yaml rules
-  or a procedural guard like ``sudo`` / guarded-path redirection).
-- ``permissionDecision=ask`` — user-confirmable. On first ask of an
-  ask-tier shape in a session, a row is written into
-  ``permission_ask_pending``; when the recorder's Post phase sees
-  ``status=ok`` for that ``tool_use_id``, it promotes the shape into
-  ``permission_session_approvals`` and future matching calls in the same
-  session auto-allow.
-- ``permissionDecision=allow`` — every leaf is either session-approved
-  (v12) or in ``permission_active``.
+- ``{}``                       — fall through (no opinion / ``NoOpinion``).
+- ``permissionDecision=deny``  — hard block.
+- ``permissionDecision=ask``   — user-confirmable; registers a pending row.
+- ``permissionDecision=allow`` — every leaf is approved.
 
-The hook is intentionally conservative: unparseable input / missing
-payload fields default to ``{}``. Deny is checked before ask; ask is
-checked against session approvals before emitting. Active-allowlist only
-evaluates when no leaf asked and no leaf was denied.
+Priority order
+--------------
+1. **Procedural deny** — deny.py / deny.yaml ``deny`` tier fires immediately
+   (Bash only; before any DB access).
+2. **Dispatch** — ``match.dispatch`` routes to the per-tool-class matcher.
+   Tier priority (session → project → global) is enforced inside dispatch.
+3. **Ask-tier bookkeeping** — when dispatch returns ``Verdict.Ask`` for a
+   Bash call, register a ``permission_ask_pending`` row.
+4. **Procedural ask** — for Bash calls with no DB opinion, deny.py ``ask``
+   tier fires (no-DB fast path).
 
-Called per Bash tool call, so the DB connection is short-lived and
-mostly read-only. When an ask is about to be emitted, the hook writes
-pending rows to the DB — the hot path absorbs one INSERT per leaf in
-that case only.
+Verdict → response mapping
+--------------------------
+``Verdict.Allow``     → ``{permissionDecision: "allow"}``
+``Verdict.Deny``      → ``{permissionDecision: "deny"}``
+``Verdict.Ask``       → ``{permissionDecision: "ask"}``
+``Verdict.NoOpinion`` → ``{}`` (fall through to Claude Code's native gate)
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
 
-# Run as a standalone script; ensure the observability package is importable.
-sys.path.insert(0, "/home/steve/.claude/observability")
+# Ensure the observability package is importable when run as a standalone script.
+_OBS_ROOT = str(Path(__file__).resolve().parents[2])
+if _OBS_ROOT not in sys.path:
+    sys.path.insert(0, _OBS_ROOT)
 
 from learners.permission.canonicalize import (  # noqa: E402
     CanonicalLeaf,
     parse_command,
 )
 from learners.permission.deny import evaluate  # noqa: E402
+from learners.permission.match import Verdict, dispatch  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# DB / timestamp helpers
+# ---------------------------------------------------------------------------
 
 
 def _db_path() -> Path:
-    """Resolve the observations DB path. Honors ``OBSERVABILITY_DB``."""
-    import os
-
+    """Resolve the observations DB path. Honours ``OBSERVABILITY_DB``."""
     env = os.environ.get("OBSERVABILITY_DB")
     if env:
         return Path(env)
     return Path.home() / ".cache" / "claude" / "observability" / "observations.db"
 
 
-def _flags_key(flags: frozenset[str]) -> str:
-    """Match the learner's stored flags format (sorted, minified JSON)."""
-    return json.dumps(sorted(flags), ensure_ascii=False, separators=(",", ":"))
+def _connect(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+
+def _now_iso() -> str:
+    import datetime as _dt
+
+    return (
+        _dt.datetime.now(tz=_dt.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+# ---------------------------------------------------------------------------
+# DB lookups
+# ---------------------------------------------------------------------------
 
 
 def _lookup_call_context(
     conn: sqlite3.Connection, tool_use_id: str
 ) -> tuple[int | None, int | None]:
-    """Read the recorder's just-inserted row to get session + scope.
-
-    The observability PreToolUse hook order (see settings.json) runs the
-    recorder BEFORE the permission hook, so by the time we fire, the
-    tool_call row exists with session_id and scope_id populated. If the
-    row is missing (schema drift, recorder failure, synthetic tool_use_id
-    mismatch), both return as None and we degrade to Wave 1 behavior.
-    """
     row = conn.execute(
-        "SELECT session_id, scope_id FROM tool_calls WHERE tool_use_id = ?;",
+        "SELECT session_id, project_id FROM tool_calls WHERE tool_use_id = ?;",
         (tool_use_id,),
     ).fetchone()
     if row is None:
@@ -81,160 +98,41 @@ def _lookup_call_context(
     )
 
 
-def _shape_id_for_leaf(conn: sqlite3.Connection, leaf: CanonicalLeaf) -> int | None:
-    """Look up an existing command_shapes row for a leaf. Returns None if
-    absent — the hook doesn't upsert shapes on lookup, only on ask
-    registration (to keep the hot path cheap when no ask is involved).
-    """
-    row = conn.execute(
-        """
-        SELECT id FROM command_shapes
-         WHERE verb = ?
-           AND IFNULL(subcommand, '') = ?
-           AND flags = ?;
-        """,
-        (leaf.verb, leaf.subcommand or "", _flags_key(leaf.flags)),
-    ).fetchone()
-    return int(row[0]) if row is not None else None
+# ---------------------------------------------------------------------------
+# Output / side-effect helpers
+# ---------------------------------------------------------------------------
 
 
-def _upsert_shape_inline(
-    conn: sqlite3.Connection, leaf: CanonicalLeaf, now: str
-) -> int:
-    """Upsert command_shapes for an ask'd leaf and return its id.
-
-    Inlined (no ``lib.db`` import) because this is the hot path and the
-    helper's dependency surface is small.
-    """
-    flags_key = _flags_key(leaf.flags)
-    row = conn.execute(
-        """
-        SELECT id FROM command_shapes
-         WHERE verb = ?
-           AND IFNULL(subcommand, '') = ?
-           AND flags = ?;
-        """,
-        (leaf.verb, leaf.subcommand or "", flags_key),
-    ).fetchone()
-    if row is not None:
-        conn.execute(
-            "UPDATE command_shapes SET last_seen = ? WHERE id = ?;",
-            (now, int(row[0])),
-        )
-        return int(row[0])
-    cur = conn.execute(
-        """
-        INSERT INTO command_shapes (verb, subcommand, flags, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?);
-        """,
-        (leaf.verb, leaf.subcommand, flags_key, now, now),
-    )
-    return int(cur.lastrowid or 0)
+_MARK_DENIED_SQL = """
+    UPDATE tool_calls
+       SET status_id = (SELECT id FROM call_statuses WHERE name = 'denied'),
+           completed_ts = ?
+     WHERE tool_use_id = ?
+       AND status_id = (SELECT id FROM call_statuses WHERE name = 'pending');
+"""
 
 
-def _is_session_approved(
-    conn: sqlite3.Connection, session_id: int, shape_id: int, scope_id: int
-) -> bool:
-    """Check if a (session, shape, scope) triple is pre-approved."""
-    row = conn.execute(
-        """
-        SELECT 1 FROM permission_session_approvals
-         WHERE session_id = ?
-           AND command_shape_id = ?
-           AND scope_id = ?;
-        """,
-        (session_id, shape_id, scope_id),
-    ).fetchone()
-    return row is not None
-
-
-def _rejected_reason_for_any_leaf(
-    conn: sqlite3.Connection, leaves: list[CanonicalLeaf], scope_id: int | None
-) -> str | None:
-    """Return a deny reason if any leaf's shape has a rejection match.
-
-    Returns ``None`` when no leaf is rejected. Scope match: ``any`` or
-    equal to the call's scope. First matching leaf's rejection wins;
-    subsequent leaves aren't checked (the deny is terminal).
-    """
-    any_id_row = conn.execute(
-        "SELECT id FROM tool_call_scopes WHERE name = 'any';"
-    ).fetchone()
-    any_id = int(any_id_row[0]) if any_id_row is not None else -1
-    scope_ids: list[int] = [any_id]
-    if scope_id is not None and scope_id != any_id:
-        scope_ids.append(scope_id)
-    placeholders = ",".join("?" for _ in scope_ids)
-    for leaf in leaves:
-        shape_id = _shape_id_for_leaf(conn, leaf)
-        if shape_id is None:
-            continue
-        row = conn.execute(
-            f"""
-            SELECT reason FROM permission_rejected
-             WHERE command_shape_id = ?
-               AND scope_id IN ({placeholders})
-             LIMIT 1;
-            """,
-            (shape_id, *scope_ids),
-        ).fetchone()
-        if row is not None:
-            reason = row[0] if row[0] else ""
-            desc = f"{leaf.verb}"
-            if leaf.subcommand:
-                desc += f" {leaf.subcommand}"
-            base = f"shape '{desc}' was user-rejected"
-            return f"{base}: {reason}" if reason else base
-    return None
-
-
-def _summarize(leaves: list[CanonicalLeaf]) -> str:
-    pieces: list[str] = []
-    for leaf in leaves:
-        sub = f" {leaf.subcommand}" if leaf.subcommand else ""
-        flag_part = ""
-        if leaf.flags:
-            flag_part = " " + " ".join(sorted(leaf.flags))
-        pieces.append(f"{leaf.verb}{sub}{flag_part}".strip())
-    return "; ".join(pieces)
-
-
-def _now_iso() -> str:
-    """Timestamp matching ``lib.db._now()`` — inlined for hot-path leanness."""
-    import datetime as _dt
-
-    return (
-        _dt.datetime.now(tz=_dt.timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def _mark_denied(tool_use_id: str) -> None:
-    """Flip the recorder's pending row to ``denied`` + stamp ``completed_ts``."""
+def _mark_denied(
+    tool_use_id: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    if conn is not None:
+        try:
+            conn.execute(_MARK_DENIED_SQL, (_now_iso(), tool_use_id))
+        except sqlite3.Error:
+            pass
+        return
     db = _db_path()
     if not db.is_file():
         return
     try:
-        conn = sqlite3.connect(db, timeout=1.0)
+        c = _connect(db)
         try:
-            conn.execute(
-                """
-                UPDATE tool_calls
-                   SET status_id = (SELECT id FROM call_statuses
-                                     WHERE name = 'denied'),
-                       completed_ts = ?
-                 WHERE tool_use_id = ?
-                   AND status_id = (SELECT id FROM call_statuses
-                                     WHERE name = 'pending');
-                """,
-                (_now_iso(), tool_use_id),
-            )
-            conn.commit()
+            c.execute(_MARK_DENIED_SQL, (_now_iso(), tool_use_id))
         finally:
-            conn.close()
-    except sqlite3.Error as e:
-        print(f"hook: denied-row update failed: {e}", file=sys.stderr)
+            c.close()
+    except sqlite3.Error:
+        pass
 
 
 def _emit(decision: str | None, reason: str | None = None) -> None:
@@ -265,6 +163,102 @@ def _load_payload() -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _summarize(leaves: list[CanonicalLeaf]) -> str:
+    pieces: list[str] = []
+    for leaf in leaves:
+        sub = f" {leaf.subcommand}" if leaf.subcommand else ""
+        flag_part = ""
+        if leaf.flags:
+            flag_part = " " + " ".join(sorted(leaf.flags))
+        pieces.append(f"{leaf.verb}{sub}{flag_part}".strip())
+    return "; ".join(pieces)
+
+
+def _emit_verdict(
+    verdict: Verdict,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    tool_use_id_str: str | None,
+    conn: sqlite3.Connection | None,
+    session_id: int | None,
+) -> None:
+    """Translate a Verdict to hook output, with side-effects for Deny/Ask."""
+    if verdict == Verdict.Allow:
+        # Build a summary reason for Bash allow.
+        reason = ""
+        if isinstance(tool_input, dict):
+            cmd = tool_input.get("command", "")
+            if cmd:
+                leaves = parse_command(cmd)
+                reason = f"matched: {_summarize(leaves)}" if leaves else ""
+        _emit("allow", reason)
+
+    elif verdict == Verdict.Deny:
+        if tool_use_id_str:
+            _mark_denied(tool_use_id_str, conn=conn)
+        reason = (
+            "shape was user-rejected" if tool_name == "Bash" else f"{tool_name} denied"
+        )
+        _emit("deny", reason)
+
+    elif verdict == Verdict.Ask:
+        # Register ask-pending row for Bash invocations.
+        if tool_name == "Bash" and isinstance(tool_input, dict):
+            cmd = tool_input.get("command", "")
+            if (
+                cmd
+                and session_id is not None
+                and tool_use_id_str is not None
+                and conn is not None
+            ):
+                leaves = parse_command(cmd)
+                if leaves:
+                    first_ask_leaf = _first_ask_leaf(leaves)
+                    if first_ask_leaf is not None:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO permission_ask_pending"
+                            " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
+                            " VALUES (?, ?, ?, ?, ?, ?);",
+                            (
+                                tool_use_id_str,
+                                session_id,
+                                first_ask_leaf.verb,
+                                first_ask_leaf.subcommand,
+                                json.dumps(
+                                    sorted(first_ask_leaf.flags), separators=(",", ":")
+                                ),
+                                _now_iso(),
+                            ),
+                        )
+        # Find reason from deny.py.
+        ask_reason: str | None = None
+        if tool_name == "Bash" and isinstance(tool_input, dict):
+            cmd = tool_input.get("command", "")
+            if cmd:
+                for leaf in parse_command(cmd):
+                    outcome, reason = evaluate(leaf)
+                    if outcome == "ask" and ask_reason is None:
+                        ask_reason = reason
+        _emit("ask", ask_reason)
+
+    else:  # NoOpinion
+        _emit(None)
+
+
+def _first_ask_leaf(leaves: list[CanonicalLeaf]) -> CanonicalLeaf | None:
+    """Return the first leaf that triggers the ask tier in deny.py."""
+    for leaf in leaves:
+        outcome, _ = evaluate(leaf)
+        if outcome == "ask":
+            return leaf
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
 def main() -> int:
     data = _load_payload()
     if data is None:
@@ -272,184 +266,143 @@ def main() -> int:
         return 0
 
     tool = data.get("tool_name") or data.get("tool")
-    if tool != "Bash":
+    if not isinstance(tool, str) or not tool:
         _emit(None)
         return 0
 
     tool_input = data.get("tool_input") or data.get("input") or {}
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command.strip():
-        _emit(None)
-        return 0
-
-    leaves = parse_command(command)
-    if not leaves:
-        _emit(None)
-        return 0
+    if not isinstance(tool_input, dict):
+        tool_input = {}
 
     tool_use_id = data.get("tool_use_id")
     tool_use_id_str = (
         tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None
     )
 
-    db = _db_path()
-    if not db.is_file():
-        # No DB means no session / no approvals. Run deny-check without
-        # session bookkeeping; if any leaf asks, emit ask with no pending
-        # registration — the call still works, just without session memory.
-        ask_reason: str | None = None
+    payload_cwd: str = data.get("cwd") or ""
+
+    # -----------------------------------------------------------------------
+    # Step 1: procedural deny — Bash only; fires before any DB access.
+    # -----------------------------------------------------------------------
+    if tool == "Bash":
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if not isinstance(command, str) or not command.strip():
+            _emit(None)
+            return 0
+
+        leaves = parse_command(command)
+        if not leaves:
+            _emit(None)
+            return 0
+
         for leaf in leaves:
-            decision, reason = evaluate(leaf)
-            if decision == "deny":
+            outcome, reason = evaluate(leaf)
+            if outcome == "deny":
                 if tool_use_id_str:
                     _mark_denied(tool_use_id_str)
                 _emit("deny", reason or "matched deny list")
                 return 0
-            if decision == "ask" and ask_reason is None:
-                ask_reason = reason
-        if ask_reason is not None:
-            _emit("ask", ask_reason)
-            return 0
+
+    # -----------------------------------------------------------------------
+    # No-DB fast path (Bash only): ask tier from deny.py.
+    # -----------------------------------------------------------------------
+    db = _db_path()
+    if not db.is_file():
+        if tool == "Bash":
+            command = tool_input.get("command", "")
+            leaves = parse_command(command) if command else []
+            ask_reason: str | None = None
+            for leaf in leaves:
+                outcome, reason = evaluate(leaf)
+                if outcome == "ask" and ask_reason is None:
+                    ask_reason = reason
+            if ask_reason is not None:
+                _emit("ask", ask_reason)
+                return 0
         _emit(None)
         return 0
 
-    conn = sqlite3.connect(db, timeout=1.0)
+    # -----------------------------------------------------------------------
+    # With DB: dispatch to per-tool-class matcher.
+    # -----------------------------------------------------------------------
+    conn = _connect(db)
     try:
-        # Read the recorder's row (ran just before us) for session + scope.
         session_id_int: int | None = None
-        scope_id: int | None = None
+        project_id_int: int | None = None
         if tool_use_id_str:
-            session_id_int, scope_id = _lookup_call_context(conn, tool_use_id_str)
+            session_id_int, project_id_int = _lookup_call_context(conn, tool_use_id_str)
 
-        # First pass: hard-deny. A single deny anywhere blocks the whole call.
-        for leaf in leaves:
-            decision, reason = evaluate(leaf)
-            if decision == "deny":
-                if tool_use_id_str:
-                    _mark_denied(tool_use_id_str)
-                _emit("deny", reason or "matched deny list")
-                return 0
+        verdict = dispatch(
+            tool,
+            tool_input,
+            conn,
+            session_id_int,
+            project_id_int,
+            cwd=payload_cwd or None,
+        )
 
-        # v13: user-rejected shapes (scope-aware) are runtime deny. Checked
-        # AFTER rule-deny (rule deny has a richer reason string) but BEFORE
-        # ask/active so a rejection can't be overridden by session approval
-        # or allowlist.
-        rejected_reason = _rejected_reason_for_any_leaf(conn, leaves, scope_id)
-        if rejected_reason is not None:
+        # Build reason for Allow verdict (Bash summary).
+        if verdict == Verdict.Allow and tool == "Bash":
+            command = tool_input.get("command", "")
+            leaves = parse_command(command) if command else []
+            reason_str = f"matched: {_summarize(leaves)}" if leaves else ""
+            _emit("allow", reason_str)
+            return 0
+
+        if verdict == Verdict.Deny:
             if tool_use_id_str:
-                _mark_denied(tool_use_id_str)
-            _emit("deny", rejected_reason)
+                _mark_denied(tool_use_id_str, conn=conn)
+            if tool == "Bash":
+                command = tool_input.get("command", "")
+                leaves = parse_command(command) if command else []
+                verb = leaves[0].verb if leaves else tool
+                reason_str = f"shape '{verb}' was user-rejected"
+            else:
+                reason_str = f"{tool} denied"
+            _emit("deny", reason_str)
             return 0
 
-        # Unified clearance pass: for each leaf, check in order —
-        #   (a) permission_active for (shape, scope) → cleared.
-        #   (b) permission_session_approvals for (session, shape, scope)
-        #       → cleared (ask-tier shortcut).
-        #   (c) if still uncleared and evaluate() says ask, track ask_reason
-        #       and remember the leaf for pending-registration.
-        # If all leaves are cleared → emit allow. If any ask_reason surfaced
-        # → emit ask and register pending rows for those leaves. Otherwise
-        # fall through (no opinion).
-        now = _now_iso()
-        ask_reason = None
-        # (leaf_index, shape_id, leaf) for each uncleared ask-tier leaf.
-        pending_leaves: list[tuple[int, int, CanonicalLeaf]] = []
-        all_cleared = True
-
-        # Scope lookup — hoisted out of the leaf loop (same pattern as
-        # ``_rejected_reason_for_any_leaf``).
-        any_id_row = conn.execute(
-            "SELECT id FROM tool_call_scopes WHERE name = 'any';"
-        ).fetchone()
-        any_id = int(any_id_row[0]) if any_id_row is not None else -1
-        scope_ids: list[int] = [any_id]
-        if scope_id is not None and scope_id != any_id:
-            scope_ids.append(scope_id)
-        placeholders = ",".join("?" for _ in scope_ids)
-
-        for leaf_index, leaf in enumerate(leaves):
-            existing_shape = _shape_id_for_leaf(conn, leaf)
-            # Active check: fast path if shape already registered.
-            if existing_shape is not None:
-                row = conn.execute(
-                    f"""
-                    SELECT 1 FROM permission_active
-                     WHERE command_shape_id = ?
-                       AND scope_id IN ({placeholders});
-                    """,
-                    (existing_shape, *scope_ids),
-                ).fetchone()
-                if row is not None:
-                    continue
-                # Session-approved?
+        if verdict == Verdict.Ask:
+            # Register ask-pending for Bash invocations.
+            if tool == "Bash":
+                command = tool_input.get("command", "")
+                leaves = parse_command(command) if command else []
+                first_ask = _first_ask_leaf(leaves)
                 if (
-                    session_id_int is not None
-                    and scope_id is not None
-                    and _is_session_approved(
-                        conn, session_id_int, existing_shape, scope_id
-                    )
+                    first_ask is not None
+                    and session_id_int is not None
+                    and tool_use_id_str is not None
                 ):
-                    continue
-
-            # Not cleared by active/session. Does rule say ask?
-            decision, reason = evaluate(leaf)
-            if decision == "ask":
-                shape_id = existing_shape
-                if shape_id is None:
-                    shape_id = _upsert_shape_inline(conn, leaf, now)
-                # Re-check session approval if we just upserted (rare).
-                if (
-                    session_id_int is not None
-                    and scope_id is not None
-                    and _is_session_approved(conn, session_id_int, shape_id, scope_id)
-                ):
-                    continue
-                if ask_reason is None:
-                    ask_reason = reason
-                pending_leaves.append((leaf_index, shape_id, leaf))
-                all_cleared = False
-                continue
-
-            # Not in active, not session-approved, not ask-tier → no opinion.
-            all_cleared = False
-
-        if all_cleared:
-            conn.commit()
-            _emit(
-                "allow",
-                f"matched: {_summarize(leaves)}",
-            )
-            return 0
-
-        if ask_reason is not None:
-            # Register pending rows for the uncleared ask-tier leaves so a
-            # successful Post can promote them into session_approvals.
-            if session_id_int is not None and scope_id is not None and tool_use_id_str:
-                for idx, shape_id, _leaf in pending_leaves:
                     conn.execute(
-                        """
-                        INSERT OR IGNORE INTO permission_ask_pending
-                          (tool_use_id, leaf_index, session_id,
-                           command_shape_id, scope_id, asked_at)
-                        VALUES (?, ?, ?, ?, ?, ?);
-                        """,
+                        "INSERT OR IGNORE INTO permission_ask_pending"
+                        " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?);",
                         (
                             tool_use_id_str,
-                            idx,
                             session_id_int,
-                            shape_id,
-                            scope_id,
-                            now,
+                            first_ask.verb,
+                            first_ask.subcommand,
+                            json.dumps(sorted(first_ask.flags), separators=(",", ":")),
+                            _now_iso(),
                         ),
                     )
-            conn.commit()
-            _emit("ask", ask_reason)
+                # Get reason from deny.py.
+                ask_reason_str: str | None = None
+                for leaf in leaves:
+                    outcome, reason = evaluate(leaf)
+                    if outcome == "ask" and ask_reason_str is None:
+                        ask_reason_str = reason
+                _emit("ask", ask_reason_str)
+                return 0
+            _emit("ask")
             return 0
+
+        # NoOpinion — fall through.
+        _emit(None)
+        return 0
+
     finally:
         conn.close()
-
-    _emit(None)
-    return 0
 
 
 if __name__ == "__main__":

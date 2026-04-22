@@ -18,11 +18,11 @@ flight. Override via ``--hours`` on the CLI if the workload needs it.
 Safe to re-run. Idempotent: a row that's already been swept has a
 terminal ``status_id`` and the WHERE clause filters it out.
 """
+
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import sys
 
 from lib.db import _now, _open
 
@@ -30,9 +30,10 @@ from lib.db import _now, _open
 def sweep_orphans(conn, threshold_hours: float = 1.0) -> int:
     """Relabel old ``pending`` rows to ``orphan``. Return number relabeled."""
     cutoff = (
-        _dt.datetime.now(tz=_dt.timezone.utc)
-        - _dt.timedelta(hours=threshold_hours)
-    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        (_dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(hours=threshold_hours))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
     now = _now()
     cur = conn.execute(
         """

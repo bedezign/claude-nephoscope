@@ -1,51 +1,43 @@
 #!/bin/bash
-# Idempotent bootstrap for ~/.claude/observability/.
-#
-# Creates the shared venv (bashlex + pyyaml), then applies any pending
-# schema migrations against ~/.cache/claude/observability/observations.db
-# (honoring OBSERVABILITY_DB if set). Safe to re-run; each step is a no-op
-# when already satisfied.
-
 set -euo pipefail
 
-OBS_ROOT="/home/steve/.claude/observability"
-VENV_DIR="${OBS_ROOT}/.venv"
-PY="${VENV_DIR}/bin/python"
+# Setup script for Phase 8 observability sandbox.
+# Idempotent: safe to re-run.
 
-# --- 1. venv -----------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OBSERVABILITY_ROOT="$(dirname "$SCRIPT_DIR")"
+OBSERVABILITY_DB="${OBSERVABILITY_DB:=/tmp/claude/observability-phase8/observations.db}"
 
-if [[ ! -x "${PY}" ]]; then
-  echo "[setup] creating venv at ${VENV_DIR}"
-  uv venv --no-config "${VENV_DIR}" >/dev/null
+echo "Setup: OBSERVABILITY_DB=$OBSERVABILITY_DB"
+echo "Setup: OBSERVABILITY_ROOT=$OBSERVABILITY_ROOT"
+
+# 1. Create/activate venv if not already present
+VENV_DIR="$OBSERVABILITY_ROOT/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+  echo "Creating venv at $VENV_DIR..."
+  uv venv "$VENV_DIR"
 else
-  echo "[setup] venv already present at ${VENV_DIR}"
+  echo "Venv already exists at $VENV_DIR"
 fi
 
-# --- 2. deps -----------------------------------------------------------------
+# Activate venv
+source "$VENV_DIR/bin/activate"
 
-echo "[setup] ensuring bashlex + pyyaml + pytest installed"
-VIRTUAL_ENV="${VENV_DIR}" uv pip install --no-config --quiet bashlex pyyaml pytest
+# 2. Install dependencies (idempotent with uv)
+echo "Installing dependencies..."
+uv pip install bashlex pyyaml
 
-# --- 3. migrations -----------------------------------------------------------
+# 3. Apply schema to DB (idempotent: sqlite3 CREATE TABLE IF NOT EXISTS style is enforced at schema level)
+echo "Applying schema to $OBSERVABILITY_DB..."
+sqlite3 "$OBSERVABILITY_DB" < "$OBSERVABILITY_ROOT/lib/schema.sql"
 
-echo "[setup] applying pending schema migrations"
-"${PY}" - <<'PY'
-import sys
-sys.path.insert(0, "/home/steve/.claude/observability")
+# 4. Seed lookup tables (INSERT OR IGNORE is idempotent)
+echo "Seeding lookup tables..."
+sqlite3 "$OBSERVABILITY_DB" <<'EOF'
+INSERT OR IGNORE INTO permission_modes (name) VALUES ('default'),('acceptEdits'),('bypassPermissions'),('plan'),('auto');
+INSERT OR IGNORE INTO call_statuses    (name) VALUES ('pending'),('ok'),('err'),('denied'),('orphan');
+INSERT OR IGNORE INTO global_mirror (id, settings_json_path, settings_json_sha256, settings_json_last_synced)
+  VALUES (1, '~/.claude/settings.json', NULL, NULL);
+EOF
 
-from lib.db import DB_PATH, _migrate, _open
-
-conn = _open()
-try:
-    _migrate(conn)
-    version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    rows = conn.execute("SELECT COUNT(*) FROM tool_calls;").fetchone()[0]
-finally:
-    conn.close()
-
-print(f"[setup] db={DB_PATH}")
-print(f"[setup] schema_version={version}")
-print(f"[setup] tool_calls_rows={rows}")
-PY
-
-echo "[setup] done"
+echo "Setup complete. DB at $OBSERVABILITY_DB."

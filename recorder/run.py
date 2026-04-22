@@ -6,33 +6,25 @@ if missing, we default to ``post`` so the row still ends up complete.
 
 Pre phase:
     INSERT row with ``status_id=<pending>``, ``tool_use_id``, ``ts=_now()``,
-    ``completed_ts=NULL``, ``ok=NULL``, and FK columns populated from
-    lookup tables (``tool_id``, ``subagent_type_id``, ``file_path_id``,
-    integer ``session_id``). Capture top-level ``permission_mode`` via
-    the lookup table, store the full payload (truncated) in
-    ``tool_extras(name='payload')``, and — if present — set
-    ``sessions.transcript_path`` (set-once-only).
+    ``completed_ts=NULL``, ``ok=NULL``, and FK columns populated from lookup
+    tables (``tool_id``, ``subagent_type_id``, ``file_path_id``, integer
+    ``session_id``). Capture top-level ``permission_mode`` via the lookup
+    table, store the full payload (truncated) in ``tool_extras(name='payload')``,
+    and — if present — set ``sessions.transcript_path`` (set-once-only).
 
 Post phase:
     UPDATE the row matched by ``tool_use_id`` setting ``completed_ts``,
     ``status_id`` (ok/err) and ``ok``. Capture the ``tool_response``
     (truncated) in ``tool_extras(name='response')``. If no pending row
-    exists (orphan post), INSERT a complete row — also using FK columns
-    only — and still write the response extra.
+    exists (orphan post), INSERT a complete row so nothing is lost.
 
-Status is written only to ``status_id`` — the legacy TEXT ``status`` column
-was dropped in v6. ``status_id`` is now the single source of truth.
+Malformed input is silently swallowed. Unhandled exceptions are printed to
+stderr (the hook harness surfaces them back to the model) but we still exit
+0 so the user's tool call is never broken by the recorder.
 
-The handler silently swallows malformed input. On any unhandled exception
-it logs to stderr (the hook harness surfaces that back to the model) but
-exits 0 so the user's tool call is never broken by the recorder.
-
-Schema note (v7+v8): the four repeating-value TEXT columns on
-``tool_calls`` — ``tool``, ``subagent_type``, ``file_path``, and TEXT
-``session_id`` — were replaced by INTEGER FK columns pointing at lookup
-tables (``tools``, ``subagent_types``, ``file_paths``) and the INTEGER-PK
-``sessions`` table. The recorder writes only the FK columns; v8 drops
-the legacy TEXT columns entirely.
+Phase 8.5: ``scope_id`` and the ``tool_call_scopes`` / ``tool_call_shapes``
+tables were dropped (``path_spec`` on rule_shapes now carries the path axis).
+The recorder no longer classifies paths or writes a scope FK.
 """
 
 from __future__ import annotations
@@ -40,50 +32,35 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 
-# Allow `from lib.db import ...` when invoked as a script from any cwd.
-sys.path.insert(0, "/home/steve/.claude/observability")
+OBSERVABILITY_ROOT = Path(__file__).resolve().parent.parent
+if str(OBSERVABILITY_ROOT) not in sys.path:
+    sys.path.insert(0, str(OBSERVABILITY_ROOT))
 
 from lib.db import (  # noqa: E402
     MAX_STR,
-    _migrate,
     _now,
     _open,
     _truncate,
-    _upsert_project,
-    _upsert_session,
-    drop_pending,
     lookup_or_insert_file_path_id,
     lookup_or_insert_subagent_type_id,
     lookup_or_insert_tool_id,
     lookup_permission_mode_id,
-    lookup_scope_id,
     lookup_status_id,
     minify_json,
-    promote_pending_to_session_approval,
-    set_session_transcript_path,
+    upsert_project,
+    upsert_session,
     write_extra,
 )
-from lib.scope import (  # noqa: E402
-    classify_paths,
-    paths_for_tool_call,
-)
-from learners.permission.canonicalize import parse_command  # noqa: E402
 
-# Truncation caps for the two sidecar blobs. Values are generous enough to
-# keep most real payloads intact but cheap on disk per row.
 PAYLOAD_MAX = 4096
 RESPONSE_MAX = 2048
 
 
 def _flatten(tool: str, tool_input: dict[str, Any]) -> dict[str, Any]:
-    """Project a tool-input dict into the flat columns stored on tool_calls.
-
-    Mirrors the logic in the continuous-learning-v2 observer: per-tool
-    specialization for the fields we want queryable, plus an always-populated
-    (truncated, minified) JSON blob for later retrieval.
-    """
+    """Project a tool-input dict into the flat columns stored on tool_calls."""
     row: dict[str, Any] = {}
     if tool in ("Task", "Agent"):
         if (v := tool_input.get("subagent_type")) is not None:
@@ -122,9 +99,7 @@ def _ok(tool_response: Any) -> int | None:
 
 def _status_name_from_ok(ok: int | None) -> str:
     """Map _ok() output to the schema's status enum name for completed rows."""
-    if ok == 0:
-        return "err"
-    return "ok"
+    return "err" if ok == 0 else "ok"
 
 
 def _synthetic_use_id(session_id: str, tool: str, now: str) -> str:
@@ -140,65 +115,27 @@ def _safe_minify(value: Any) -> str:
         return str(value)
 
 
-def _collect_paths(tool: str, tool_input: dict[str, Any]) -> list[str]:
-    """Assemble the path-like inputs for a tool call.
-
-    Bash paths come from canonicalizing the command; everything else has
-    declarative path fields handled by ``paths_for_tool_call``. Returning
-    a list (not a scope name) lets the caller classify once it has the
-    project root.
-    """
-    if tool == "Bash":
-        command = tool_input.get("command")
-        if not isinstance(command, str) or not command.strip():
-            return []
-        out: list[str] = []
-        for leaf in parse_command(command):
-            out.extend(leaf.positional_paths)
-        return out
-    return paths_for_tool_call(tool, tool_input)
-
-
 def _handle(phase: str, data: dict[str, Any]) -> None:
     tool = data.get("tool_name") or data.get("tool") or "unknown"
     tool_input = data.get("tool_input") or data.get("input") or {}
     if not isinstance(tool_input, dict):
         tool_input = {}
     cwd = data.get("cwd") or ""
-    session_id = data.get("session_id") or data.get("session") or "unknown"
+    session_uuid = data.get("session_id") or data.get("session") or "unknown"
     tool_use_id = data.get("tool_use_id")
     now = _now()
     if not tool_use_id:
-        tool_use_id = _synthetic_use_id(session_id, tool, now)
+        tool_use_id = _synthetic_use_id(session_uuid, tool, now)
 
     flat = _flatten(tool, tool_input)
-    path_inputs = _collect_paths(tool, tool_input)
 
     conn = _open()
     try:
-        _migrate(conn)
-        project_id = _upsert_project(conn, cwd, now) if cwd else None
-        # Resolve the INTEGER session id (post-v7 sessions PK). The UUID
-        # stays in memory for payload inspection; the DB stores only the id.
+        project_id = upsert_project(conn, cwd, now) if cwd else None
         session_id_int: int | None = None
-        if project_id is not None and session_id != "unknown":
-            session_id_int = _upsert_session(conn, session_id, project_id, now)
+        if project_id is not None and session_uuid != "unknown":
+            session_id_int = upsert_session(conn, session_uuid, project_id, now)
 
-        # Classify the call's paths against the project root (v11+). This
-        # happens after the project upsert so we have the (possibly
-        # lazy-backfilled) root on hand. Rows for sessions without a project
-        # get NULL scope_id — no baseline to classify against.
-        scope_id: int | None = None
-        if project_id is not None:
-            root_row = conn.execute(
-                "SELECT root FROM projects WHERE id = ?;", (project_id,)
-            ).fetchone()
-            project_root = root_row[0] if root_row is not None else None
-            scope_name = classify_paths(path_inputs, project_root)
-            scope_id = lookup_scope_id(conn, scope_name)
-
-        # Resolve the FK lookup ids for the normalized columns. These replace
-        # the legacy TEXT writes — v8 dropped the source columns entirely.
         tool_id = lookup_or_insert_tool_id(conn, tool)
         subagent_type_id = lookup_or_insert_subagent_type_id(
             conn, flat.get("subagent_type")
@@ -206,8 +143,6 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         file_path_id = lookup_or_insert_file_path_id(conn, flat.get("file_path"), now)
 
         if phase == "pre":
-            # permission_mode_id — lookup returns None for missing/unknown,
-            # which stores as NULL FK (no crash on unexpected payload shape).
             permission_mode_id = lookup_permission_mode_id(
                 conn, data.get("permission_mode")
             )
@@ -220,8 +155,8 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                    command, pattern, description,
                    args_json, tool_use_id, completed_ts,
                    permission_mode_id, status_id,
-                   tool_id, subagent_type_id, file_path_id, scope_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?);
+                   tool_id, subagent_type_id, file_path_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?);
                 """,
                 (
                     now,
@@ -238,32 +173,29 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                     tool_id,
                     subagent_type_id,
                     file_path_id,
-                    scope_id,
                 ),
             )
             tool_call_id = int(cur.lastrowid or 0)
 
-            # Full top-level payload → sidecar (truncated). The row's id must
-            # exist first — cur.lastrowid is the just-inserted row.
             if tool_call_id > 0:
                 payload_blob = _safe_minify(data)[:PAYLOAD_MAX]
                 write_extra(conn, tool_call_id, "payload", payload_blob)
 
-            # Set-once transcript_path on the session. Post-v7 the helper
-            # keys on sessions.id (INTEGER), so pass the resolved int id.
             transcript_path = data.get("transcript_path")
             if transcript_path and session_id_int is not None:
-                set_session_transcript_path(conn, session_id_int, transcript_path)
+                conn.execute(
+                    "UPDATE sessions SET transcript_path = ? "
+                    "WHERE id = ? AND transcript_path IS NULL;",
+                    (transcript_path, session_id_int),
+                )
             return
 
         # -- post phase --------------------------------------------------
         ok = _ok(data.get("tool_response"))
         status_id = lookup_status_id(conn, _status_name_from_ok(ok))
 
-        # Find the pending row first, so we can attach a response extra to
-        # either the freshly-updated row or the fallback insert below.
         existing = conn.execute(
-            "SELECT id FROM tool_calls WHERE tool_use_id = ?;",
+            "SELECT id FROM tool_calls WHERE tool_use_id = ? ORDER BY id DESC LIMIT 1;",
             (tool_use_id,),
         ).fetchone()
 
@@ -280,17 +212,14 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                 (now, status_id, ok, tool_call_id),
             )
         else:
-            # Orphan post — no matching pre row. INSERT a complete row
-            # directly so nothing is lost; ts == completed_ts signals this
-            # is a single-shot row.
             cur = conn.execute(
                 """
                 INSERT INTO tool_calls
                   (ts, session_id, project_id, ok,
                    command, pattern, description,
                    args_json, tool_use_id, completed_ts, status_id,
-                   tool_id, subagent_type_id, file_path_id, scope_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                   tool_id, subagent_type_id, file_path_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     now,
@@ -307,28 +236,14 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                     tool_id,
                     subagent_type_id,
                     file_path_id,
-                    scope_id,
                 ),
             )
             tool_call_id = int(cur.lastrowid or 0)
 
-        # Response sidecar — store the minified tool_response if non-empty.
         tool_response = data.get("tool_response")
         if tool_response and tool_call_id > 0:
             response_blob = _safe_minify(tool_response)[:RESPONSE_MAX]
             write_extra(conn, tool_call_id, "response", response_blob)
-
-        # v12: resolve any pending ask-rows for this tool_use_id. On ok,
-        # promote into permission_session_approvals; on err, just drop.
-        # Synthetic tool_use_ids (from payloads without one) would also
-        # land here — they won't match any pending row since the hook's
-        # lookup was keyed on the same id, so the INSERT was tied to the
-        # real id seen on Pre.
-        if isinstance(tool_use_id, str) and tool_use_id:
-            if status_id == lookup_status_id(conn, "ok"):
-                promote_pending_to_session_approval(conn, tool_use_id, now)
-            else:
-                drop_pending(conn, tool_use_id)
     finally:
         conn.close()
 

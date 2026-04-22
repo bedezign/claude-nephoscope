@@ -15,6 +15,7 @@ Two configuration layers:
 Appending (``>>``) is not denied on its own — it's typically log growth,
 not data destruction — unless the target sits under a guarded path.
 """
+
 from __future__ import annotations
 
 import os

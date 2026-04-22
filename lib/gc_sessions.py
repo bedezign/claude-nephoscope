@@ -1,10 +1,10 @@
-"""GC for session-scoped permission data (v12+).
+"""GC for session-scoped permission data (Phase 8).
 
 Drops rows whose usefulness has expired:
 
-- ``permission_session_approvals``: tied to a session. A session that
-  hasn't been touched in ``session_idle_days`` days (default 7) loses its
-  approvals — the user can re-confirm if they come back.
+- ``permissions`` rows where session_id is set and the session hasn't been
+  touched in ``session_idle_days`` days (default 7) — the user can
+  re-confirm if they come back.
 - ``permission_ask_pending``: orphans from ask'd calls where the user
   chose "Deny" (PostToolUse never fires), or from calls where the
   recorder's Post phase crashed before promotion. Older than
@@ -40,10 +40,11 @@ def sweep(
 
     cur = conn.execute(
         """
-        DELETE FROM permission_session_approvals
-         WHERE session_id IN (
-           SELECT id FROM sessions WHERE last_activity < ?
-         );
+        DELETE FROM permissions
+         WHERE session_id IS NOT NULL
+           AND session_id IN (
+             SELECT id FROM sessions WHERE last_activity < ?
+           );
         """,
         (session_cutoff,),
     )
@@ -57,7 +58,7 @@ def sweep(
 
     conn.commit()
     return {
-        "permission_session_approvals": max(approvals_dropped, 0),
+        "permissions (session-tier)": max(approvals_dropped, 0),
         "permission_ask_pending": max(pending_dropped, 0),
     }
 
@@ -68,7 +69,7 @@ def main() -> int:
         "--session-idle-days",
         type=int,
         default=7,
-        help="Drop session_approvals for sessions idle this many days (default 7).",
+        help="Drop session-tier permissions for sessions idle this many days (default 7).",
     )
     ap.add_argument(
         "--ask-pending-hours",

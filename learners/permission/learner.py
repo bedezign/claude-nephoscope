@@ -1,22 +1,22 @@
-"""Offline candidate generation and promotion proposal.
+"""Permission learner.
 
 Run from the observability root so the ``learners.permission`` package is
 importable:
 
-    cd /home/steve/.claude/observability
+    cd ~/.claude/observability
     .venv/bin/python -m learners.permission.learner scan
     .venv/bin/python -m learners.permission.learner candidates
-    .venv/bin/python -m learners.permission.learner active
+    .venv/bin/python -m learners.permission.learner permissions
 
-The ``scan`` subcommand walks all new Bash rows in ``tool_calls`` past our
-cursor, canonicalizes them, drops any that match the deny-list, and upserts
-the rest into ``permission_candidates`` (keyed by ``command_shape_id`` after
-the v5 schema refactor). ``candidates`` and ``active`` dump the contents of
-the two learner tables for inspection, joining through ``command_shapes`` to
-render the verb/subcommand/flags fields.
+The ``scan`` subcommand walks all new Bash rows in ``tool_calls`` past the
+consumer cursor, canonicalizes them, and upserts results directly into
+``permission_candidates`` (verb/subcommand/flags inline — no ``command_shapes``
+join).  The deny filter is NOT applied at scan time; it runs at propose time
+so every observed command accumulates evidence regardless of deny-list status.
 
-A separate ``review`` UX (Phase 4, not wired here) consumes
-:func:`propose_promotions` to offer confirmations.
+``propose`` emits eligible candidates as pipe-delimited lines for review.sh.
+``promote`` / ``reject`` upsert a ``rule_shape`` and INSERT a ``permissions``
+row.  ``unpermit`` deletes a matching permissions row.
 """
 
 from __future__ import annotations
@@ -28,30 +28,29 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# tomllib is stdlib on 3.11+; fall back to `tomli` if a caller ever runs
-# this on 3.10. The shared venv pins Python to whatever uv provides, which
-# is currently 3.11+, so the fallback path is belt-and-braces.
+# tomllib is stdlib on 3.11+; fall back to tomli on 3.10.
 try:
     import tomllib  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover - 3.10 fallback
+except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[import-not-found]
 
-# Allow invocation as `python learner.py` without -m (used by a couple of
-# legacy entrypoints). When imported as a package, __package__ is set and
-# relative imports work; when run as a script directly, pad sys.path so
-# the package is resolvable.
-if __package__ in (None, ""):  # pragma: no cover - script-entry fallback
-    sys.path.insert(0, "/home/steve/.claude/observability")
+# Resolve the observability root from this file's location so the path stays
+# correct after cutover (where __file__ is under ~/.claude/observability/).
+_OBSERVABILITY_ROOT = Path(__file__).resolve().parents[2]
+
+# Allow invocation as `python learner.py` without -m.
+if __package__ in (None, ""):  # pragma: no cover
+    if str(_OBSERVABILITY_ROOT) not in sys.path:
+        sys.path.insert(0, str(_OBSERVABILITY_ROOT))
     from learners.permission import canonicalize as _canonicalize_mod
     from learners.permission import deny as _deny_mod
+    from learners.permission.canonicalize import CanonicalLeaf
 
     parse_command = _canonicalize_mod.parse_command
     evaluate = _deny_mod.evaluate
-    CanonicalLeaf = _canonicalize_mod.CanonicalLeaf
 else:
-    from .canonicalize import parse_command
+    from .canonicalize import CanonicalLeaf, parse_command
     from .deny import evaluate
-
 
 CONSUMER_NAME = "permission-learner"
 
@@ -71,7 +70,7 @@ class Thresholds:
 
 
 def load_thresholds() -> Thresholds:
-    """Read ``config/learner.toml`` and coerce into a Thresholds dataclass."""
+    """Read config/learner.toml and coerce into a Thresholds dataclass."""
     with _CONFIG_PATH.open("rb") as fh:
         data = tomllib.load(fh)
     return Thresholds(
@@ -82,37 +81,32 @@ def load_thresholds() -> Thresholds:
 
 
 # ---------------------------------------------------------------------------
-# lib.db helpers — imported lazily (see _connect) and used by scan_candidates
+# lib.db access
 # ---------------------------------------------------------------------------
 
 
 def _lib_db():
-    """Return the ``lib.db`` module, injecting the observability root in sys.path.
+    """Return the lib.db module.
 
-    Kept behind a function so tests that reload ``lib.db`` under a patched
-    ``OBSERVABILITY_DB`` still see the right module — each call resolves the
-    currently loaded module.
+    Kept behind a function so tests can reload lib.db under a patched
+    OBSERVABILITY_DB and still see the right module — each call resolves
+    the currently loaded module after the path insert.
     """
-    sys.path.insert(0, "/home/steve/.claude/observability")
+    if str(_OBSERVABILITY_ROOT) not in sys.path:
+        sys.path.insert(0, str(_OBSERVABILITY_ROOT))
     import lib.db as _db  # noqa: E402
 
     return _db
 
 
-# ---------------------------------------------------------------------------
-# Candidate scanning
-# ---------------------------------------------------------------------------
-
-
 def _now() -> str:
-    """Timestamp helper matching lib.db._now() format."""
-    import datetime as _dt
+    """UTC timestamp — thin wrapper over lib.db._now()."""
+    return _lib_db()._now()
 
-    return (
-        _dt.datetime.now(tz=_dt.timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+
+# ---------------------------------------------------------------------------
+# Cursor helpers
+# ---------------------------------------------------------------------------
 
 
 def _get_cursor(conn: sqlite3.Connection) -> int:
@@ -137,30 +131,25 @@ def _set_cursor(conn: sqlite3.Connection, last_id: int) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Candidate scanning
+# ---------------------------------------------------------------------------
+
+
 def scan_candidates(conn: sqlite3.Connection) -> int:
-    """Walk new Bash rows past the cursor and upsert canonical candidates.
+    """Walk new Bash rows past the cursor; upsert permission_candidates inline.
 
-    Returns the number of ``tool_calls`` rows processed this scan.
+    Deny filter is NOT applied here — every observed command accumulates
+    evidence. The deny check happens at propose time only.
 
-    Each row is canonicalized; every surviving (non-denied) leaf is linked to
-    its ``command_shape`` (upserted if new) via the ``tool_call_shapes``
-    junction, and bumps ``permission_candidates`` observation counts plus the
-    ``permission_candidate_sessions`` junction. ``distinct_sessions`` is
-    refreshed from the session junction at the end of the scan.
+    Rows without a session_id are skipped — without a session we cannot
+    track distinct_sessions, which is the primary de-noise signal.
 
-    The SELECT excludes rows whose ``permission_mode`` is ``bypassPermissions``
-    or ``auto`` — those approvals weren't user-driven, so they're not positive
-    evidence for "safe to auto-approve". Status is filtered via ``status_id``
-    (the int-FK column introduced in v5); the legacy TEXT ``status`` column is
-    dropped in v6 and must not be referenced. Tool filtering likewise goes
-    through ``tool_id`` and the ``tools`` lookup — the legacy TEXT ``tool``
-    column is dropped in v8. ``tc.session_id`` is an INTEGER FK into
-    ``sessions(id)`` post-v8, so it's read straight through and stored on
-    ``permission_candidate_sessions.session_id`` (also INTEGER in v8).
+    Returns the number of tool_calls rows processed this scan.
     """
     db = _lib_db()
-
     cursor = _get_cursor(conn)
+
     rows = conn.execute(
         """
         SELECT tc.id, tc.session_id, tc.command
@@ -185,182 +174,34 @@ def scan_candidates(conn: sqlite3.Connection) -> int:
         return 0
 
     max_id = cursor
-    # Track shape ids touched this scan so we can refresh distinct_sessions
-    # once per shape at the end rather than per observation.
-    touched_shape_ids: set[int] = set()
     now = _now()
 
     for row_id, session_id, command in rows:
         max_id = max(max_id, int(row_id))
         if not isinstance(command, str) or not command:
             continue
+        if session_id is None:
+            # Rows without session attribution cannot contribute to
+            # distinct_sessions tracking — skip the upsert entirely.
+            continue
         try:
             leaves = parse_command(command)
-        except Exception:  # noqa: BLE001 — canonicalize is defensive already.
+        except Exception:  # noqa: BLE001 — canonicalize is defensive
             continue
 
-        for leaf_index, leaf in enumerate(leaves):
-            decision, _reason = evaluate(leaf)
-            if decision is not None:
-                # Skip deny AND ask tiers. Promoting an ask-tier shape would
-                # silently turn a user-confirmed call into an auto-allow,
-                # defeating the confirmation checkpoint. No command_shape
-                # row or junction entry is created — the hook re-evaluates
-                # rules at runtime, so the registry needn't know about them.
-                continue
-
+        for leaf in leaves:
             flags_json = db.minify_json(sorted(leaf.flags))
-            shape_id = db.upsert_command_shape(
+            db.upsert_candidate(
                 conn,
                 leaf.verb,
                 leaf.subcommand,
                 flags_json,
+                int(session_id),
                 now,
             )
-            db.link_tool_call_shape(conn, int(row_id), shape_id, leaf_index)
-
-            # If the user has explicitly rejected this shape, preserve the
-            # tool_call_shapes history (already linked above) but skip the
-            # candidate upsert — the shape is dead to the promotion pipeline.
-            if _is_rejected(conn, shape_id):
-                continue
-
-            _upsert_candidate(conn, shape_id=shape_id, first_seen=now, last_seen=now)
-            # Rows without a session_id (NULL FK) are dropped — legacy rows
-            # predate per-session attribution and recording them would
-            # reintroduce the miscount the junction exists to prevent.
-            if session_id is not None:
-                _upsert_candidate_session(
-                    conn,
-                    shape_id=shape_id,
-                    session_id=int(session_id),
-                    last_seen=now,
-                )
-            touched_shape_ids.add(shape_id)
-
-    # Refresh the stored distinct_sessions column on every shape touched
-    # this scan so the `candidates` CLI output stays accurate. The promotion
-    # path reads the junction directly and does not trust this column.
-    for shape_id in touched_shape_ids:
-        _refresh_distinct_sessions(conn, shape_id=shape_id)
 
     _set_cursor(conn, max_id)
     return len(rows)
-
-
-def _upsert_candidate(
-    conn: sqlite3.Connection,
-    *,
-    shape_id: int,
-    first_seen: str,
-    last_seen: str,
-) -> None:
-    """Insert or bump a candidate row keyed by ``command_shape_id``.
-
-    Increments ``observations`` by 1 per call. ``distinct_sessions`` is NOT
-    computed here — it's refreshed from the ``permission_candidate_sessions``
-    junction at the end of each scan (:func:`_refresh_distinct_sessions`) so
-    the CLI dump stays accurate, and read directly from the junction by the
-    promotion query so threshold decisions never trust a stale stored value.
-    """
-    existing = conn.execute(
-        """
-        SELECT observations FROM permission_candidates
-         WHERE command_shape_id = ?;
-        """,
-        (shape_id,),
-    ).fetchone()
-
-    if existing is None:
-        conn.execute(
-            """
-            INSERT INTO permission_candidates
-              (command_shape_id, observations, distinct_sessions,
-               first_seen, last_seen)
-            VALUES (?, 1, 0, ?, ?);
-            """,
-            (shape_id, first_seen, last_seen),
-        )
-        return
-
-    prev_obs = existing[0]
-    conn.execute(
-        """
-        UPDATE permission_candidates
-           SET observations = ?,
-               last_seen = ?
-         WHERE command_shape_id = ?;
-        """,
-        (int(prev_obs) + 1, last_seen, shape_id),
-    )
-
-
-def _upsert_candidate_session(
-    conn: sqlite3.Connection,
-    *,
-    shape_id: int,
-    session_id: int,
-    last_seen: str,
-) -> None:
-    """Insert-or-bump a junction row for (shape, session).
-
-    Primary key is ``(command_shape_id, session_id)`` — a conflict means the
-    session already observed this shape and we just bump ``last_seen``.
-    ``session_id`` is INTEGER FK into ``sessions(id)`` post-v8 (was TEXT UUID
-    before v7; the v7/v8 migration flipped it to the numeric PK on sessions).
-    """
-    conn.execute(
-        """
-        INSERT INTO permission_candidate_sessions
-          (command_shape_id, session_id, last_seen)
-        VALUES (?, ?, ?)
-        ON CONFLICT(command_shape_id, session_id)
-        DO UPDATE SET last_seen = excluded.last_seen;
-        """,
-        (shape_id, session_id, last_seen),
-    )
-
-
-def _is_rejected(conn: sqlite3.Connection, shape_id: int) -> bool:
-    """True if the user has a scope=any (blanket) rejection on this shape.
-
-    Scope-qualified rejections (e.g. "rm outside_project") don't disqualify
-    the shape from candidacy — only a blanket ``any`` rejection does. The
-    runtime hook still respects scope-qualified rejections at call time via
-    ``permission_rejected`` lookups.
-    """
-    return (
-        conn.execute(
-            """
-            SELECT 1 FROM permission_rejected
-             WHERE command_shape_id = ?
-               AND scope_id = (SELECT id FROM tool_call_scopes WHERE name = 'any');
-            """,
-            (shape_id,),
-        ).fetchone()
-        is not None
-    )
-
-
-def _refresh_distinct_sessions(conn: sqlite3.Connection, *, shape_id: int) -> None:
-    """Recompute the stored distinct_sessions column from the junction."""
-    row = conn.execute(
-        """
-        SELECT COUNT(DISTINCT session_id)
-          FROM permission_candidate_sessions
-         WHERE command_shape_id = ?;
-        """,
-        (shape_id,),
-    ).fetchone()
-    count = int(row[0]) if row else 0
-    conn.execute(
-        """
-        UPDATE permission_candidates
-           SET distinct_sessions = ?
-         WHERE command_shape_id = ?;
-        """,
-        (count, shape_id),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +211,7 @@ def _refresh_distinct_sessions(conn: sqlite3.Connection, *, shape_id: int) -> No
 
 @dataclass(frozen=True)
 class Candidate:
+    id: int
     verb: str
     subcommand: str | None
     flags: frozenset[str]
@@ -377,47 +219,75 @@ class Candidate:
     distinct_sessions: int
 
 
-def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
-    """Return candidates that meet thresholds and are not yet active.
+def _candidate_leaf(
+    verb: str, subcommand: str | None, flags_json: str
+) -> CanonicalLeaf:
+    """Reconstruct a minimal CanonicalLeaf from stored candidate fields.
 
-    Joins ``permission_candidates`` → ``command_shapes`` so the output still
-    exposes verb/subcommand/flags, and LEFT JOINs ``permission_active`` on
-    ``command_shape_id`` to exclude already-promoted shapes.
+    Used to run the deny-filter at propose time without re-parsing the original
+    command — the canonical shape (verb, subcommand, flags) is sufficient.
+    """
+    try:
+        flags_list = json.loads(flags_json)
+    except (json.JSONDecodeError, TypeError):
+        flags_list = []
+    return CanonicalLeaf(
+        verb=verb,
+        subcommand=subcommand,
+        flags=frozenset(flags_list),
+        redirections=(),
+        raw_leaf=verb,
+    )
+
+
+def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
+    """Return candidates meeting thresholds, not yet globally permitted, and not denied.
+
+    Exclusion criteria (applied in order):
+    1. Below min_observations or min_distinct_sessions thresholds.
+    2. Already has a global-tier permission (approved or rejected) for a
+       rule_shape matching (verb, subcommand, flags) — any path_spec.
+    3. Deny filter applies (deny or ask tier) — these commands are never
+       auto-promoted.
     """
     thresholds = load_thresholds()
-    # Exclude shapes already covered by a scope=any active or rejected
-    # rule. Scope-qualified rules don't block proposal — the user may
-    # want to promote the shape for a different scope. ``review.sh``
-    # chooses the target scope at promotion time.
     rows = conn.execute(
         """
-        SELECT cs.verb, cs.subcommand, cs.flags,
+        SELECT c.id, c.verb, c.subcommand, c.flags,
                c.observations, c.distinct_sessions
           FROM permission_candidates c
-          JOIN command_shapes cs ON cs.id = c.command_shape_id
-     LEFT JOIN permission_active a
-            ON a.command_shape_id = c.command_shape_id
-           AND a.scope_id = (SELECT id FROM tool_call_scopes WHERE name = 'any')
-     LEFT JOIN permission_rejected r
-            ON r.command_shape_id = c.command_shape_id
-           AND r.scope_id = (SELECT id FROM tool_call_scopes WHERE name = 'any')
-         WHERE a.command_shape_id IS NULL
-           AND r.command_shape_id IS NULL
-           AND c.observations >= ?
+         WHERE c.observations >= ?
            AND c.distinct_sessions >= ?
-         ORDER BY c.observations DESC, cs.verb, cs.subcommand;
+           AND NOT EXISTS (
+             SELECT 1
+               FROM rule_shapes rs
+               JOIN permissions p ON p.rule_shape_id = rs.id
+              WHERE rs.verb = c.verb
+                AND IFNULL(rs.subcommand, '') = IFNULL(c.subcommand, '')
+                AND rs.flags = c.flags
+                AND p.session_id IS NULL
+                AND p.project_id IS NULL
+           )
+         ORDER BY c.observations DESC, c.verb, c.subcommand;
         """,
         (thresholds.min_observations, thresholds.min_distinct_sessions),
     ).fetchall()
 
     out: list[Candidate] = []
-    for verb, subcommand, flags_json, obs, sess in rows:
+    for cand_id, verb, subcommand, flags_json, obs, sess in rows:
+        # Apply deny filter at propose time.
+        leaf = _candidate_leaf(verb, subcommand, flags_json)
+        decision, _reason = evaluate(leaf)
+        if decision is not None:
+            # deny or ask tier — skip from promotion pipeline.
+            continue
         try:
             flag_list = json.loads(flags_json)
         except (json.JSONDecodeError, TypeError):
             flag_list = []
         out.append(
             Candidate(
+                id=int(cand_id),
                 verb=verb,
                 subcommand=subcommand,
                 flags=frozenset(flag_list),
@@ -434,26 +304,82 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
 
 
 def _connect() -> sqlite3.Connection:
-    """Open the observations DB with migrations applied.
-
-    Kept local so tests can substitute the lower-level ``_open``/``_migrate``
-    pair and this module does not fight test fixtures over DB path env vars.
-    """
-    # Import lazily so test fixtures that override DB_PATH via env var still
-    # work — lib.db resolves DB_PATH at import time.
+    """Open the observations DB (no migration — Phase 8 greenfield schema)."""
     db = _lib_db()
-    conn = db._open()
-    db._migrate(conn)
-    return conn
+    return db._open()
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI helpers
 # ---------------------------------------------------------------------------
 
 
 def _format_flags(flags: frozenset[str]) -> str:
     return " ".join(sorted(flags)) if flags else "-"
+
+
+def _parse_flags_arg(raw: str | None) -> str:
+    """Parse a --flags CLI argument into the stored flags-json form.
+
+    The argument is a JSON array literal (e.g. '["-a","-l"]' or '[]'),
+    or the wildcard sentinel ``"*"``.
+    Missing/None is treated as [] (bare verb with no flags).
+    """
+    db = _lib_db()
+    if raw is None or raw == "":
+        return db.minify_json([])
+    if raw == "*":
+        return "*"
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SystemExit(
+            f'error: --flags must be a JSON array literal (e.g. \'["-a","-l"]\') '
+            f'or the wildcard "*": {exc}'
+        )
+    if not isinstance(parsed, list):
+        raise SystemExit("error: --flags must be a JSON array literal, e.g. '[]'")
+    return db.minify_json(sorted(str(x) for x in parsed))
+
+
+def _format_cli_flags(flags_json: str) -> str:
+    """Render a stored flags-json blob as a compact list for CLI output."""
+    try:
+        return str(json.loads(flags_json))
+    except (json.JSONDecodeError, TypeError):
+        return flags_json
+
+
+def _resolve_tier_ids(
+    conn: sqlite3.Connection,  # noqa: ARG001 — reserved for future validation
+    tier: str,
+    session_id_arg: int | None,
+    project_id_arg: int | None,
+) -> tuple[int | None, int | None]:
+    """Resolve --tier + optional --session-id / --project-id to (session_id, project_id).
+
+    Returns (session_id, project_id) for the permissions row. Exactly one of
+    the two will be set (or both None for global tier), satisfying the schema
+    CHECK constraint.
+    """
+    if tier == "global":
+        return (None, None)
+    if tier == "session":
+        if session_id_arg is None:
+            raise SystemExit("error: --tier session requires --session-id")
+        return (session_id_arg, None)
+    if tier == "project":
+        if project_id_arg is None:
+            raise SystemExit("error: --tier project requires --project-id")
+        return (None, project_id_arg)
+    raise SystemExit(
+        f"error: unknown tier {tier!r}; expected session, project, or global"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI subcommands
+# ---------------------------------------------------------------------------
 
 
 def _cmd_scan(_args: argparse.Namespace) -> int:
@@ -483,12 +409,10 @@ def _cmd_candidates(_args: argparse.Namespace) -> int:
     try:
         rows = conn.execute(
             """
-            SELECT cs.verb, cs.subcommand, cs.flags,
-                   c.observations, c.distinct_sessions,
-                   c.first_seen, c.last_seen
-              FROM permission_candidates c
-              JOIN command_shapes cs ON cs.id = c.command_shape_id
-             ORDER BY c.last_seen DESC;
+            SELECT verb, subcommand, flags, observations, distinct_sessions,
+                   first_seen, last_seen
+              FROM v_candidates
+             ORDER BY last_seen DESC;
             """
         ).fetchall()
     finally:
@@ -510,274 +434,11 @@ def _cmd_candidates(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_flags_arg(raw: str | None) -> str:
-    """Parse a ``--flags`` CLI argument into the stored flags-json form.
-
-    The argument is a JSON array literal (``'["-a","-l"]'`` or ``'[]'``). We
-    decode it and re-encode with :func:`lib.db.minify_json` so the byte-exact
-    form matches ``command_shapes.flags`` regardless of how the user typed the
-    whitespace. Missing/``None`` is treated as ``[]`` so promoting a bare verb
-    still works.
-    """
-    db = _lib_db()
-    if raw is None or raw == "":
-        return db.minify_json([])
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise SystemExit(
-            f'error: --flags must be a JSON array literal (e.g. \'["-a","-l"]\'): {exc}'
-        )
-    if not isinstance(parsed, list):
-        raise SystemExit("error: --flags must be a JSON array literal, e.g. '[]'")
-    return db.minify_json(sorted(str(x) for x in parsed))
-
-
-def _resolve_shape_id(
-    conn: sqlite3.Connection, verb: str, subcommand: str | None, flags_json: str
-) -> int | None:
-    """Look up a ``command_shape`` id matching the given tuple, or None.
-
-    Uses the same ``IFNULL(subcommand, '')`` NULL-normalization as the
-    ``command_shapes`` UNIQUE index so ``--subcommand`` omitted and explicit
-    empty both match a shape stored with NULL subcommand.
-    """
-    row = conn.execute(
-        """
-        SELECT id FROM command_shapes
-         WHERE verb = ?
-           AND IFNULL(subcommand, '') = IFNULL(?, '')
-           AND flags = ?;
-        """,
-        (verb, subcommand, flags_json),
-    ).fetchone()
-    return int(row[0]) if row is not None else None
-
-
-def _format_cli_flags(flags_json: str) -> str:
-    """Render a stored flags-json blob as a compact list for CLI output."""
-    try:
-        return str(json.loads(flags_json))
-    except (json.JSONDecodeError, TypeError):
-        return flags_json
-
-
-def _resolve_scope_id_arg(conn: sqlite3.Connection, scope_name: str | None) -> int:
-    """Map a CLI ``--scope`` value to its id; defaults to 'any'."""
-    name = scope_name or "any"
-    row = conn.execute(
-        "SELECT id FROM tool_call_scopes WHERE name = ?;", (name,)
-    ).fetchone()
-    if row is None:
-        raise SystemExit(
-            f"error: unknown scope {name!r}; expected one of "
-            "within_project, outside_project, mixed, no_path, any"
-        )
-    return int(row[0])
-
-
-def _cmd_promote(args: argparse.Namespace) -> int:
-    """Promote a shape into ``permission_active`` for a given scope.
-
-    ``INSERT OR IGNORE`` so re-promoting is idempotent; the (shape, scope)
-    PK means multiple scope-qualified entries can coexist for the same
-    shape (e.g. ``rm within_project`` and ``rm outside_project`` as two
-    rows). Default scope is ``any`` — matches any call scope at runtime.
-    """
-    flags_json = _parse_flags_arg(args.flags)
-    conn = _connect()
-    try:
-        shape_id = _resolve_shape_id(conn, args.verb, args.subcommand, flags_json)
-        if shape_id is None:
-            print(
-                f"error: no matching command_shape for verb={args.verb!r} "
-                f"subcommand={args.subcommand!r} flags={_format_cli_flags(flags_json)}",
-                file=sys.stderr,
-            )
-            return 1
-        scope_id = _resolve_scope_id_arg(conn, args.scope)
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO permission_active
-              (command_shape_id, scope_id, promoted_at, source)
-            VALUES (?, ?, ?, 'manual');
-            """,
-            (shape_id, scope_id, _now()),
-        )
-    finally:
-        conn.close()
-
-    sub = args.subcommand or "-"
-    print(
-        f"promoted: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f" scope={args.scope or 'any'}"
-    )
-    return 0
-
-
-def _cmd_reject(args: argparse.Namespace) -> int:
-    """Persist a shape as rejected + purge its candidate row.
-
-    Writes to ``permission_rejected`` so future scans never re-propose this
-    shape (see :func:`_is_rejected` in :func:`scan_candidates` and the LEFT
-    JOIN guard in :func:`propose_promotions`). Also deletes any existing
-    candidate + session-junction rows so the ``candidates`` dump doesn't
-    keep showing a dead row.
-
-    ``INSERT OR REPLACE`` on the rejected table lets a re-reject update the
-    timestamp and reason without failing on the PK conflict.
-    """
-    flags_json = _parse_flags_arg(args.flags)
-    conn = _connect()
-    try:
-        shape_id = _resolve_shape_id(conn, args.verb, args.subcommand, flags_json)
-        if shape_id is None:
-            print(
-                f"error: no matching command_shape for verb={args.verb!r} "
-                f"subcommand={args.subcommand!r} flags={_format_cli_flags(flags_json)}",
-                file=sys.stderr,
-            )
-            return 1
-        scope_id = _resolve_scope_id_arg(conn, args.scope)
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO permission_rejected
-              (command_shape_id, scope_id, rejected_at, reason)
-            VALUES (?, ?, ?, ?);
-            """,
-            (shape_id, scope_id, _now(), args.reason),
-        )
-        # Purge the candidate only when the rejection is scope=any — a
-        # scope-qualified rejection doesn't erase the shape's candidacy
-        # for other scopes. The propose query excludes already-rejected
-        # matches per-scope naturally.
-        any_id = _resolve_scope_id_arg(conn, "any")
-        cand_rows = 0
-        session_rows = 0
-        if scope_id == any_id:
-            session_cur = conn.execute(
-                "DELETE FROM permission_candidate_sessions WHERE command_shape_id = ?;",
-                (shape_id,),
-            )
-            session_rows = session_cur.rowcount or 0
-            cand_cur = conn.execute(
-                "DELETE FROM permission_candidates WHERE command_shape_id = ?;",
-                (shape_id,),
-            )
-            cand_rows = cand_cur.rowcount or 0
-    finally:
-        conn.close()
-
-    sub = args.subcommand or "-"
-    reason_part = f" reason={args.reason!r}" if args.reason else ""
-    scope_name = args.scope or "any"
-    purge_part = (
-        f" (purged {cand_rows} candidate, {session_rows} session row(s))"
-        if scope_name == "any"
-        else ""
-    )
-    print(
-        f"rejected: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f" scope={scope_name}{reason_part}{purge_part}"
-    )
-    return 0
-
-
-def _cmd_unreject(args: argparse.Namespace) -> int:
-    """Remove a shape's entry from ``permission_rejected``.
-
-    Future scans will resume accumulating observation counts for this shape,
-    and it becomes eligible for promotion once thresholds are met again.
-    """
-    flags_json = _parse_flags_arg(args.flags)
-    conn = _connect()
-    try:
-        shape_id = _resolve_shape_id(conn, args.verb, args.subcommand, flags_json)
-        if shape_id is None:
-            print(
-                f"error: no matching command_shape for verb={args.verb!r} "
-                f"subcommand={args.subcommand!r} flags={_format_cli_flags(flags_json)}",
-                file=sys.stderr,
-            )
-            return 1
-        scope_id = _resolve_scope_id_arg(conn, args.scope)
-        cur = conn.execute(
-            "DELETE FROM permission_rejected"
-            " WHERE command_shape_id = ? AND scope_id = ?;",
-            (shape_id, scope_id),
-        )
-        rows = cur.rowcount or 0
-    finally:
-        conn.close()
-
-    sub = args.subcommand or "-"
-    scope_name = args.scope or "any"
-    if rows == 0:
-        print(
-            f"no matching rejected entry for verb={args.verb!r} "
-            f"subcommand={args.subcommand!r} flags={_format_cli_flags(flags_json)}"
-            f" scope={scope_name}"
-        )
-        return 0
-    print(
-        f"unrejected: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f" scope={scope_name}"
-    )
-    return 0
-
-
-def _cmd_rejected(_args: argparse.Namespace) -> int:
-    conn = _connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT cs.verb, cs.subcommand, cs.flags,
-                   sc.name AS scope,
-                   r.rejected_at, r.reason
-              FROM permission_rejected r
-              JOIN command_shapes cs   ON cs.id = r.command_shape_id
-              JOIN tool_call_scopes sc ON sc.id = r.scope_id
-             ORDER BY r.rejected_at DESC;
-            """
-        ).fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
-        print("permission_rejected is empty")
-        return 0
-    for verb, subcommand, flags_json, scope, rejected_at, reason in rows:
-        sub = subcommand or "-"
-        try:
-            flags = json.loads(flags_json)
-        except (json.JSONDecodeError, TypeError):
-            flags = []
-        reason_part = f" reason={reason!r}" if reason else ""
-        print(
-            f"  {verb:<10} {sub:<15} flags={flags} scope={scope} "
-            f"rejected_at={rejected_at}{reason_part}"
-        )
-    return 0
-
-
 def _cmd_propose(_args: argparse.Namespace) -> int:
-    """Emit eligible promotions as pipe-delimited records for bash consumers.
+    """Emit eligible promotions as pipe-delimited records for review.sh.
 
     One line per candidate: ``verb|subcommand-or-empty|flags-json|obs|sessions``.
-    The review.sh script parses this to drive interactive promote/reject
-    prompts; keeping it a flat text format (not JSON) avoids a jq dependency
-    in the shell layer.
-
-    ``|`` (not ``\\t``) is the separator because bash's ``read`` with
-    ``IFS=$'\\t'`` collapses consecutive tabs — whitespace IFS is treated
-    specially — so an empty subcommand field would vanish and shift the
-    remaining fields. ``|`` is non-whitespace, so ``IFS=|`` preserves empties.
-    The pipe is safe here: flags are JSON-array literals (square brackets,
-    quoted strings, commas) and the canonicalizer strips shell metacharacters
-    from verbs/subcommands long before they reach this output.
-
-    Empty second field represents NULL subcommand (matches the
-    ``IFNULL(subcommand, '')`` convention used elsewhere).
+    ``|`` separator avoids bash IFS issues with empty subcommand fields.
     """
     conn = _connect()
     try:
@@ -793,135 +454,547 @@ def _cmd_propose(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_active(_args: argparse.Namespace) -> int:
+def _cmd_promote(args: argparse.Namespace) -> int:
+    """Upsert a rule_shape and insert an 'approved' permissions row."""
+    from lib.mirror.writer import MirrorHashMismatch, sync_affected
+
+    flags_json = _parse_flags_arg(args.flags)
+    path_spec: str | None = args.path_spec
+    conn = _connect()
+    try:
+        session_id, project_id = _resolve_tier_ids(
+            conn, args.tier, args.session_id, args.project_id
+        )
+        db = _lib_db()
+        now = _now()
+        shape_id = db.upsert_rule_shape(
+            conn, args.verb, args.subcommand, flags_json, path_spec, now
+        )
+        perm_id = db.insert_permission(
+            conn,
+            shape_id,
+            session_id,
+            project_id,
+            "approved",
+            "learner",
+            now,
+            args.reason,
+        )
+        # Mirror sync: session-tier rules have no JSON analogue; skip them.
+        if session_id is None:
+            try:
+                sync_affected(conn, perm_id)
+            except MirrorHashMismatch as exc:
+                path = str(exc).split(":")[0]
+                print(
+                    f"settings file at {path} was edited externally — "
+                    f"run '/permissions reconcile' and retry",
+                    file=sys.stderr,
+                )
+                return 1
+    finally:
+        conn.close()
+
+    sub = args.subcommand or "-"
+    ps = f" path_spec={path_spec!r}" if path_spec is not None else ""
+    print(
+        f"promoted: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
+        f" tier={args.tier}{ps}"
+    )
+    return 0
+
+
+def _cmd_reject(args: argparse.Namespace) -> int:
+    """Upsert a rule_shape and insert a 'rejected' permissions row."""
+    from lib.mirror.writer import MirrorHashMismatch, sync_affected
+
+    flags_json = _parse_flags_arg(args.flags)
+    path_spec: str | None = args.path_spec
+    conn = _connect()
+    try:
+        session_id, project_id = _resolve_tier_ids(
+            conn, args.tier, args.session_id, args.project_id
+        )
+        db = _lib_db()
+        now = _now()
+        shape_id = db.upsert_rule_shape(
+            conn, args.verb, args.subcommand, flags_json, path_spec, now
+        )
+        perm_id = db.insert_permission(
+            conn,
+            shape_id,
+            session_id,
+            project_id,
+            "rejected",
+            "learner",
+            now,
+            args.reason,
+        )
+        # Mirror sync: session-tier rules have no JSON analogue; skip them.
+        if session_id is None:
+            try:
+                sync_affected(conn, perm_id)
+            except MirrorHashMismatch as exc:
+                path = str(exc).split(":")[0]
+                print(
+                    f"settings file at {path} was edited externally — "
+                    f"run '/permissions reconcile' and retry",
+                    file=sys.stderr,
+                )
+                return 1
+    finally:
+        conn.close()
+
+    sub = args.subcommand or "-"
+    ps = f" path_spec={path_spec!r}" if path_spec is not None else ""
+    reason_part = f" reason={args.reason!r}" if args.reason else ""
+    print(
+        f"rejected: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
+        f" tier={args.tier}{ps}{reason_part}"
+    )
+    return 0
+
+
+def _cmd_unpermit(args: argparse.Namespace) -> int:
+    """Delete the permissions row matching shape + tier.
+
+    Uses SQLite's IS operator which correctly handles NULL comparisons for
+    both NULL and non-NULL values (IS NULL when arg is None, IS <val>
+    otherwise), satisfying the three-tier (session/project/global) lookup.
+    """
+    from lib.mirror.writer import MirrorHashMismatch, sync_global, sync_project
+
+    flags_json = _parse_flags_arg(args.flags)
+    path_spec: str | None = args.path_spec
+    conn = _connect()
+    try:
+        session_id, project_id = _resolve_tier_ids(
+            conn, args.tier, args.session_id, args.project_id
+        )
+        row = conn.execute(
+            """
+            SELECT id FROM rule_shapes
+             WHERE verb = ?
+               AND IFNULL(subcommand, '') = IFNULL(?, '')
+               AND flags = ?
+               AND IFNULL(path_spec, '') = IFNULL(?, '');
+            """,
+            (args.verb, args.subcommand, flags_json, path_spec),
+        ).fetchone()
+        if row is None:
+            print(
+                f"no matching rule_shape for verb={args.verb!r} "
+                f"subcommand={args.subcommand!r} "
+                f"flags={_format_cli_flags(flags_json)} "
+                f"path_spec={path_spec!r}",
+                file=sys.stderr,
+            )
+            return 1
+        shape_id = int(row[0])
+        cur = conn.execute(
+            """
+            DELETE FROM permissions
+             WHERE rule_shape_id = ?
+               AND session_id IS ?
+               AND project_id IS ?;
+            """,
+            (shape_id, session_id, project_id),
+        )
+        deleted = cur.rowcount or 0
+
+        # Mirror sync after deletion: session-tier has no JSON analogue.
+        if deleted > 0 and session_id is None:
+            try:
+                if project_id is None:
+                    sync_global(conn)
+                else:
+                    sync_project(conn, project_id)
+            except MirrorHashMismatch as exc:
+                path = str(exc).split(":")[0]
+                print(
+                    f"settings file at {path} was edited externally — "
+                    f"run '/permissions reconcile' and retry",
+                    file=sys.stderr,
+                )
+                return 1
+    finally:
+        conn.close()
+
+    sub = args.subcommand or "-"
+    if deleted == 0:
+        print(
+            f"no matching permission row for verb={args.verb!r} "
+            f"subcommand={args.subcommand!r} tier={args.tier}"
+        )
+        return 0
+    print(
+        f"unpermitted: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
+        f" tier={args.tier} ({deleted} row(s) deleted)"
+    )
+    return 0
+
+
+def _cmd_pattern_variants(args: argparse.Namespace) -> int:
+    """Compute pattern variants for a single candidate and print them as JSON.
+
+    Used by review.sh to decide which per-axis prompts to display.
+
+    Outputs one JSON object::
+
+        {
+            "verb_pattern": "<$VAR/...>" | null,
+            "path_specs":   ["$VAR/**", ...],
+            "flags_literal": "<minified-json-or-*>"
+        }
+
+    ``verb_pattern`` is non-null only when the verb is an absolute path that
+    falls under a recognised context variable.  ``path_specs`` is populated
+    from positional-path variants (empty for most DB candidates which have no
+    stored positional_paths).
+    """
+    from .canonicalize import CanonicalLeaf, to_pattern_form  # noqa: PLC0415
+
+    flags_json = _parse_flags_arg(args.flags)
+    if flags_json == "*":
+        flags_list: list[str] = []
+    else:
+        try:
+            flags_list = json.loads(flags_json)
+        except (json.JSONDecodeError, TypeError):
+            flags_list = []
+
+    leaf = CanonicalLeaf(
+        verb=args.verb,
+        subcommand=args.subcommand,
+        flags=frozenset(flags_list),
+        redirections=(),
+        raw_leaf=args.verb,
+    )
+
+    ctx: dict[str, str] = {}
+    if args.home:
+        ctx["home"] = args.home
+    if args.cwd:
+        ctx["cwd"] = args.cwd
+    if args.project_root:
+        ctx["project_root"] = args.project_root
+
+    variants = to_pattern_form(leaf, ctx)
+
+    verb_pattern: str | None = None
+    path_specs: list[str] = []
+    seen_ps: set[str] = set()
+
+    for v in variants:
+        if verb_pattern is None and v.verb != args.verb and v.verb.startswith("$"):
+            verb_pattern = v.verb
+        if v.path_spec and "$" in v.path_spec and v.path_spec not in seen_ps:
+            seen_ps.add(v.path_spec)
+            path_specs.append(v.path_spec)
+
+    print(
+        json.dumps(
+            {
+                "verb_pattern": verb_pattern,
+                "path_specs": path_specs,
+                "flags_literal": flags_json,
+            }
+        )
+    )
+    return 0
+
+
+def _cmd_context_ids(args: argparse.Namespace) -> int:
+    """Resolve project_id and latest session_id for a given cwd.
+
+    Prints two shell-assignment-style lines suitable for ``eval``::
+
+        project_id=<int>
+        session_id=<int>
+
+    Prints empty-valued lines when the cwd is not found in the DB.
+    """
+    cwd = args.cwd or ""
+    conn = _connect()
+    try:
+        p_row = conn.execute(
+            "SELECT id FROM projects WHERE cwd = ?;", (cwd,)
+        ).fetchone()
+        project_id: int | str = int(p_row[0]) if p_row else ""
+
+        s_row: tuple | None = None
+        if p_row:
+            s_row = conn.execute(
+                "SELECT id FROM sessions WHERE project_id = ?"
+                " ORDER BY last_activity DESC LIMIT 1;",
+                (project_id,),
+            ).fetchone()
+        session_id: int | str = int(s_row[0]) if s_row else ""
+    finally:
+        conn.close()
+
+    print(f"project_id={project_id}")
+    print(f"session_id={session_id}")
+    return 0
+
+
+def _cmd_count_concrete_siblings(args: argparse.Namespace) -> int:
+    """Print the count of concrete (non-wildcard) sibling permissions at a tier.
+
+    "Siblings" are permissions whose rule_shape has the same verb+subcommand
+    but a literal (non-``"*"``) flags value, at the given tier.  Used by
+    review.sh to decide whether to offer a subsume prompt after promoting a
+    flags=``"*"`` rule.
+    """
+    conn = _connect()
+    try:
+        session_id, project_id = _resolve_tier_ids(
+            conn, args.tier, args.session_id, args.project_id
+        )
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM permissions p
+              JOIN rule_shapes rs ON rs.id = p.rule_shape_id
+             WHERE rs.verb = ?
+               AND IFNULL(rs.subcommand, '') = IFNULL(?, '')
+               AND rs.flags != '*'
+               AND p.session_id IS ?
+               AND p.project_id IS ?;
+            """,
+            (args.verb, args.subcommand, session_id, project_id),
+        ).fetchone()
+        count = int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+    print(count)
+    return 0
+
+
+def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
+    """Delete concrete sibling permissions for verb+sub at a tier.
+
+    Called after promoting a flags=``"*"`` rule (decision 8-15).  Removes all
+    permissions whose rule_shape matches the same verb+subcommand but carries a
+    literal (non-``"*"``) flags value at the same tier, so the wildcard rule
+    is the sole match point.
+
+    Prints a one-line summary: ``"subsumed N concrete sibling rule(s)"``.
+    """
+    conn = _connect()
+    try:
+        session_id, project_id = _resolve_tier_ids(
+            conn, args.tier, args.session_id, args.project_id
+        )
+        cur = conn.execute(
+            """
+            DELETE FROM permissions
+             WHERE session_id IS ?
+               AND project_id IS ?
+               AND rule_shape_id IN (
+                 SELECT id FROM rule_shapes
+                  WHERE verb = ?
+                    AND IFNULL(subcommand, '') = IFNULL(?, '')
+                    AND flags != '*'
+               );
+            """,
+            (session_id, project_id, args.verb, args.subcommand),
+        )
+        deleted = cur.rowcount or 0
+    finally:
+        conn.close()
+
+    print(f"subsumed {deleted} concrete sibling rule(s)")
+    return 0
+
+
+def _cmd_permissions(_args: argparse.Namespace) -> int:
+    """Dump all permission rows via the v_permissions view."""
     conn = _connect()
     try:
         rows = conn.execute(
             """
-            SELECT cs.verb, cs.subcommand, cs.flags,
-                   sc.name AS scope,
-                   a.promoted_at, a.source
-              FROM permission_active a
-              JOIN command_shapes cs   ON cs.id = a.command_shape_id
-              JOIN tool_call_scopes sc ON sc.id = a.scope_id
-             ORDER BY a.promoted_at DESC;
+            SELECT verb, subcommand, flags, path_spec,
+                   decision, source, tier, decided_at, reason
+              FROM v_permissions
+             ORDER BY decided_at DESC;
             """
         ).fetchall()
     finally:
         conn.close()
 
     if not rows:
-        print("permission_active is empty")
+        print("permissions table is empty")
         return 0
-    for verb, subcommand, flags_json, scope, promoted_at, source in rows:
+    for (
+        verb,
+        subcommand,
+        flags_json,
+        path_spec,
+        decision,
+        source,
+        tier,
+        decided_at,
+        reason,
+    ) in rows:
         sub = subcommand or "-"
         try:
             flags = json.loads(flags_json)
         except (json.JSONDecodeError, TypeError):
             flags = []
+        ps = f" path_spec={path_spec!r}" if path_spec is not None else ""
+        reason_part = f" reason={reason!r}" if reason else ""
         print(
-            f"  {verb:<10} {sub:<15} flags={flags} scope={scope} "
-            f"source={source} promoted_at={promoted_at}"
+            f"  {decision:<8} {tier:<8} {verb:<10} {sub:<15} "
+            f"flags={flags}{ps} source={source} at={decided_at}{reason_part}"
         )
     return 0
+
+
+# ---------------------------------------------------------------------------
+# argparse
+# ---------------------------------------------------------------------------
+
+_tier_help = "Tier: session, project, or global (default: global)."
+_session_id_help = "sessions.id integer (required when --tier session)."
+_project_id_help = "projects.id integer (required when --tier project)."
+_verb_help = "Command verb, e.g. 'git'."
+_subcommand_help = "Subcommand (omit for no-subcommand verbs; matches NULL)."
+_flags_help = (
+    "JSON array literal of flags, e.g. '[\"--amend\"]' or '[]'; "
+    'or the wildcard sentinel "*".'
+)
+_path_spec_help = (
+    'path_spec stored on the rule_shape: NULL=any, ""=no-paths, '
+    '"$VAR/**"=glob. Omit for NULL (any).'
+)
+_reason_help = "Optional free-text reason stored with the permission."
+
+
+def _add_shape_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--verb", required=True, help=_verb_help)
+    p.add_argument("--subcommand", default=None, help=_subcommand_help)
+    p.add_argument("--flags", default=None, help=_flags_help)
+    p.add_argument("--path-spec", default=None, dest="path_spec", help=_path_spec_help)
+
+
+def _add_verb_sub_args(p: argparse.ArgumentParser) -> None:
+    """Add --verb and --subcommand only (no --flags / --path-spec)."""
+    p.add_argument("--verb", required=True, help=_verb_help)
+    p.add_argument("--subcommand", default=None, help=_subcommand_help)
+
+
+def _add_tier_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--tier",
+        default="global",
+        choices=["session", "project", "global"],
+        help=_tier_help,
+    )
+    p.add_argument(
+        "--session-id", default=None, type=int, dest="session_id", help=_session_id_help
+    )
+    p.add_argument(
+        "--project-id", default=None, type=int, dest="project_id", help=_project_id_help
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="learners.permission.learner",
-        description="Permission learner — scan, list candidates, list active.",
+        description=(
+            "Permission learner — scan candidates, propose promotions, "
+            "promote/reject/unpermit rules."
+        ),
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("scan", help="Scan new Bash rows and propose promotions.")
-    sub.add_parser("candidates", help="Dump permission_candidates table.")
-    sub.add_parser("active", help="Dump permission_active table.")
+
+    sub.add_parser(
+        "scan", help="Scan new Bash rows; upsert into permission_candidates."
+    )
+    sub.add_parser("candidates", help="Dump v_candidates.")
     sub.add_parser(
         "propose",
-        help="Emit eligible promotions as TSV lines (for review.sh).",
+        help="Emit eligible promotions as pipe-delimited lines (for review.sh).",
     )
+    sub.add_parser("permissions", help="Dump v_permissions (all permission rows).")
 
-    _scope_help = (
-        "Scope to qualify the rule with: within_project, outside_project, "
-        "mixed, no_path, or 'any' (default). The 'any' scope matches every "
-        "call regardless of its scope."
-    )
-
-    promote = sub.add_parser(
-        "promote",
-        help="Graduate a candidate shape into permission_active (manual source).",
-    )
-    promote.add_argument("--verb", required=True, help="Command verb, e.g. 'head'.")
+    promote = sub.add_parser("promote", help="Promote a shape to approved.")
+    _add_shape_args(promote)
+    _add_tier_args(promote)
+    promote.add_argument("--reason", default=None, help=_reason_help)
     promote.add_argument(
-        "--subcommand",
-        default=None,
-        help="Subcommand (omit for verbs with no subcommand; matches NULL).",
+        "--sync",
+        action="store_true",
+        default=False,
+        help="Explicitly request mirror sync after promote (default: on for non-session tier).",
     )
-    promote.add_argument(
-        "--flags",
-        default=None,
-        help="JSON array literal of flags, e.g. '[\"-a\",\"-l\"]' or '[]'.",
-    )
-    promote.add_argument("--scope", default=None, help=_scope_help)
 
-    reject = sub.add_parser(
-        "reject",
-        help="Persist a shape as rejected; runtime deny AND excludes from scan.",
-    )
-    reject.add_argument("--verb", required=True, help="Command verb, e.g. 'head'.")
-    reject.add_argument(
-        "--subcommand",
-        default=None,
-        help="Subcommand (omit for verbs with no subcommand; matches NULL).",
-    )
-    reject.add_argument(
-        "--flags",
-        default=None,
-        help="JSON array literal of flags, e.g. '[\"-a\",\"-l\"]' or '[]'.",
-    )
-    reject.add_argument(
-        "--reason",
-        default=None,
-        help="Optional free-text reason stored with the rejection.",
-    )
-    reject.add_argument("--scope", default=None, help=_scope_help)
+    reject = sub.add_parser("reject", help="Reject a shape.")
+    _add_shape_args(reject)
+    _add_tier_args(reject)
+    reject.add_argument("--reason", default=None, help=_reason_help)
 
-    unreject = sub.add_parser(
-        "unreject",
-        help="Remove a shape from permission_rejected; re-enables observation.",
-    )
-    unreject.add_argument("--verb", required=True, help="Command verb, e.g. 'head'.")
-    unreject.add_argument(
-        "--subcommand",
-        default=None,
-        help="Subcommand (omit for verbs with no subcommand; matches NULL).",
-    )
-    unreject.add_argument(
-        "--flags",
-        default=None,
-        help="JSON array literal of flags, e.g. '[\"-a\",\"-l\"]' or '[]'.",
-    )
-    unreject.add_argument("--scope", default=None, help=_scope_help)
+    unpermit = sub.add_parser("unpermit", help="Delete a permission row.")
+    _add_shape_args(unpermit)
+    _add_tier_args(unpermit)
 
-    sub.add_parser("rejected", help="Dump permission_rejected table.")
+    pv = sub.add_parser(
+        "pattern-variants",
+        help="Compute pattern variants for a candidate (JSON output, for review.sh).",
+    )
+    pv.add_argument("--verb", required=True, help=_verb_help)
+    pv.add_argument("--subcommand", default=None, help=_subcommand_help)
+    pv.add_argument("--flags", default=None, help=_flags_help)
+    pv.add_argument("--home", default=None, help="$HOME path for pattern substitution.")
+    pv.add_argument("--cwd", default=None, help="Current working directory.")
+    pv.add_argument(
+        "--project-root",
+        default=None,
+        dest="project_root",
+        help="Project root path.",
+    )
+
+    ci = sub.add_parser(
+        "context-ids",
+        help="Resolve project_id and session_id for a cwd (shell-assignment output).",
+    )
+    ci.add_argument("--cwd", default=None, help="Directory to look up.")
+
+    ccs = sub.add_parser(
+        "count-concrete-siblings",
+        help="Count concrete (non-wildcard) sibling permissions for verb+sub at tier.",
+    )
+    _add_verb_sub_args(ccs)
+    _add_tier_args(ccs)
+
+    ss = sub.add_parser(
+        "subsume-siblings",
+        help="Delete concrete sibling permissions for verb+sub at tier (after flags=* promote).",
+    )
+    _add_verb_sub_args(ss)
+    _add_tier_args(ss)
 
     args = parser.parse_args(argv)
-    if args.cmd == "scan":
-        return _cmd_scan(args)
-    if args.cmd == "candidates":
-        return _cmd_candidates(args)
-    if args.cmd == "active":
-        return _cmd_active(args)
-    if args.cmd == "propose":
-        return _cmd_propose(args)
-    if args.cmd == "promote":
-        return _cmd_promote(args)
-    if args.cmd == "reject":
-        return _cmd_reject(args)
-    if args.cmd == "unreject":
-        return _cmd_unreject(args)
-    if args.cmd == "rejected":
-        return _cmd_rejected(args)
-    return 1
+
+    _cmd_map = {
+        "scan": _cmd_scan,
+        "candidates": _cmd_candidates,
+        "propose": _cmd_propose,
+        "permissions": _cmd_permissions,
+        "promote": _cmd_promote,
+        "reject": _cmd_reject,
+        "unpermit": _cmd_unpermit,
+        "pattern-variants": _cmd_pattern_variants,
+        "context-ids": _cmd_context_ids,
+        "count-concrete-siblings": _cmd_count_concrete_siblings,
+        "subsume-siblings": _cmd_subsume_siblings,
+    }
+    handler = _cmd_map.get(args.cmd)
+    if handler is None:  # pragma: no cover
+        return 1
+    return handler(args)
 
 
 if __name__ == "__main__":

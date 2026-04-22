@@ -1,4 +1,4 @@
-"""Tests for lib.scope: project root resolution + path classification."""
+"""Tests for lib.scope: project root resolution + path extraction."""
 
 from __future__ import annotations
 
@@ -54,82 +54,6 @@ def test_repository_suffix_wins_over_git_toplevel(tmp_path):
     subprocess.run(["git", "-C", str(repo_dir), "init", "-q"], check=True)
     # Rule 1 returns workspace, not the git toplevel (repo_dir itself).
     assert scope.resolve_project_root(str(repo_dir)) == str(workspace)
-
-
-# ---------------------------------------------------------------------------
-# classify_paths
-# ---------------------------------------------------------------------------
-
-
-def test_no_paths_returns_no_path():
-    assert scope.classify_paths([], "/project") == scope.NO_PATH
-
-
-def test_no_root_returns_no_path():
-    assert scope.classify_paths(["/some/path"], None) == scope.NO_PATH
-    assert scope.classify_paths(["/some/path"], "") == scope.NO_PATH
-
-
-def test_single_path_inside_root(tmp_path):
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "file.py").touch()
-    assert (
-        scope.classify_paths([str(root / "file.py")], str(root)) == scope.WITHIN_PROJECT
-    )
-
-
-def test_single_path_outside_root(tmp_path):
-    root = tmp_path / "proj"
-    other = tmp_path / "other"
-    root.mkdir()
-    other.mkdir()
-    (other / "file.py").touch()
-    assert (
-        scope.classify_paths([str(other / "file.py")], str(root))
-        == scope.OUTSIDE_PROJECT
-    )
-
-
-def test_mixed_paths(tmp_path):
-    root = tmp_path / "proj"
-    other = tmp_path / "other"
-    root.mkdir()
-    other.mkdir()
-    inside = root / "a.py"
-    outside = other / "b.py"
-    inside.touch()
-    outside.touch()
-    assert scope.classify_paths([str(inside), str(outside)], str(root)) == scope.MIXED
-
-
-def test_path_equal_to_root_is_within(tmp_path):
-    root = tmp_path / "proj"
-    root.mkdir()
-    assert scope.classify_paths([str(root)], str(root)) == scope.WITHIN_PROJECT
-
-
-def test_sibling_prefix_is_not_within(tmp_path):
-    # /foo/bar vs /foo/bar-extra — the prefix check must use trailing slash
-    # so "bar-extra" isn't mistaken for a child of "bar".
-    root = tmp_path / "bar"
-    sibling = tmp_path / "bar-extra"
-    root.mkdir()
-    sibling.mkdir()
-    (sibling / "file.py").touch()
-    assert (
-        scope.classify_paths([str(sibling / "file.py")], str(root))
-        == scope.OUTSIDE_PROJECT
-    )
-
-
-def test_relative_path_resolved_against_cwd(tmp_path, monkeypatch):
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "file.py").touch()
-    monkeypatch.chdir(root)
-    # "./file.py" resolves to root/file.py which IS inside root.
-    assert scope.classify_paths(["./file.py"], str(root)) == scope.WITHIN_PROJECT
 
 
 # ---------------------------------------------------------------------------

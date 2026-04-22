@@ -22,10 +22,19 @@ Design notes
 - ``parse_command`` never raises. On unparseable input it returns ``[]`` and
   the caller treats that as "fall through to the user prompt" — the command
   will not be auto-allowed, but it will not be blocked either.
+
+Pattern variants
+----------------
+
+:func:`to_pattern_form` generalizes a :class:`CanonicalLeaf` into a list of
+:class:`PatternVariant` objects — one per candidate ``rule_shapes`` key.
+Each variant is a ``(verb, subcommand, flags, path_spec)`` tuple suitable for
+a DB lookup or for the per-axis review prompts in ``review.sh``.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Iterable
@@ -153,6 +162,20 @@ CONTENT_VERBS: frozenset[str] = frozenset(
 # "2>&1" has no file target; "> /dev/null" and ">> /dev/null" are harmless.
 _NOISE_REDIR_TARGETS: frozenset[str] = frozenset({"/dev/null"})
 
+# Mapping from ctx dict key to the $VAR sentinel used in rule_shapes.
+_CTX_VAR_NAMES: dict[str, str] = {
+    "project_root": "$PROJECT_ROOT",
+    "cwd": "$CWD",
+    "home": "$HOME",
+}
+
+# Priority order for ctx vars — lower number = checked first (most specific).
+_CTX_PRIORITY: dict[str, int] = {
+    "project_root": 0,
+    "cwd": 1,
+    "home": 2,
+}
+
 
 @dataclass(frozen=True)
 class Redirection:
@@ -186,6 +209,41 @@ class CanonicalLeaf:
     positional_paths: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PatternVariant:
+    """One candidate rule-shape key for DB lookup or per-axis review prompts.
+
+    Fields map directly onto ``rule_shapes`` columns:
+
+    ``verb``
+        Literal command name, or ``"$VAR/rest"`` when the verb is an absolute
+        path under a recognised context variable (project root, cwd, home).
+
+    ``subcommand``
+        Carried through unchanged from the leaf.
+
+    ``flags``
+        Minified JSON array of sorted flag strings (e.g. ``'["-q","--verbose"]'``),
+        or the sentinel ``"*"`` for the flags-wildcard variant.
+
+    ``path_spec``
+        ``None``  — any paths (no path constraint).
+        ``""``    — leaf had no positional paths.
+        ``"$VAR/**"``    — any path under the named context variable.
+        ``"$VAR/<tail>"``— specific subpath relative to the context variable.
+
+    Review scripts can detect the variant type without extra metadata:
+        - ``verb.startswith("$")``          → verb has a $VAR pattern
+        - ``path_spec and "$" in path_spec`` → path_spec has a $VAR pattern
+        - ``flags == "*"``                   → flags wildcard
+    """
+
+    verb: str
+    subcommand: str | None
+    flags: str
+    path_spec: str | None
+
+
 def parse_command(raw: str) -> list[CanonicalLeaf]:
     """Parse ``raw`` and return one :class:`CanonicalLeaf` per leaf command.
 
@@ -207,6 +265,180 @@ def parse_command(raw: str) -> list[CanonicalLeaf]:
     for tree in trees:
         _walk(tree, leaves)
     return leaves
+
+
+def to_pattern_form(leaf: CanonicalLeaf, ctx: dict[str, str]) -> list[PatternVariant]:
+    """Return pattern variants for ``leaf`` given path context.
+
+    ``ctx`` accepts any subset of ``{"cwd", "project_root", "home"}`` mapping
+    to absolute directory paths for the current session.
+
+    Returns a list of :class:`PatternVariant` objects covering:
+
+    1. **Literal** — verb and flags as-is; path_spec derived from whether the
+       leaf has any positional paths.
+    2. **Verb-patterned** — if the verb is an absolute path under a ctx var,
+       one variant with the matching prefix replaced by ``$VAR``.  Longest
+       prefix wins; PROJECT_ROOT beats CWD beats HOME on equal length.
+    3. **Path-spec variants** — one ``$VAR/**`` and one ``$VAR/<tail>`` variant
+       per distinct positional path that lies under a ctx var.  Both use the
+       verb-patterned form when available.
+    4. **Flags-wildcard** — a single variant with ``flags="*"`` and the best
+       available verb form.
+
+    Duplicates are suppressed (set-tracked) but insertion order is preserved
+    so the most specific variants come first.
+    """
+    ordered = _ctx_pairs_ordered(ctx)
+    flags_literal = _flags_json(leaf.flags)
+
+    verb_patterned = _substitute_prefix(leaf.verb, ordered)
+    best_verb = verb_patterned if verb_patterned is not None else leaf.verb
+    sub = leaf.subcommand
+
+    # base path_spec: "" when no positionals at all; None otherwise (any)
+    base_path_spec: str | None = "" if not leaf.positional_paths else None
+
+    # Collect distinct path_spec strings derived from positional_paths.
+    path_specs: list[str] = _path_specs_from_positionals(leaf.positional_paths, ordered)
+
+    seen: set[PatternVariant] = set()
+    variants: list[PatternVariant] = []
+
+    def _add(v: PatternVariant) -> None:
+        if v not in seen:
+            seen.add(v)
+            variants.append(v)
+
+    # 1. Literal base.
+    _add(
+        PatternVariant(
+            verb=leaf.verb,
+            subcommand=sub,
+            flags=flags_literal,
+            path_spec=base_path_spec,
+        )
+    )
+
+    # 2. Verb-patterned (only when different from literal).
+    if verb_patterned is not None and verb_patterned != leaf.verb:
+        _add(
+            PatternVariant(
+                verb=verb_patterned,
+                subcommand=sub,
+                flags=flags_literal,
+                path_spec=base_path_spec,
+            )
+        )
+
+    # 3. Path-spec variants — use the best verb form.
+    for ps in path_specs:
+        _add(
+            PatternVariant(
+                verb=best_verb,
+                subcommand=sub,
+                flags=flags_literal,
+                path_spec=ps,
+            )
+        )
+
+    # 4. Flags-wildcard — use the best verb form.
+    _add(
+        PatternVariant(
+            verb=best_verb,
+            subcommand=sub,
+            flags="*",
+            path_spec=base_path_spec,
+        )
+    )
+
+    return variants
+
+
+# ---------------------------------------------------------------------------
+# Pattern-variant helpers
+# ---------------------------------------------------------------------------
+
+
+def _ctx_pairs_ordered(ctx: dict[str, str]) -> list[tuple[str, str]]:
+    """Return ``("$VAR", "/path")`` pairs sorted longest path first.
+
+    On equal path length, PROJECT_ROOT beats CWD beats HOME.
+    """
+    pairs: list[tuple[str, str]] = []
+    for key, var_name in _CTX_VAR_NAMES.items():
+        path = ctx.get(key, "").rstrip("/")
+        if path:
+            pairs.append((var_name, path))
+    pairs.sort(
+        key=lambda p: (
+            -len(p[1]),
+            _CTX_PRIORITY.get({v: k for k, v in _CTX_VAR_NAMES.items()}[p[0]], 99),
+        )
+    )
+    return pairs
+
+
+def _substitute_prefix(s: str, ordered: list[tuple[str, str]]) -> str | None:
+    """Replace the longest matching ctx prefix in ``s`` with its ``$VAR`` name.
+
+    Returns ``None`` when no ctx prefix matches, so the caller can distinguish
+    "no substitution available" from a substitution that produced the same string.
+    Only applies when ``s`` is an absolute path (starts with ``/``).
+    """
+    if not s.startswith("/"):
+        return None
+    for var_name, base in ordered:
+        if s == base:
+            return var_name
+        if s.startswith(base + "/"):
+            return var_name + s[len(base) :]
+    return None
+
+
+def _path_specs_from_positionals(
+    positional_paths: tuple[str, ...],
+    ordered: list[tuple[str, str]],
+) -> list[str]:
+    """Derive ``path_spec`` strings from positional path arguments.
+
+    For each positional path that lies under a ctx variable, emit:
+      - ``"$VAR/**"``        — any path under that variable
+      - ``"$VAR/<tail>"``    — the specific subpath
+
+    Deduplicates while preserving insertion order (``$VAR/**`` before
+    ``$VAR/<tail>`` for the same base, ordered by specificity of path).
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+
+    for path in positional_paths:
+        if not path.startswith("/"):
+            continue
+        for var_name, base in ordered:
+            glob = var_name + "/**"
+            if path == base:
+                if glob not in seen:
+                    seen.add(glob)
+                    result.append(glob)
+                break
+            if path.startswith(base + "/"):
+                tail = path[len(base) + 1 :]
+                specific = var_name + "/" + tail
+                if glob not in seen:
+                    seen.add(glob)
+                    result.append(glob)
+                if specific not in seen:
+                    seen.add(specific)
+                    result.append(specific)
+                break
+
+    return result
+
+
+def _flags_json(flags: frozenset[str]) -> str:
+    """Minified JSON array of sorted flag strings."""
+    return json.dumps(sorted(flags), separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
@@ -395,13 +627,14 @@ def _collect_positional_paths(words: Iterable[bashlex.ast.node]) -> tuple[str, .
     Skips flags, flag-values-that-happen-to-be-adjacent (we don't know which
     flags take values without a command database), substitution expressions
     (``$(...)``, ``<(...)``, ``>(...)``), and empty strings. The output is
-    the set of literal tokens the caller will feed into ``classify_paths``.
+    stored on :attr:`CanonicalLeaf.positional_paths` and passed to
+    :func:`to_pattern_form` to derive ``path_spec`` candidates.
 
     Conservative: any token that isn't clearly a flag or substitution ends
     up here, including URLs, hostnames, and non-filesystem args. That's OK
-    — ``classify_paths`` resolves each to an absolute filesystem path; a
-    URL resolves outside the project root and contributes to ``mixed`` /
-    ``outside_project``, which is the safe default.
+    — :func:`to_pattern_form` only substitutes tokens that start with ``/``
+    and match a known context-variable prefix; unmatched tokens produce no
+    ``path_spec`` variant and are otherwise ignored.
     """
     out: list[str] = []
     for word in words:

@@ -1,216 +1,614 @@
-"""Tests for learners.permission.seed — the fixture round-trip loader."""
+"""Tests for permission seed and fixture management.
+
+Tests cover:
+- Loading fixtures from YAML
+- Exporting permissions to YAML
+- Round-trip idempotency
+- Invalid fixture handling
+- Fixture schema validation
+"""
+
 from __future__ import annotations
 
-from pathlib import Path
+import json
 
 import pytest
 import yaml
 
-from learners.permission.seed import (
-    _load_fixture,
-    apply_fixture,
-    export_rejected,
-    export_shapes,
-    write_fixture,
-)
+from learners.permission.seed import apply_fixtures, export_permissions
 
 
-def _active_count(conn) -> int:
-    return int(
-        conn.execute("SELECT COUNT(*) FROM permission_active;").fetchone()[0]
-    )
+class TestApplyFixtures:
+    """Tests for apply_fixtures()."""
+
+    def test_empty_fixture(self, tmp_db, tmp_path):
+        """Loading an empty fixture list succeeds with no rows created."""
+        fixture_file = tmp_path / "empty.yaml"
+        fixture_file.write_text("[]")
+
+        shapes_created, perms_created = apply_fixtures(tmp_db, fixture_file)
+        assert shapes_created == 0
+        assert perms_created == 0
+
+    def test_simple_approved_fixture(self, tmp_db, tmp_path):
+        """Loading a simple approved fixture creates rule_shape + permission."""
+        fixture_file = tmp_path / "simple.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "decision": "approved",
+                        "reason": "test",
+                    }
+                ]
+            )
+        )
+
+        shapes_created, perms_created = apply_fixtures(tmp_db, fixture_file)
+        assert perms_created == 1
+
+        # Verify the rule_shape was created
+        shape_row = tmp_db.execute(
+            "SELECT id, verb, flags FROM rule_shapes WHERE verb = 'Read';"
+        ).fetchone()
+        assert shape_row is not None
+        shape_id = shape_row[0]
+        assert shape_row[1] == "Read"
+        assert shape_row[2] == "[]"  # minified JSON
+
+        # Verify the permission row was created (global tier)
+        perm_row = tmp_db.execute(
+            "SELECT decision, source, reason, session_id, project_id "
+            "FROM permissions WHERE rule_shape_id = ?;",
+            (shape_id,),
+        ).fetchone()
+        assert perm_row is not None
+        assert perm_row[0] == "approved"
+        assert perm_row[1] == "seed"
+        assert perm_row[2] == "test"
+        assert perm_row[3] is None  # session_id
+        assert perm_row[4] is None  # project_id
+
+    def test_fixture_with_subcommand(self, tmp_db, tmp_path):
+        """Fixture with subcommand is stored correctly."""
+        fixture_file = tmp_path / "sub.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "git",
+                        "subcommand": "commit",
+                        "flags": ["-m"],
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        shape_row = tmp_db.execute(
+            "SELECT subcommand, flags FROM rule_shapes WHERE verb = 'git';"
+        ).fetchone()
+        assert shape_row is not None
+        assert shape_row[0] == "commit"
+        assert json.loads(shape_row[1]) == ["-m"]
+
+    def test_fixture_with_path_spec(self, tmp_db, tmp_path):
+        """Fixture with path_spec is stored correctly."""
+        fixture_file = tmp_path / "path.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "path_spec": "$PROJECT_ROOT/**",
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        shape_row = tmp_db.execute(
+            "SELECT path_spec FROM rule_shapes WHERE verb = 'Read';"
+        ).fetchone()
+        assert shape_row is not None
+        assert shape_row[0] == "$PROJECT_ROOT/**"
+
+    def test_fixture_with_flags_wildcard(self, tmp_db, tmp_path):
+        """Fixture with flags='*' is stored as literal '*'."""
+        fixture_file = tmp_path / "wildcard.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Bash",
+                        "flags": "*",
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        shape_row = tmp_db.execute(
+            "SELECT flags FROM rule_shapes WHERE verb = 'Bash';"
+        ).fetchone()
+        assert shape_row is not None
+        assert shape_row[0] == "*"
+
+    def test_fixture_with_rejected_decision(self, tmp_db, tmp_path):
+        """Fixture with decision='rejected' is applied correctly."""
+        fixture_file = tmp_path / "rejected.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "rm",
+                        "flags": ["-r", "-f"],
+                        "decision": "rejected",
+                        "reason": "dangerous",
+                    }
+                ]
+            )
+        )
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        perm_row = tmp_db.execute(
+            "SELECT decision, reason FROM permissions "
+            "WHERE rule_shape_id IN "
+            "(SELECT id FROM rule_shapes WHERE verb = 'rm');"
+        ).fetchone()
+        assert perm_row is not None
+        assert perm_row[0] == "rejected"
+        assert perm_row[1] == "dangerous"
+
+    def test_fixture_global_tier_default(self, tmp_db, tmp_path):
+        """Fixture without tier defaults to global."""
+        fixture_file = tmp_path / "default_tier.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        perm_row = tmp_db.execute(
+            "SELECT session_id, project_id FROM permissions "
+            "WHERE rule_shape_id IN "
+            "(SELECT id FROM rule_shapes WHERE verb = 'Read');"
+        ).fetchone()
+        assert perm_row is not None
+        assert perm_row[0] is None  # session_id
+        assert perm_row[1] is None  # project_id
+
+    def test_fixture_without_reason(self, tmp_db, tmp_path):
+        """Fixture without reason stores NULL."""
+        fixture_file = tmp_path / "no_reason.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        perm_row = tmp_db.execute(
+            "SELECT reason FROM permissions "
+            "WHERE rule_shape_id IN "
+            "(SELECT id FROM rule_shapes WHERE verb = 'Read');"
+        ).fetchone()
+        assert perm_row is not None
+        assert perm_row[0] is None
+
+    def test_fixture_multiple_entries(self, tmp_db, tmp_path):
+        """Loading multiple fixtures creates all rows."""
+        fixture_file = tmp_path / "multi.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {"verb": "Read", "flags": [], "decision": "approved"},
+                    {"verb": "Write", "flags": [], "decision": "approved"},
+                    {"verb": "Bash", "flags": ["-c"], "decision": "rejected"},
+                ]
+            )
+        )
+
+        shapes_created, perms_created = apply_fixtures(tmp_db, fixture_file)
+        assert perms_created == 3
+
+        # Verify all three rules exist
+        rows = tmp_db.execute(
+            "SELECT COUNT(*) FROM rule_shapes WHERE verb IN ('Read', 'Write', 'Bash');"
+        ).fetchone()
+        assert rows[0] == 3
+
+    def test_fixture_missing_verb_fails(self, tmp_db, tmp_path):
+        """Fixture without verb raises ValueError."""
+        fixture_file = tmp_path / "bad_verb.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "flags": [],
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        with pytest.raises(ValueError, match="missing 'verb'"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_fixture_missing_decision_fails(self, tmp_db, tmp_path):
+        """Fixture without decision raises ValueError."""
+        fixture_file = tmp_path / "bad_decision.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                    }
+                ]
+            )
+        )
+
+        with pytest.raises(ValueError, match="missing 'decision'"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_fixture_missing_flags_fails(self, tmp_db, tmp_path):
+        """Fixture without flags raises ValueError."""
+        fixture_file = tmp_path / "bad_flags.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+
+        with pytest.raises(ValueError, match="missing 'flags'"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_fixture_invalid_decision_fails(self, tmp_db, tmp_path):
+        """Fixture with invalid decision raises ValueError."""
+        fixture_file = tmp_path / "bad_decision_value.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "decision": "maybe",
+                    }
+                ]
+            )
+        )
+
+        with pytest.raises(ValueError, match="invalid decision"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_fixture_non_dict_entry_fails(self, tmp_db, tmp_path):
+        """Fixture with non-dict entry raises ValueError."""
+        fixture_file = tmp_path / "bad_entry.yaml"
+        fixture_file.write_text(yaml.dump(["not a dict"]))
+
+        with pytest.raises(ValueError, match="is not a dict"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_fixture_non_list_fails(self, tmp_db, tmp_path):
+        """Fixture that is not a list raises ValueError."""
+        fixture_file = tmp_path / "not_list.yaml"
+        fixture_file.write_text(yaml.dump({"verb": "Read"}))
+
+        with pytest.raises(ValueError, match="must be a YAML list"):
+            apply_fixtures(tmp_db, fixture_file)
 
 
-def _rejected_count(conn) -> int:
-    return int(
-        conn.execute("SELECT COUNT(*) FROM permission_rejected;").fetchone()[0]
-    )
+class TestExportPermissions:
+    """Tests for export_permissions()."""
+
+    def test_empty_export(self, tmp_db):
+        """Exporting an empty DB returns empty YAML list."""
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+        assert entries == []
+
+    def test_export_simple_permission(self, tmp_db, tmp_path):
+        """Exporting a single permission returns matching YAML."""
+        # Set up a permission
+        fixture_file = tmp_path / "export_test.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "decision": "approved",
+                        "reason": "test export",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        # Export and parse
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert len(entries) == 1
+        assert entries[0]["verb"] == "Read"
+        assert entries[0]["flags"] == []
+        assert entries[0]["decision"] == "approved"
+        assert entries[0]["reason"] == "test export"
+
+    def test_export_with_subcommand(self, tmp_db, tmp_path):
+        """Exporting a permission with subcommand includes it."""
+        fixture_file = tmp_path / "export_sub.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "git",
+                        "subcommand": "push",
+                        "flags": ["-u"],
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert entries[0]["verb"] == "git"
+        assert entries[0]["subcommand"] == "push"
+        assert entries[0]["flags"] == ["-u"]
+
+    def test_export_with_path_spec(self, tmp_db, tmp_path):
+        """Exporting a permission with path_spec includes it."""
+        fixture_file = tmp_path / "export_path.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "path_spec": "$HOME/**",
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert entries[0]["path_spec"] == "$HOME/**"
+
+    def test_export_flags_wildcard(self, tmp_db, tmp_path):
+        """Exporting a permission with flags='*' exports as string."""
+        fixture_file = tmp_path / "export_wildcard.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Bash",
+                        "flags": "*",
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert entries[0]["flags"] == "*"
+
+    def test_export_multiple_permissions(self, tmp_db, tmp_path):
+        """Exporting multiple permissions returns all of them."""
+        fixture_file = tmp_path / "export_multi.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {"verb": "Read", "flags": [], "decision": "approved"},
+                    {"verb": "Write", "flags": [], "decision": "approved"},
+                    {"verb": "rm", "flags": ["-r"], "decision": "rejected"},
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert len(entries) == 3
+        verbs = [e["verb"] for e in entries]
+        assert "Read" in verbs
+        assert "Write" in verbs
+        assert "rm" in verbs
+
+    def test_export_to_file(self, tmp_db, tmp_path):
+        """Exporting to a file writes the YAML content."""
+        fixture_file = tmp_path / "fixture.yaml"
+        fixture_file.write_text(
+            yaml.dump([{"verb": "Read", "flags": [], "decision": "approved"}])
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        output_file = tmp_path / "exported.yaml"
+        export_permissions(tmp_db, output_file)
+
+        assert output_file.exists()
+        entries = yaml.safe_load(output_file.read_text())
+        assert len(entries) == 1
+        assert entries[0]["verb"] == "Read"
+
+    def test_export_omits_global_tier(self, tmp_db, tmp_path):
+        """Exporting a global-tier permission omits the tier field."""
+        fixture_file = tmp_path / "export_global.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "tier": "global",
+                        "decision": "approved",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert "tier" not in entries[0]
+
+    def test_export_omits_null_reason(self, tmp_db, tmp_path):
+        """Exporting a permission without reason omits the field."""
+        fixture_file = tmp_path / "export_no_reason.yaml"
+        fixture_file.write_text(
+            yaml.dump([{"verb": "Read", "flags": [], "decision": "approved"}])
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert "reason" not in entries[0]
+
+    def test_export_includes_reason(self, tmp_db, tmp_path):
+        """Exporting a permission with reason includes the field."""
+        fixture_file = tmp_path / "export_reason.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "decision": "approved",
+                        "reason": "safe operation",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+
+        assert entries[0]["reason"] == "safe operation"
 
 
-def _shape_count(conn) -> int:
-    return int(
-        conn.execute("SELECT COUNT(*) FROM command_shapes;").fetchone()[0]
-    )
+class TestRoundTrip:
+    """Tests for round-trip idempotency (load → export → load)."""
 
+    def test_roundtrip_simple(self, tmp_db, tmp_path):
+        """Loading and exporting returns equivalent YAML."""
+        original_yaml = yaml.dump(
+            [
+                {"verb": "Read", "flags": [], "decision": "approved"},
+                {
+                    "verb": "git",
+                    "subcommand": "push",
+                    "flags": ["-u"],
+                    "decision": "rejected",
+                    "reason": "dangerous",
+                },
+            ]
+        )
+        fixture_file = tmp_path / "roundtrip.yaml"
+        fixture_file.write_text(original_yaml)
 
-def test_fixture_loads_without_error():
-    active, rejected = _load_fixture()
-    assert isinstance(active, list)
-    assert isinstance(rejected, list)
-    for entry in active:
-        assert isinstance(entry.get("verb"), str) and entry["verb"]
+        # Load
+        apply_fixtures(tmp_db, fixture_file)
 
+        # Export
+        exported_yaml = export_permissions(tmp_db)
+        original_entries = yaml.safe_load(original_yaml)
+        exported_entries = yaml.safe_load(exported_yaml)
 
-def test_apply_fixture_idempotent(tmp_db):
-    active, rejected = _load_fixture()
-    counts1 = apply_fixture(tmp_db, active, rejected)
-    assert counts1["active"] == (len(active), 0)
-    assert counts1["rejected"] == (len(rejected), 0)
+        # Entries should match (order may differ, but content is identical)
+        assert len(original_entries) == len(exported_entries)
 
-    counts2 = apply_fixture(tmp_db, active, rejected)
-    assert counts2["active"] == (0, len(active))
-    assert counts2["rejected"] == (0, len(rejected))
+        # Sort both by (verb, subcommand, decision) for comparison
+        original_entries.sort(
+            key=lambda e: (e["verb"], e.get("subcommand", ""), e["decision"])
+        )
+        exported_entries.sort(
+            key=lambda e: (e["verb"], e.get("subcommand", ""), e["decision"])
+        )
 
-    assert _active_count(tmp_db) == len(active)
-    assert _rejected_count(tmp_db) == len(rejected)
+        for orig, exp in zip(original_entries, exported_entries):
+            assert orig["verb"] == exp["verb"]
+            assert orig.get("subcommand") == exp.get("subcommand")
+            assert orig["flags"] == exp["flags"]
+            assert orig["decision"] == exp["decision"]
+            assert orig.get("reason") == exp.get("reason")
 
+    def test_roundtrip_multiple_times(self, tmp_db, tmp_path):
+        """Repeated load/export cycles preserve data."""
+        original_yaml = yaml.dump(
+            [
+                {"verb": "Read", "flags": [], "decision": "approved"},
+                {"verb": "Write", "flags": ["-x"], "decision": "approved"},
+            ]
+        )
 
-def test_apply_fixture_fills_gap(tmp_db):
-    active, _ = _load_fixture()
-    first = apply_fixture(tmp_db, active[:-1])
-    assert first["active"] == (len(active) - 1, 0)
+        fixture_file = tmp_path / "cycle.yaml"
+        fixture_file.write_text(original_yaml)
 
-    second = apply_fixture(tmp_db, active)
-    assert second["active"] == (1, len(active) - 1)
+        # First cycle
+        apply_fixtures(tmp_db, fixture_file)
+        exported_1 = export_permissions(tmp_db)
 
+        # Clear the DB and do it again with the exported YAML
+        tmp_db.execute("DELETE FROM permissions;")
+        tmp_db.execute("DELETE FROM rule_shapes;")
 
-def test_applies_expected_source_tag(tmp_db):
-    active, rejected = _load_fixture()
-    apply_fixture(tmp_db, active, rejected)
-    sources = {
-        row[0]
-        for row in tmp_db.execute(
-            "SELECT DISTINCT source FROM permission_active;"
-        ).fetchall()
-    }
-    if active:
-        assert sources == {"manual"}
+        fixture_file.write_text(exported_1)
+        apply_fixtures(tmp_db, fixture_file)
+        exported_2 = export_permissions(tmp_db)
 
+        # The two exports should be equivalent
+        entries_1 = yaml.safe_load(exported_1)
+        entries_2 = yaml.safe_load(exported_2)
 
-def test_missing_verb_rejected(tmp_db):
-    with pytest.raises(ValueError, match="missing 'verb'"):
-        apply_fixture(tmp_db, [{"flags": ["-l"]}])
-
-
-def test_flags_order_independent(tmp_db):
-    apply_fixture(tmp_db, [{"verb": "ls", "flags": ["-l", "-a"]}])
-    counts = apply_fixture(tmp_db, [{"verb": "ls", "flags": ["-a", "-l"]}])
-    assert counts["active"] == (0, 1)
-    assert _shape_count(tmp_db) == 1
-    assert _active_count(tmp_db) == 1
-
-
-def test_export_reflects_db_state(tmp_db):
-    apply_fixture(
-        tmp_db,
-        [
-            {"verb": "ls"},
-            {"verb": "ls", "flags": ["-l", "-a"]},
-            {"verb": "grep", "flags": ["-E"], "source": "learner"},
-        ],
-    )
-    entries = export_shapes(tmp_db)
-    assert len(entries) == 3
-    assert [e["verb"] for e in entries] == ["grep", "ls", "ls"]
-    grep_entry = next(e for e in entries if e["verb"] == "grep")
-    assert grep_entry.get("source") == "learner"
-    assert "source" not in next(
-        e for e in entries if e["verb"] == "ls" and "flags" not in e
-    )
-    ls_flagged = next(e for e in entries if "flags" in e and e["verb"] == "ls")
-    assert ls_flagged["flags"] == ["-a", "-l"]
-
-
-def test_export_then_apply_round_trip(tmp_db, tmp_path: Path):
-    active_in = [
-        {"verb": "echo"},
-        {"verb": "ls", "flags": ["-l"]},
-        {"verb": "grep", "flags": ["-E", "-v"], "source": "learner"},
-    ]
-    rejected_in = [
-        {"verb": "du", "flags": ["-s", "-a"], "reason": "too noisy"},
-    ]
-    apply_fixture(tmp_db, active_in, rejected_in)
-    exported_active = export_shapes(tmp_db)
-    exported_rejected = export_rejected(tmp_db)
-
-    out = tmp_path / "safe_shapes.yaml"
-    write_fixture(exported_active, exported_rejected, path=out)
-
-    active, rejected = _load_fixture(path=out)
-    assert len(active) == len(active_in)
-    assert len(rejected) == len(rejected_in)
-
-    # Apply to a clean slate and verify counts + source/reason preserved.
-    tmp_db.execute("DELETE FROM permission_active;")
-    tmp_db.execute("DELETE FROM permission_rejected;")
-    tmp_db.execute("DELETE FROM command_shapes;")
-    tmp_db.commit()
-    counts = apply_fixture(tmp_db, active, rejected)
-    assert counts["active"] == (len(active_in), 0)
-    assert counts["rejected"] == (len(rejected_in), 0)
-
-    grep_row = tmp_db.execute(
-        """
-        SELECT pa.source FROM permission_active pa
-          JOIN command_shapes cs ON cs.id = pa.command_shape_id
-         WHERE cs.verb = 'grep';
-        """
-    ).fetchone()
-    assert grep_row[0] == "learner"
-
-    du_row = tmp_db.execute(
-        """
-        SELECT r.reason FROM permission_rejected r
-          JOIN command_shapes cs ON cs.id = r.command_shape_id
-         WHERE cs.verb = 'du';
-        """
-    ).fetchone()
-    assert du_row[0] == "too noisy"
-
-
-def test_export_deterministic_ordering(tmp_db):
-    apply_fixture(
-        tmp_db,
-        [
-            {"verb": "ls", "flags": ["-l"]},
-            {"verb": "echo"},
-            {"verb": "ls"},
-            {"verb": "cat"},
-        ],
-    )
-    entries = export_shapes(tmp_db)
-    verbs_and_flags = [
-        (e["verb"], tuple(e.get("flags") or [])) for e in entries
-    ]
-    assert verbs_and_flags == sorted(verbs_and_flags)
-
-
-def test_write_fixture_preserves_header(tmp_db, tmp_path: Path):
-    apply_fixture(tmp_db, [{"verb": "echo"}])
-    out = tmp_path / "fixture.yaml"
-    write_fixture(export_shapes(tmp_db), export_rejected(tmp_db), path=out)
-    text = out.read_text()
-    assert "Permission-learner fixture" in text
-    assert "round-trip" in text.lower()
-    data = yaml.safe_load(text)
-    assert data["active"][0]["verb"] == "echo"
-
-
-def test_apply_rejects_invalid_source(tmp_db):
-    with pytest.raises(ValueError, match="invalid source"):
-        apply_fixture(tmp_db, [{"verb": "echo", "source": "bogus"}])
-
-
-def test_legacy_shapes_key_still_loads(tmp_path: Path):
-    """Back-compat: a fixture using the old ``shapes:`` top-level must load
-    as active-only (rejected empty)."""
-    legacy = tmp_path / "legacy.yaml"
-    legacy.write_text("shapes:\n- {verb: echo}\n- {verb: ls, flags: [-l]}\n")
-    active, rejected = _load_fixture(path=legacy)
-    assert [e["verb"] for e in active] == ["echo", "ls"]
-    assert rejected == []
-
-
-def test_rejected_entry_with_reason(tmp_db):
-    apply_fixture(
-        tmp_db,
-        [],
-        [{"verb": "find", "flags": ["-delete"], "reason": "destructive"}],
-    )
-    assert _rejected_count(tmp_db) == 1
-    row = tmp_db.execute(
-        "SELECT cs.verb, r.reason FROM permission_rejected r "
-        "JOIN command_shapes cs ON cs.id=r.command_shape_id;"
-    ).fetchone()
-    assert row == ("find", "destructive")
+        assert len(entries_1) == len(entries_2)
+        for e1, e2 in zip(
+            sorted(entries_1, key=lambda e: e["verb"]),
+            sorted(entries_2, key=lambda e: e["verb"]),
+        ):
+            assert e1["verb"] == e2["verb"]
+            assert e1["flags"] == e2["flags"]
+            assert e1["decision"] == e2["decision"]

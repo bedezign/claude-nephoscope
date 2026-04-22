@@ -21,6 +21,7 @@ Cursor name is ``instinct-summarizer`` in ``consumer_cursors`` — distinct
 from the permission-learner's cursor so the two consumers advance
 independently.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -103,7 +104,10 @@ def _format_row_snippet(row: sqlite3.Row) -> str:
         if row["description"]:
             parts.append(row["description"])
         return f"{tool}: {' — '.join(parts) or '(no details)'}"
-    if tool in ("Edit", "Write", "Read", "MultiEdit", "NotebookEdit") and row["file_path"]:
+    if (
+        tool in ("Edit", "Write", "Read", "MultiEdit", "NotebookEdit")
+        and row["file_path"]
+    ):
         return f"{tool}: {row['file_path']}"
     if tool in ("Grep", "Glob") and row["pattern"]:
         return f"{tool}: {row['pattern']}"
@@ -143,9 +147,7 @@ def _summarize(rows: list[sqlite3.Row]) -> str:
             seq_counts[tuple(tools[i : i + SEQ_LEN])] += 1
 
     lines: list[str] = []
-    lines.append(
-        f"Observation summary ({len(rows)} tool calls, {start_ts} → {end_ts})"
-    )
+    lines.append(f"Observation summary ({len(rows)} tool calls, {start_ts} → {end_ts})")
     lines.append("")
 
     lines.append("## Tool frequency")
@@ -172,7 +174,9 @@ def _summarize(rows: list[sqlite3.Row]) -> str:
         lines.append("")
 
     if errors:
-        lines.append(f"## Recent errors ({len(errors)} total, showing up to {MAX_ERRORS})")
+        lines.append(
+            f"## Recent errors ({len(errors)} total, showing up to {MAX_ERRORS})"
+        )
         for row in errors[-MAX_ERRORS:]:
             lines.append(f"  [{row['ts']}] {_format_row_snippet(row)}")
         lines.append("")
