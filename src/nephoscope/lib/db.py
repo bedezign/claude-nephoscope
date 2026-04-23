@@ -1,34 +1,31 @@
-"""Database helpers for the observability module — Phase 8 schema.
+"""Database helpers for the observations module.
 
-Simplified from the v5–v7 migration approach: single flat schema.sql, no schema
-versioning, no migration code. Helpers for the new permission tables (rule_shapes,
-permissions) and candidate tracking (permission_candidates, permission_candidate_sessions).
+Single flat schema.sql, no schema versioning, no migration code. Helpers for
+the permission tables (rule_shapes, permissions) and candidate tracking
+(permission_candidates, permission_candidate_sessions).
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import json
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+from nephoscope.lib.paths import observations_db_path
 
 MAX_STR = 500
 
 
 def _db_path() -> Path:
-    """Resolve the observations DB path from ``OBSERVABILITY_DB`` at call time.
+    """Resolve the observations DB path at call time.
 
-    Resolving lazily (instead of caching at import) lets tests use
+    Delegates to :func:`nephoscope.lib.paths.observations_db_path`. Resolving
+    lazily (instead of caching at import) lets tests use
     ``monkeypatch.setenv`` without also having to patch this module's globals.
     """
-    return Path(
-        os.environ.get(
-            "OBSERVABILITY_DB",
-            Path.home() / ".cache" / "claude" / "observability" / "observations.db",
-        )
-    )
+    return observations_db_path()
 
 
 def _now() -> str:

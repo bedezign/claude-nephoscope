@@ -97,7 +97,10 @@ def main() -> int:
     ap.add_argument(
         "--db",
         type=str,
-        help="Path to observations.db (default: OBSERVABILITY_DB env or ~/.cache/claude/observability/observations.db).",
+        help=(
+            "Path to observations.db (default resolution: OBSERVABILITY_DB > "
+            "${CLAUDE_PLUGIN_DATA}/observations.db > ~/.cache/nephoscope/observations.db)."
+        ),
     )
     args = ap.parse_args()
 

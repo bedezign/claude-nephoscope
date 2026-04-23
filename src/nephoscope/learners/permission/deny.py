@@ -29,12 +29,8 @@ from .canonicalize import CanonicalLeaf
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "deny.yaml"
 
-# Redirections into any of these prefixes are always hard-denied, regardless
-# of whether the target currently exists. These are the paths whose
-# integrity we never want a learned pattern to be able to corrupt.
-_GUARDED_WRITE_PREFIXES: tuple[str, ...] = (
-    "/home/steve/.claude/",
-    "/home/steve/.cache/claude/",
+# Absolute system prefixes that must never be targeted by a learned write.
+_SYSTEM_GUARDED_PREFIXES: tuple[str, ...] = (
     "/etc/",
     "/var/",
     "/usr/",
@@ -42,6 +38,27 @@ _GUARDED_WRITE_PREFIXES: tuple[str, ...] = (
     "/sys/",
     "/proc/",
 )
+
+# Home-relative prefixes expanded at evaluation time; the set covers
+# Claude Code state + cache directories whose integrity a learned pattern
+# must never be able to corrupt.
+_HOME_GUARDED_RELATIVE: tuple[str, ...] = (
+    ".claude/",
+    ".cache/claude/",
+    ".cache/nephoscope/",
+    ".config/nephoscope/",
+)
+
+
+def _guarded_write_prefixes() -> tuple[str, ...]:
+    """Return the active list of guarded write prefixes.
+
+    Resolved on call so the rule follows ``$HOME`` rather than baking in a
+    machine-specific absolute path at import time.
+    """
+    home = str(Path.home())
+    home_expanded = tuple(f"{home}/{rel}" for rel in _HOME_GUARDED_RELATIVE)
+    return home_expanded + _SYSTEM_GUARDED_PREFIXES
 
 _cached_config: dict[str, Any] | None = None
 
@@ -113,9 +130,10 @@ def evaluate(leaf: CanonicalLeaf) -> tuple[str | None, str | None]:
                     )
 
     # Procedural: redirections into guarded system paths are hard-denied.
+    guarded_prefixes = _guarded_write_prefixes()
     for redir in leaf.redirections:
         if redir.op in (">", ">>"):
-            for prefix in _GUARDED_WRITE_PREFIXES:
+            for prefix in guarded_prefixes:
                 if redir.target.startswith(prefix):
                     return (
                         "deny",

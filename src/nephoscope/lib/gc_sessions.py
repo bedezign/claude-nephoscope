@@ -1,4 +1,4 @@
-"""GC for session-scoped permission data (Phase 8).
+"""GC for session-scoped permission data.
 
 Drops rows whose usefulness has expired:
 

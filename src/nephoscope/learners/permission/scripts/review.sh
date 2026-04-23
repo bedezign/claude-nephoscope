@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 8 per-axis permission review.
+# Per-axis permission review.
 #
 # For each eligible candidate from `learner propose`:
 #

@@ -1,22 +1,20 @@
 ---
-description: Manage permission rules and candidates for the observability module
-argument-hint: "[status|review|scan|propose|list|promote|reject|unpermit|seed|prune|gc|sweep] [options]"
-allowed-tools: Bash(/home/steve/.claude/observability/**), Bash(grep:*), Bash(cut:*), Bash(awk:*), Bash(sort:*), Bash(uniq:*), Bash(head:*), Bash(tail:*), Bash(sqlite3:*), Bash(python:*), Bash(pwd:*), Bash(cd:*), Bash(echo:*), Read
+description: Manage permission rules and candidates learned by nephoscope
+argument-hint: "[status|review|scan|propose|list|promote|reject|unpermit|seed|prune|gc|sweep|reconcile|mirror-status|mirror-dry-run|reload-hint] [options]"
+allowed-tools: Bash(${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-*:*), Bash(${CLAUDE_PLUGIN_DATA}/.venv/bin/python:*), Bash(grep:*), Bash(cut:*), Bash(awk:*), Bash(sort:*), Bash(uniq:*), Bash(head:*), Bash(tail:*), Bash(sqlite3:*), Bash(pwd:*), Bash(cd:*), Bash(echo:*), Read
 ---
 
 ## Context
 
-- Observability root: !`test -d /home/steve/.claude/observability && echo "/home/steve/.claude/observability" || echo "ERROR: sandbox not found"`
-- DB path: !`echo "${OBSERVABILITY_DB:-/home/steve/.cache/claude/observability/observations.db}"`
-- Venv: !`test -f /home/steve/.claude/observability/.venv/bin/python && echo "ready" || echo "not set up"`
+- Plugin venv: !`test -f "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" && echo "ready" || echo "not bootstrapped — start a new session and the SessionStart hook will install it"`
+- DB path: !`echo "${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"`
 
 ## Preflight
 
 Before executing any subcommand:
 
-1. Verify the observability root exists and contains `learners/permission/learner.py`
-2. Ensure `$OBSERVABILITY_DB` is set (default `/home/steve/.cache/claude/observability/observations.db`)
-3. If venv check fails, suggest running `bash /home/steve/.claude/observability/scripts/setup.sh`
+1. Verify `${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn` exists. If not, exit with a note that the SessionStart hook needs to run once (start a new session).
+2. Resolve the DB path as `${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}` and export it for all subprocess invocations.
 
 If any preflight fails, STOP and report the error.
 
@@ -29,8 +27,8 @@ Parse `$ARGUMENTS` to extract the subcommand and options:
 Display current permission state: per-tier rule counts, candidate count, recent asks.
 
 ```bash
-OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  sqlite3 /home/steve/.cache/claude/observability/observations.db <<EOF
+DB="${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"
+sqlite3 "$DB" <<EOF
 .headers on
 .mode column
 SELECT 'Approved global' as tier, COUNT(*) as count
@@ -61,8 +59,8 @@ EOF
 Then show recent asks:
 
 ```bash
-OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  sqlite3 /home/steve/.cache/claude/observability/observations.db <<EOF
+DB="${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"
+sqlite3 "$DB" <<EOF
 .headers on
 .mode column
 SELECT asked_at, verb, subcommand, flags FROM permission_ask_pending
@@ -74,36 +72,26 @@ EOF
 
 Scan new Bash tool calls and accumulate into `permission_candidates`.
 
-Routes to: `learners.permission.learner scan`
-
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner scan
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" scan
 ```
 
 ### `propose`
 
 Emit eligible candidates (thresholds met, not on deny list) for review.
 
-Routes to: `learners.permission.learner propose`
-
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner propose
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" propose
 ```
 
 ### `review`
 
 Interactively walk through candidates with per-axis (verb/paths/flags) and tier prompts.
 
-Routes to: `learners/permission/scripts/review.sh`
+The `review.sh` launcher lives inside the installed package; invoke it via its absolute path under `${CLAUDE_PLUGIN_ROOT}`:
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  bash learners/permission/scripts/review.sh
+bash "${CLAUDE_PLUGIN_ROOT}/src/nephoscope/learners/permission/scripts/review.sh"
 ```
 
 ### `list`
@@ -124,11 +112,10 @@ List permission rules with optional filtering.
 Implemented via SQLite queries:
 
 ```bash
-# Determine filter from $ARGUMENTS
-# If filter is "candidates", query v_candidates
-# Otherwise, query v_permissions with WHERE clause for decision + tier
-OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  sqlite3 /home/steve/.cache/claude/observability/observations.db ".headers on" ".mode column" \
+DB="${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"
+# If filter is "candidates", query v_candidates; otherwise query v_permissions
+# with a WHERE clause for decision + tier.
+sqlite3 "$DB" ".headers on" ".mode column" \
   "SELECT * FROM v_permissions [WHERE decision='...' AND tier='...'] [ORDER BY decided_at DESC];"
 ```
 
@@ -136,21 +123,15 @@ OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
 
 Promote a candidate to an approved rule at the specified tier.
 
-Routes to: `learners.permission.learner promote`
-
 **Usage:**
 ```
 /permissions promote --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session [--path-spec <spec>] [--reason <text>]
 ```
 
-Delegates to learner:
-
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner promote --sync \
-    --verb "$VERB" [--subcommand "$SUB"] --flags "$FLAGS" --tier "$TIER" \
-    [--path-spec "$PATHSPEC"] [--reason "$REASON"]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" promote --sync \
+  --verb "$VERB" [--subcommand "$SUB"] --flags "$FLAGS" --tier "$TIER" \
+  [--path-spec "$PATHSPEC"] [--reason "$REASON"]
 ```
 
 After the DB op, print one-line sync status: `sync: ok` or `sync: skipped (session-tier)`.
@@ -161,10 +142,8 @@ On `MirrorHashMismatch` (exit 1): echo
 If flags promoted to wildcard (`*`), offer to subsume sibling concrete rules:
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner count-concrete-siblings \
-    --verb "$VERB" --subcommand "$SUB" --tier "$TIER"
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" count-concrete-siblings \
+  --verb "$VERB" --subcommand "$SUB" --tier "$TIER"
 ```
 
 If count > 0, prompt: "Found N concrete sibling rules for `verb/subcommand` at `$TIER`. Delete them? [Y/n]"
@@ -172,17 +151,13 @@ If count > 0, prompt: "Found N concrete sibling rules for `verb/subcommand` at `
 If yes, run:
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner subsume-siblings \
-    --verb "$VERB" --subcommand "$SUB" --tier "$TIER"
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" subsume-siblings \
+  --verb "$VERB" --subcommand "$SUB" --tier "$TIER"
 ```
 
 ### `reject`
 
 Reject a candidate (add a rejected rule).
-
-Routes to: `learners.permission.learner reject`
 
 **Usage:**
 ```
@@ -190,11 +165,9 @@ Routes to: `learners.permission.learner reject`
 ```
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner reject \
-    --verb "$VERB" [--subcommand "$SUB"] --flags "$FLAGS" --tier "$TIER" \
-    [--reason "$REASON"]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" reject \
+  --verb "$VERB" [--subcommand "$SUB"] --flags "$FLAGS" --tier "$TIER" \
+  [--reason "$REASON"]
 ```
 
 After the DB op, print one-line sync status: `sync: ok` or `sync: skipped (session-tier)`.
@@ -203,18 +176,14 @@ After the DB op, print one-line sync status: `sync: ok` or `sync: skipped (sessi
 
 Delete a permission rule.
 
-Routes to: `learners.permission.learner unpermit`
-
 **Usage:**
 ```
 /permissions unpermit --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session
 ```
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.learner unpermit \
-    --verb "$VERB" [--subcommand "$SUB"] --flags "$FLAGS" --tier "$TIER"
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" unpermit \
+  --verb "$VERB" [--subcommand "$SUB"] --flags "$FLAGS" --tier "$TIER"
 ```
 
 After the DB op, print one-line sync status: `sync: ok` or `sync: skipped (session-tier)`.
@@ -222,8 +191,6 @@ After the DB op, print one-line sync status: `sync: ok` or `sync: skipped (sessi
 ### `seed`
 
 Seed fixture rules (load from YAML or export to YAML).
-
-Routes to: `learners/permission/seed.py`
 
 **Usage:**
 ```
@@ -234,9 +201,7 @@ Routes to: `learners/permission/seed.py`
 - `/permissions seed --export` — dump current `permissions` to stdout in YAML format
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m learners.permission.seed [--export]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/python" -m nephoscope.learners.permission.seed [--export]
 ```
 
 After load, print one-line sync status: `sync: ok (N rules loaded)`.
@@ -244,8 +209,6 @@ After load, print one-line sync status: `sync: ok (N rules loaded)`.
 ### `prune`
 
 Delete stale candidates (older than threshold, no corresponding ask_pending row).
-
-Routes to: `lib/prune.py`
 
 **Usage:**
 ```
@@ -255,16 +218,12 @@ Routes to: `lib/prune.py`
 Default: 30 days.
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m lib.prune [--stale-days 30]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/python" -m nephoscope.lib.prune [--stale-days 30]
 ```
 
 ### `gc`
 
 Garbage collect: drop session-tier rules from idle sessions, drop stale ask_pending rows.
-
-Routes to: `lib.gc_sessions` (via learner CLI or direct module invocation)
 
 **Usage:**
 ```
@@ -274,9 +233,7 @@ Routes to: `lib.gc_sessions` (via learner CLI or direct module invocation)
 Defaults: 7 days (sessions), 1 hour (asks).
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m lib.gc_sessions [--session-idle-days 7] [--ask-pending-hours 1]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/python" -m nephoscope.lib.gc_sessions [--session-idle-days 7] [--ask-pending-hours 1]
 ```
 
 ### `sweep`
@@ -300,10 +257,8 @@ Diff the JSON mirror against the DB and (optionally) apply a resolution.
 - Default mode: `interactive` (auto-switches to `adopt` when stored hash is NULL).
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m commands.permissions_cmd reconcile \
-    [--project "$SETTINGS_PATH"] [--mode interactive|plan|auto-db-wins|auto-json-wins|adopt]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-permissions" reconcile \
+  [--project "$SETTINGS_PATH"] [--mode interactive|plan|auto-db-wins|auto-json-wins|adopt]
 ```
 
 ### `mirror-status`
@@ -313,9 +268,7 @@ Print a table showing the global mirror and each registered project.
 Columns: scope, path, last_synced, hash_status (`stamped` / `null` / `mismatch`).
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m commands.permissions_cmd mirror-status
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-permissions" mirror-status
 ```
 
 ### `mirror-dry-run [--project <path>]`
@@ -328,36 +281,32 @@ Build the mirror JSON from DB (same path `sync_*` uses) and write to stdout — 
 ```
 
 ```bash
-cd /home/steve/.claude/observability && \
-  OBSERVABILITY_DB=/home/steve/.cache/claude/observability/observations.db \
-  .venv/bin/python -m commands.permissions_cmd mirror-dry-run \
-    [--project "$SETTINGS_PATH"]
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-permissions" mirror-dry-run \
+  [--project "$SETTINGS_PATH"]
 ```
 
 ### `reload-hint`
 
-Touch `~/.claude/settings.json` mtime via `Path.touch()` to force Claude Code's settings re-read.
+Touch `settings.json` mtime via `Path.touch()` to force Claude Code's settings re-read.
 
-**Sandbox rule:** only touches the path supplied via `--settings-path`. Never touches the real
-`~/.claude/settings.json` in tests.
+**Safety:** only touches the path supplied via `--settings-path`. Tests must always pass a sandbox path.
 
 ```bash
-cd /home/steve/.claude/observability && \
-  .venv/bin/python -m commands.permissions_cmd reload-hint \
-    --settings-path "$SETTINGS_PATH"
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-permissions" reload-hint \
+  --settings-path "$SETTINGS_PATH"
 ```
 
 ## Implementation Notes
 
-1. **Routing**: Parse `$ARGUMENTS` to extract subcommand and option flags. Route each subcommand to its handler (learner CLI, review.sh, prune.py, gc_sessions.py, or direct SQLite query).
+1. **Routing**: Parse `$ARGUMENTS` to extract subcommand and option flags. Route each subcommand to the appropriate `nephoscope-*` console script (installed into the plugin venv by the SessionStart bootstrap hook), the `nephoscope.*` module, or a direct SQLite query.
 
 2. **Error handling**: If any Bash invocation fails, report the stderr and exit non-zero. Do not swallow errors.
 
 3. **Context capture**: The `--home`, `--cwd`, `--project-root` flags needed by pattern-variants are available via Bash environment and current directory.
 
-4. **Narrow tool allowlist**: Only Bash (scoped to observability paths) and Read. No Agent spawning, no external API calls, no network access.
+4. **Narrow tool allowlist**: Only Bash (scoped to the plugin venv, standard text utilities, and `sqlite3`) and Read. No Agent spawning, no external API calls, no network access.
 
-5. **Output format**: Learner commands produce pipe-delimited or JSON output; review.sh and GC scripts print counts/results to stdout; SQLite queries use `.headers` and `.mode column` for readability.
+5. **Output format**: Learner commands produce pipe-delimited or JSON output; `review.sh` and GC scripts print counts/results to stdout; SQLite queries use `.headers` and `.mode column` for readability.
 
 ## Example workflows
 

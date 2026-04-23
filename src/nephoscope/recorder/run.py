@@ -1,16 +1,16 @@
-"""Observability recorder — pre/post tool-call hook handler.
+"""Observations recorder — session-start / pre / post tool-call hook handler.
 
 Reads a Claude Code hook payload from stdin and writes (or updates) a row in
-``tool_calls``. The phase is passed as ``sys.argv[1]`` (``pre`` or ``post``);
-if missing, we default to ``post`` so the row still ends up complete.
+``tool_calls``. The phase is passed as ``sys.argv[1]`` (``session_start``,
+``pre``, or ``post``); unknown values are treated as ``post`` so stray
+invocations still produce a complete row.
 
 Pre phase:
     INSERT row with ``status_id=<pending>``, ``tool_use_id``, ``ts=_now()``,
     ``completed_ts=NULL``, ``ok=NULL``, and FK columns populated from lookup
-    tables (``tool_id``, ``subagent_type_id``, ``file_path_id``, integer
-    ``session_id``). Capture top-level ``permission_mode`` via the lookup
-    table, store the full payload (truncated) in ``tool_extras(name='payload')``,
-    and — if present — set ``sessions.transcript_path`` (set-once-only).
+    tables. Capture top-level ``permission_mode``, store the truncated
+    payload in ``tool_extras(name='payload')``, and set
+    ``sessions.transcript_path`` (set-once-only) when present.
 
 Post phase:
     UPDATE the row matched by ``tool_use_id`` setting ``completed_ts``,
@@ -18,18 +18,21 @@ Post phase:
     (truncated) in ``tool_extras(name='response')``. If no pending row
     exists (orphan post), INSERT a complete row so nothing is lost.
 
-Malformed input is silently swallowed. Unhandled exceptions are printed to
-stderr (the hook harness surfaces them back to the model) but we still exit
-0 so the user's tool call is never broken by the recorder.
+Session-start phase:
+    Upsert the session + project rows only; no ``tool_calls`` write. Lazily
+    bootstraps the observations DB on first run (creates parent dir, applies
+    ``lib/schema.sql``).
 
-Phase 8.5: ``scope_id`` and the ``tool_call_scopes`` / ``tool_call_shapes``
-tables were dropped (``path_spec`` on rule_shapes now carries the path axis).
-The recorder no longer classifies paths or writes a scope FK.
+An opt-out marker (see :mod:`nephoscope.lib.paths`) short-circuits all
+phases. Malformed input is silently swallowed. Unhandled exceptions are
+printed to stderr but we still exit 0 so the user's tool call is never
+broken by the recorder.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import traceback
 from typing import Any
@@ -49,6 +52,7 @@ from nephoscope.lib.db import (  # noqa: E402
     upsert_session,
     write_extra,
 )
+from nephoscope.lib.paths import is_disabled, observations_db_path  # noqa: E402
 
 PAYLOAD_MAX = 4096
 RESPONSE_MAX = 2048
@@ -243,10 +247,62 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         conn.close()
 
 
+def _handle_session_start(data: dict[str, Any]) -> None:
+    """Handle a SessionStart hook payload.
+
+    Upserts the session + project rows. No ``tool_calls`` write — the
+    SessionStart phase is metadata-only. Missing ``session_id`` is a
+    no-op (fails open; next pre/post will repair state).
+    """
+    session_uuid = data.get("session_id") or data.get("session") or ""
+    if not session_uuid:
+        return
+    cwd = data.get("cwd") or ""
+    now = _now()
+    conn = _open()
+    try:
+        project_id: int | None = None
+        if cwd:
+            project_id = upsert_project(conn, cwd, now)
+        upsert_session(conn, session_uuid, project_id, now)
+    finally:
+        conn.close()
+
+
+def _ensure_db_bootstrapped() -> None:
+    """First-run bootstrap: materialise the DB file + schema if missing.
+
+    Writes to the resolved observations DB path. Parents are created with
+    ``mkdir -p`` semantics. ``lib.db._open`` already executes ``schema.sql``
+    when the DB is empty, so this helper just needs to touch the path
+    (opening + closing a connection is enough).
+    """
+    db_path = observations_db_path()
+    if db_path.exists():
+        return
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    try:
+        conn = _open()
+    except (sqlite3.Error, RuntimeError):
+        return
+    conn.close()
+
+
 def main() -> None:
+    # Opt-out marker — every phase short-circuits silently.
+    if is_disabled():
+        return
+
     phase = sys.argv[1] if len(sys.argv) > 1 else "post"
-    if phase not in ("pre", "post"):
-        phase = "post"
+
+    # First-run bootstrap happens for every phase. session_start is the
+    # plugin's natural first invocation, but pre/post firing first (e.g.
+    # after the opt-out marker is cleared mid-session) must also repair.
+    _ensure_db_bootstrapped()
+
     try:
         raw = sys.stdin.read()
     except (OSError, ValueError):
@@ -259,7 +315,13 @@ def main() -> None:
         return
     if not isinstance(data, dict):
         return
+
     try:
+        if phase == "session_start":
+            _handle_session_start(data)
+            return
+        if phase not in ("pre", "post"):
+            phase = "post"
         _handle(phase, data)
     except Exception:  # noqa: BLE001 — never break the user's tool call.
         traceback.print_exc(file=sys.stderr)

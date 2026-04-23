@@ -6,7 +6,7 @@
 #                         — guards against "same session just looped 100x".
 # promotion_window_days:  reserved for future use; the scanner currently
 #                         processes all rows past its cursor but the value
-#                         is surfaced so Phase 4's review command can apply
+#                         is surfaced so a later review command can apply
 #                         a time filter without a schema change.
 
 min_observations = 5

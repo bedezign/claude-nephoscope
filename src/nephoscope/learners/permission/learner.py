@@ -287,7 +287,7 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
 
 
 def _connect() -> sqlite3.Connection:
-    """Open the observations DB (no migration — Phase 8 greenfield schema)."""
+    """Open the observations DB — greenfield schema, no migration system."""
     db = _lib_db()
     return db._open()
 

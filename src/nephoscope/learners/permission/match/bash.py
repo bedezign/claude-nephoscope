@@ -1,6 +1,6 @@
 """Bash tool-class matcher.
 
-Reuses Phase 8's ``canonicalize`` + ``to_pattern_form`` logic to look up
+Reuses the ``canonicalize`` + ``to_pattern_form`` helpers to look up
 ``permissions`` rows for each leaf command in the Bash payload.
 
 Returns

@@ -12,7 +12,7 @@ Structured row fields
                 For Bash: the shell command (e.g. ``"git"``).
                 For file / flat / MCP: the tool name (same as ``tool``).
   path_spec   — Path glob for file tools (content between the parens, including
-                the ``//`` prefix), e.g. ``"//home/steve/.claude/**"``.
+                the ``//`` prefix), e.g. ``"//var/log/**"``.
                 ``None`` for non-file entries.
   subcommand  — For Bash: the tokens between the shell command and any trailing
                 `` *``, e.g. ``"--user status"`` from ``Bash(systemctl --user status *)``.
@@ -114,12 +114,12 @@ def parse_entry(entry: str, *, source: str) -> dict[str, Any]:
     ----------
     entry:
         The raw string from a ``permissions.allow/deny/ask`` JSON array,
-        e.g. ``"Bash(git *)"`` or ``"Read(//home/steve/.claude/**)"`` or
-        ``"mcp__claude-peers__*"``.
+        e.g. ``"Bash(git *)"`` or ``"Read(//var/log/**)"`` or
+        ``"mcp__example__*"``.
     source:
         Location descriptor for error messages.  Convention:
         ``"<path> (<key>[<index>])"`` — e.g.
-        ``"/home/steve/.claude/settings.json (allow[3])"``.
+        ``"~/.claude/settings.json (allow[3])"``.
 
     Returns
     -------

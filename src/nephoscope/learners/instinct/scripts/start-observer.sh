@@ -1,15 +1,10 @@
 #!/bin/bash
-# Observability-owned observer agent launcher.
+# Background observer launcher.
 #
-# Replaces the CL-v2 launcher at
-# ``~/.claude/skills/continuous-learning-v2/agents/start-observer.sh``.
-# Same behaviour (5-min loop, summarize → analyze via Haiku → commit cursor
-# on success) but sources rows from the observability DB through our
-# ``learners.instinct.summarize`` module.
-#
-# The homunculus instinct tree at ``~/.claude/homunculus/`` is unchanged —
-# this launcher only feeds data in; the Haiku observer agent still writes
-# instincts to the same directory it always has.
+# 5-minute loop: summarize new tool_calls rows, invoke `claude --model haiku`
+# with a pointer to the summary, commit the cursor on success. Intended as a
+# manual daemon — not a Claude Code hook — so it resolves its own paths from
+# env vars with plugin-data-aware fallbacks.
 #
 # Usage:
 #   start-observer.sh            # start in background
@@ -17,23 +12,40 @@
 #   start-observer.sh stop       # stop running observer
 #   start-observer.sh status     # check status
 #
-# State lives under ``~/.cache/claude/observability/`` (log + PID file),
-# distinct from CL-v2's ``~/.cache/claude/observations/``, so the two can
-# coexist during a migration (not that we need to — the pipeline wiring
-# is a clean swap).
+# Environment:
+#   OBSERVABILITY_DB            observations database path (optional)
+#   CLAUDE_PLUGIN_DATA          plugin data directory — used to locate the
+#                               plugin-scoped venv and default the instinct dir
+#   NEPHOSCOPE_INSTINCT_DIR     target directory for instinct .md files
+#                               (defaults to ${CLAUDE_PLUGIN_DATA}/instincts
+#                               or ~/.claude/instincts)
+#   NEPHOSCOPE_VENV             path to the Python interpreter to use
+#                               (defaults to ${CLAUDE_PLUGIN_DATA}/.venv/bin/python
+#                               or the current `python3`)
 
 set -e
 
-OBS_ROOT="${HOME}/.cache/claude/observability"
-ANALYSIS_DIR="${HOME}/.cache/claude/analysis"
-HOMUNCULUS_DIR="${HOME}/.claude/homunculus"
-VENV_PY="${HOME}/.claude/observability/.venv/bin/python"
-SUMMARIZE_MODULE="learners.instinct.summarize"
-OBSERVABILITY_ROOT="${HOME}/.claude/observability"
-PID_FILE="${OBS_ROOT}/.observer.pid"
-LOG_FILE="${OBS_ROOT}/observer.log"
+# --- path resolution --------------------------------------------------------
 
-mkdir -p "$OBS_ROOT" "$ANALYSIS_DIR"
+if [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
+  DEFAULT_STATE_DIR="${CLAUDE_PLUGIN_DATA}"
+  DEFAULT_INSTINCT_DIR="${CLAUDE_PLUGIN_DATA}/instincts"
+  DEFAULT_VENV_PY="${CLAUDE_PLUGIN_DATA}/.venv/bin/python"
+else
+  DEFAULT_STATE_DIR="${HOME}/.cache/nephoscope"
+  DEFAULT_INSTINCT_DIR="${HOME}/.claude/instincts"
+  DEFAULT_VENV_PY="$(command -v python3 || echo python)"
+fi
+
+STATE_DIR="${NEPHOSCOPE_STATE_DIR:-${DEFAULT_STATE_DIR}}"
+ANALYSIS_DIR="${NEPHOSCOPE_ANALYSIS_DIR:-${STATE_DIR}/analysis}"
+INSTINCT_DIR="${NEPHOSCOPE_INSTINCT_DIR:-${DEFAULT_INSTINCT_DIR}}"
+VENV_PY="${NEPHOSCOPE_VENV:-${DEFAULT_VENV_PY}}"
+SUMMARIZE_MODULE="nephoscope.learners.instinct.summarize"
+PID_FILE="${STATE_DIR}/.observer.pid"
+LOG_FILE="${STATE_DIR}/observer.log"
+
+mkdir -p "$STATE_DIR" "$ANALYSIS_DIR"
 
 observer_loop() {
   set +e
@@ -43,7 +55,7 @@ observer_loop() {
   analyze_observations() {
     local summary_file="${ANALYSIS_DIR}/summary-$(date +%Y%m%d-%H%M%S)-$$.txt"
     local meta
-    meta=$(cd "$OBSERVABILITY_ROOT" && "$VENV_PY" -m "$SUMMARIZE_MODULE" \
+    meta=$("$VENV_PY" -m "$SUMMARIZE_MODULE" \
       write --output "$summary_file" --min-rows 10 2>>"$LOG_FILE")
     local rc=$?
 
@@ -73,19 +85,19 @@ observer_loop() {
     if command -v claude &> /dev/null; then
       # Prompt via stdin; setsid isolates claude's process group so its
       # exit-time signals don't reach us.
-      printf 'Read the observation summary at %s. It aggregates recent tool-call activity (tool frequency, repeated sequences, subagent usage, recent errors, per-project breakdown). If the summary shows 3+ occurrences of the same pattern (same tool sequence, same subagent, same recurring error), create an instinct file in %s/instincts/personal/ following the observer agent spec. Be conservative — only create instincts for clear patterns. You may use %s/ for intermediate working files (notes, scripts). Only final instinct .md files go in %s/instincts/personal/.' \
-        "$summary_file" "$HOMUNCULUS_DIR" "$ANALYSIS_DIR" "$HOMUNCULUS_DIR" \
+      printf 'Read the observation summary at %s. It aggregates recent tool-call activity (tool frequency, repeated sequences, subagent usage, recent errors, per-project breakdown). If the summary shows 3+ occurrences of the same pattern (same tool sequence, same subagent, same recurring error), create an instinct file in %s/personal/ following the observer agent spec. Be conservative — only create instincts for clear patterns. You may use %s/ for intermediate working files (notes, scripts). Only final instinct .md files go in %s/personal/.' \
+        "$summary_file" "$INSTINCT_DIR" "$ANALYSIS_DIR" "$INSTINCT_DIR" \
         | setsid claude --model haiku --max-turns 6 --print \
-            --add-dir "$OBS_ROOT" \
+            --add-dir "$STATE_DIR" \
             --add-dir "$ANALYSIS_DIR" \
-            --add-dir "$HOMUNCULUS_DIR" \
+            --add-dir "$INSTINCT_DIR" \
             >> "$LOG_FILE" 2>&1 \
         && analysis_ok=1
     fi
 
     if [ "$analysis_ok" = "1" ]; then
-      (cd "$OBSERVABILITY_ROOT" && "$VENV_PY" -m "$SUMMARIZE_MODULE" \
-        commit --max-id "$max_id" 2>>"$LOG_FILE") \
+      "$VENV_PY" -m "$SUMMARIZE_MODULE" \
+        commit --max-id "$max_id" 2>>"$LOG_FILE" \
         && echo "[$(date)] Cursor advanced to $max_id" >> "$LOG_FILE"
     else
       echo "[$(date)] Analysis failed; cursor held, will retry next cycle." >> "$LOG_FILE"
@@ -132,7 +144,7 @@ case "${1:-start}" in
       if kill -0 "$pid" 2>/dev/null; then
         echo "Observer is running (PID: $pid)"
         echo "Log: $LOG_FILE"
-        db="${HOME}/.cache/claude/observability/observations.db"
+        db="${OBSERVABILITY_DB:-${STATE_DIR}/observations.db}"
         if [ -f "$db" ]; then
           rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM tool_calls;" 2>/dev/null || echo "?")
           cursor=$(sqlite3 "$db" "SELECT last_processed_id FROM consumer_cursors WHERE consumer='instinct-summarizer';" 2>/dev/null || echo "?")

@@ -3,8 +3,8 @@
 Each tool class has its own renderer.  The public entry point is
 :func:`serialize`, which dispatches via :mod:`lib.mirror.tool_class`.
 
-Canonical string grammar (Phase 8.5)
---------------------------------------
+Canonical string grammar
+------------------------
 Bash
     ``Bash(<verb>)``              — verb only, no subcommand, no flags pattern
     ``Bash(<verb> <sub>)``        — literal verb + subcommand
@@ -89,11 +89,11 @@ def _render_file(row: Mapping[str, Any]) -> str:
     Two storage conventions are accepted for ``path_spec``:
 
     - **Ingester-produced** (``//`` prefix already present): stored as
-      ``"//home/steve/.claude/**"``.  The serialiser wraps it directly:
-      ``Read(//home/steve/.claude/**)``.
+      ``"//var/log/**"``.  The serialiser wraps it directly:
+      ``Read(//var/log/**)``.
     - **DB-native** (single ``/`` absolute path): stored as
-      ``"/home/steve/.claude/**"``.  The serialiser strips one ``/`` and
-      adds ``//``: ``Read(//home/steve/.claude/**)``.
+      ``"/var/log/**"``.  The serialiser strips one ``/`` and
+      adds ``//``: ``Read(//var/log/**)``.
 
     Both produce identical canonical output.
 

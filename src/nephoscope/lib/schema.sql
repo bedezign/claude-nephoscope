@@ -20,7 +20,7 @@ CREATE TABLE sessions (
   transcript_path TEXT
 );
 
--- Global settings mirror metadata — singleton table (Phase 8.5).
+-- Global settings mirror metadata — singleton table.
 CREATE TABLE global_mirror (
   id                        INTEGER PRIMARY KEY CHECK (id = 1),
   settings_json_path        TEXT NOT NULL,

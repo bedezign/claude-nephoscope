@@ -1,12 +1,9 @@
 """Summarize unprocessed ``tool_calls`` rows for the observer agent.
 
-Port of ``skills/continuous-learning-v2/hooks/summarize.py`` onto the
-observability DB schema. Queries via ``v_tool_calls`` so the summarizer
-stays decoupled from the FK lookup layout (v10+).
-
-Output format matches the CL-v2 summarizer byte-for-byte — the observer
-agent at ``skills/continuous-learning-v2/agents/observer.md`` reads the
-resulting file and must not need to change.
+Queries via ``v_tool_calls`` so the summariser stays decoupled from the
+FK lookup layout. The output file is a plain text report; a downstream
+Haiku observer reads it and writes instinct ``.md`` files into the
+configured instinct directory.
 
 Subcommands:
     write   --output PATH    write summary; emit {"rows": N, "max_id": M} JSON

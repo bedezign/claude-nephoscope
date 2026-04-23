@@ -1,4 +1,4 @@
-"""Runtime PreToolUse gate — Phase 8.5 dispatch model.
+"""Runtime PreToolUse gate — dispatch model.
 
 Reads a Claude Code PreToolUse payload from stdin and emits one of:
 
@@ -29,7 +29,6 @@ Verdict → response mapping
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -41,6 +40,7 @@ from nephoscope.learners.permission.canonicalize import (  # noqa: E402
 )
 from nephoscope.learners.permission.deny import evaluate  # noqa: E402
 from nephoscope.learners.permission.match import Verdict, dispatch  # noqa: E402
+from nephoscope.lib.paths import is_disabled, observations_db_path  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -49,11 +49,8 @@ from nephoscope.learners.permission.match import Verdict, dispatch  # noqa: E402
 
 
 def _db_path() -> Path:
-    """Resolve the observations DB path. Honours ``OBSERVABILITY_DB``."""
-    env = os.environ.get("OBSERVABILITY_DB")
-    if env:
-        return Path(env)
-    return Path.home() / ".cache" / "claude" / "observability" / "observations.db"
+    """Resolve the observations DB path from env + plugin-data defaults."""
+    return observations_db_path()
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -255,6 +252,13 @@ def _first_ask_leaf(leaves: list[CanonicalLeaf]) -> CanonicalLeaf | None:
 
 
 def main() -> int:
+    # Opt-out marker short-circuits the entire gate; fall-through keeps
+    # Claude Code's native prompt behaviour intact while the plugin is
+    # muted.
+    if is_disabled():
+        _emit(None)
+        return 0
+
     data = _load_payload()
     if data is None:
         _emit(None)
