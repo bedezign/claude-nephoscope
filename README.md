@@ -5,7 +5,7 @@ A Claude Code plugin that observes tool-call activity, learns permission rules f
 Two learners are built on the same observation pipeline:
 
 - **Permission learner** — canonicalizes tool calls into rule shapes, persists user trust decisions in a consolidated `permissions` table, and renders them into `~/.claude/settings.json` (or a project `settings.json`).
-- **Instinct summarizer** — aggregates recent tool activity into periodic text summaries consumed by a separate background agent that authors atomic "instinct" markdown files in the configured instincts directory.
+- **Instinct summarizer** — aggregates recent tool activity into periodic text summaries. An "instinct" is a short Markdown note of the form *"when X, prefer Y"* distilled from observed usage; a separate Claude Code skill (not part of this plugin) consumes those notes to surface learned patterns during later sessions. Nephoscope only writes the notes — it does not load or act on them itself.
 
 Nephoscope is distributed as a Claude Code plugin. Installing the plugin registers four hooks, materialises a SQLite database in the plugin data directory, and installs the Python runtime in a plugin-scoped virtual environment. No `settings.json` edits are required by the user.
 
@@ -18,40 +18,53 @@ Nephoscope is distributed as a Claude Code plugin. Installing the plugin registe
 
 ## Install
 
-### Local development install
+### From GitHub (recommended)
 
-Clone the repository and register it as a local marketplace, then install via the marketplace interface:
+No clone required. From a Claude Code session:
+
+```
+/plugin marketplace add bedezign/nephoscope
+/plugin install nephoscope@bedezign
+```
+
+Updates ship on version bumps — `/plugin update nephoscope@bedezign` pulls the latest published version.
+
+Pin to a specific ref with `bedezign/nephoscope@<tag-or-branch>`.
+
+### From a local clone (contributors)
+
+Clone the repository and register it as a local marketplace:
 
 ```bash
-git clone https://github.com/<owner>/nephoscope.git
+git clone https://github.com/bedezign/nephoscope.git
 cd nephoscope
 ```
 
 From a Claude Code session:
 
 ```
-/plugin marketplace add /path/to/nephoscope
+/plugin marketplace add /absolute/path/to/nephoscope
 /plugin install nephoscope@bedezign
 ```
 
 Source edits do not automatically flow through to the running hooks — changes are promoted by bumping the `version` field in `.claude-plugin/plugin.json`, then running `/plugin update nephoscope@bedezign`.
 
-### Early adopter install
+### Early adopter (`--plugin-dir`)
 
-Clone the repository and point Claude Code at the checkout with a per-invocation flag (no marketplace setup required):
+For per-invocation testing without marketplace registration:
 
 ```bash
-git clone https://github.com/<owner>/nephoscope.git
+git clone https://github.com/bedezign/nephoscope.git
 claude --plugin-dir /absolute/path/to/nephoscope
 ```
 
-### Marketplace install
+### Official marketplace
 
 ```
 /plugin install nephoscope@claude-plugins-official
 ```
 
-(Marketplace submission is pending; the local marketplace or `--plugin-dir` paths above are the current options.)
+(Marketplace submission is pending; the GitHub-hosted path above is the current primary option.)
 
 ## First-run bootstrap
 
@@ -109,7 +122,6 @@ rm -rf "${CLAUDE_PLUGIN_DATA}"
 | `OBSERVABILITY_DB` | Observations database path | `${CLAUDE_PLUGIN_DATA}/observations.db`, else `~/.cache/nephoscope/observations.db` |
 | `NEPHOSCOPE_DISABLE_MARKER` | Opt-out marker path — if the file exists, all hooks short-circuit silently | `${CLAUDE_PLUGIN_DATA}/disabled`, else `~/.config/nephoscope/disabled` |
 | `NEPHOSCOPE_INSTINCT_DIR` | Where the instinct summarizer expects the observer to write `.md` files | `${CLAUDE_PLUGIN_DATA}/instincts`, else `~/.claude/instincts` |
-| `CLAUDE_EXTRA_DIRS` | Colon-separated additional directories to treat as in-project for scope classification | unset |
 | `HOOK_FULL_MATCH` | Debug: force the runtime hook to fully dispatch even for mirror-covered tool classes | unset |
 
 ## Opting out temporarily
@@ -221,10 +233,11 @@ The JSON mirror is the primary gate: once a rule is in `settings.json`, the nati
 
 ## Review CLI
 
-Candidates accumulate as tool calls are observed. To triage:
+Candidates accumulate as tool calls are observed. The primary entry is `/permissions review` from a Claude Code session (Claude Code expands `${CLAUDE_PLUGIN_ROOT}` for the hook-hosted shell). To invoke the script directly from a terminal, resolve the plugin cache path first:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/src/nephoscope/learners/permission/scripts/review.sh"
+PLUGIN_ROOT=$(ls -d ~/.claude/plugins/cache/bedezign/nephoscope/*/ | sort -V | tail -n1)
+bash "${PLUGIN_ROOT}src/nephoscope/learners/permission/scripts/review.sh"
 ```
 
 Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). The script shells out to `nephoscope-learn promote --sync`; on `MirrorHashMismatch` it stops and instructs the user to run `/permissions reconcile`.
@@ -252,11 +265,14 @@ Full docs in `commands/permissions.md`. Key subcommands:
 
 Runs as a 5-minute daemon loop that writes compact text summaries over recent tool-call activity and, when a `claude` CLI is available on `PATH`, spawns a Haiku sub-session to produce atomic instinct `.md` files in the configured instinct directory.
 
+It's a manual daemon, not a plugin hook — launch it from your own shell:
+
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/src/nephoscope/learners/instinct/scripts/start-observer.sh" start|status|stop
+PLUGIN_ROOT=$(ls -d ~/.claude/plugins/cache/bedezign/nephoscope/*/ | sort -V | tail -n1)
+bash "${PLUGIN_ROOT}src/nephoscope/learners/instinct/scripts/start-observer.sh" start|status|stop
 ```
 
-State lives under `${CLAUDE_PLUGIN_DATA}` (log + PID file).
+State (log + PID file) lives under `${CLAUDE_PLUGIN_DATA}` — for a `nephoscope@bedezign` install that resolves to `~/.claude/plugins/data/nephoscope-bedezign/`.
 
 ## Housekeeping CLIs
 
@@ -272,7 +288,15 @@ source .venv/bin/activate
 uv run pytest
 ```
 
-Test suites cover the recorder, scope classifier, canonicalizer, deny rules, learner scan / propose / promote / reject / unpermit (with mirror sync), tool-class matcher dispatch, hook priority, session approvals, fixture round-trip, GC / prune / sweep, mirror serializer / ingester / writer (including `flock`, `fsync`, hash-mismatch, retry loop), reconcile engine (adopt / interactive / auto modes), `/permissions` subcommands, and end-to-end integration flow.
+Test suites cover:
+
+- Recorder + scope classifier + canonicalizer + deny rules.
+- Learner lifecycle: scan, propose, promote, reject, unpermit — each with mirror sync.
+- Tool-class matcher dispatch, hook priority, session-tier approvals, fixture round-trip.
+- Housekeeping: GC, prune, sweep.
+- Mirror pipeline: serializer + ingester + writer (including `flock`, `fsync`, hash-mismatch, retry loop).
+- Reconcile engine (adopt / interactive / auto modes).
+- `/permissions` subcommands and end-to-end integration flow.
 
 **Regression guard:** `tests/test_live_db_isolation.py` records the live DB's sha256 at pytest collection (via a `pytest_configure` hook in `tests/conftest.py`) and asserts byte-equality at test-session end. This guards against the test-leak-to-live failure mode where a fixture or teardown inadvertently mutates the live DB during a test run.
 
