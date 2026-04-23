@@ -2,7 +2,10 @@
   "name": "nephoscope",
   "version": "0.1.0",
   "description": "Session recording, permission learning, and behavioural pattern extraction for Claude Code",
-  "author": "Steve Guns",
+  "author": {
+    "name": "B&E DeZign",
+    "email": "nephoscope@8e.lv"
+  },
   "license": "Apache-2.0",
   "keywords": ["observability", "permissions", "hooks", "learning"]
 }

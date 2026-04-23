@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bedezign",
+  "owner": {
+    "name": "B&E DeZign",
+    "email": "nephoscope@8e.lv"
+  },
+  "metadata": {
+    "description": "B&E DeZign Claude Code plugins"
+  },
+  "plugins": [
+    {
+      "name": "nephoscope",
+      "source": "./",
+      "description": "Session recording, permission learning, and behavioural pattern extraction for Claude Code"
+    }
+  ]
+}

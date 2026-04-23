@@ -190,3 +190,11 @@ CREATE VIEW v_session_summary AS
     LEFT JOIN call_statuses  cs ON cs.id         = tc.status_id
     LEFT JOIN projects       pr ON pr.id         = s.project_id
    GROUP BY s.id;
+
+-- Seed lookup rows. The INSERT OR IGNORE block alone is safe to re-run; the
+-- full schema file is not (CREATE TABLE statements above lack IF NOT EXISTS).
+-- Production bootstrap only applies schema.sql against a missing DB file.
+INSERT OR IGNORE INTO permission_modes (name) VALUES
+  ('default'), ('acceptEdits'), ('bypassPermissions'), ('plan'), ('auto');
+INSERT OR IGNORE INTO call_statuses (name) VALUES
+  ('pending'), ('ok'), ('err'), ('denied'), ('orphan');

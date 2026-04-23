@@ -18,35 +18,47 @@ Nephoscope is distributed as a Claude Code plugin. Installing the plugin registe
 
 ## Install
 
-### From a local checkout (development)
+### Local development install
 
-Clone the repository and point Claude Code at the checkout:
+Clone the repository and register it as a local marketplace, then install via the marketplace interface:
+
+```bash
+git clone https://github.com/<owner>/nephoscope.git
+cd nephoscope
+```
+
+From a Claude Code session:
+
+```
+/plugin marketplace add /path/to/nephoscope
+/plugin install nephoscope@bedezign
+```
+
+Source edits do not automatically flow through to the running hooks — changes are promoted by bumping the `version` field in `.claude-plugin/plugin.json`, then running `/plugin update nephoscope@bedezign`.
+
+### Early adopter install
+
+Clone the repository and point Claude Code at the checkout with a per-invocation flag (no marketplace setup required):
 
 ```bash
 git clone https://github.com/<owner>/nephoscope.git
 claude --plugin-dir /absolute/path/to/nephoscope
 ```
 
-Alias `claude` to carry the flag in every invocation if you want the plugin loaded by default:
-
-```bash
-alias claude='command claude --plugin-dir /absolute/path/to/nephoscope'
-```
-
-### From the marketplace
+### Marketplace install
 
 ```
 /plugin install nephoscope@claude-plugins-official
 ```
 
-(Marketplace submission is a follow-up; use the `--plugin-dir` path above until then.)
+(Marketplace submission is pending; the local marketplace or `--plugin-dir` paths above are the current options.)
 
 ## First-run bootstrap
 
 The first time Claude Code loads the plugin, the `SessionStart` hook runs `hooks/bootstrap.sh`, which:
 
 1. Creates `${CLAUDE_PLUGIN_DATA}/.venv`.
-2. Installs the plugin's Python package in editable mode into that venv.
+2. Installs the plugin's Python package into that venv (sourcing the cache copy of the code, not a live checkout).
 3. Copies the current `pyproject.toml` to `${CLAUDE_PLUGIN_DATA}/pyproject.toml.cached`, so subsequent sessions skip the install step unless the manifest changed.
 
 The observations database is created lazily on first tool call: the recorder checks for `${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}`, materialises the parent directory, and applies `lib/schema.sql` if the file is missing. You can also force-create the DB yourself:
@@ -70,11 +82,19 @@ Should print a non-zero row count.
 
 ## Uninstall
 
+For marketplace or local marketplace installs:
+
 ```
-/plugin uninstall nephoscope
+/plugin uninstall nephoscope@bedezign
 ```
 
-(or remove the `--plugin-dir` alias).
+Or for official marketplace (when available):
+
+```
+/plugin uninstall nephoscope@claude-plugins-official
+```
+
+For `--plugin-dir` installs, remove the per-invocation flag or any alias you created.
 
 Optional — drop the plugin's data directory as well:
 
@@ -114,9 +134,10 @@ All hooks exit 0 silently while the marker exists. Remove the marker to re-enabl
 nephoscope/
   .claude-plugin/
     plugin.json                        plugin manifest
+    marketplace.json                   local marketplace definition
   hooks/
     hooks.json                         declares the 4 runtime hooks
-    bootstrap.sh                       idempotent venv + editable install
+    bootstrap.sh                       idempotent venv + package install
   commands/
     permissions.md                     /permissions slash-command doc
   src/nephoscope/
