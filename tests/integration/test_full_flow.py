@@ -32,7 +32,7 @@ def mirror_db(tmp_path):
     db_path = tmp_path / "observations.db"
     fake_settings = tmp_path / "settings.json"
 
-    schema_sql = (PROJECT_ROOT / "lib" / "schema.sql").read_text()
+    schema_sql = (PROJECT_ROOT / "src" / "nephoscope" / "lib" / "schema.sql").read_text()
     conn = sqlite3.connect(str(db_path), isolation_level=None)
     conn.executescript(schema_sql)
     conn.execute(
@@ -79,7 +79,7 @@ def test_seed_creates_mirror_and_stamps_hash(mirror_db, tmp_path):
         )
     )
 
-    from learners.permission.seed import apply_fixtures
+    from nephoscope.learners.permission.seed import apply_fixtures
 
     _shapes, perms_created = apply_fixtures(conn, fixture_path)
 
@@ -125,7 +125,7 @@ def test_promote_updates_mirror_and_restamps_hash(mirror_db, tmp_path):
         yaml.dump([{"verb": "Read", "flags": [], "decision": "approved"}])
     )
 
-    from learners.permission.seed import apply_fixtures
+    from nephoscope.learners.permission.seed import apply_fixtures
 
     apply_fixtures(conn, fixture_path)
 
@@ -136,8 +136,8 @@ def test_promote_updates_mirror_and_restamps_hash(mirror_db, tmp_path):
     assert post_seed_hash is not None, "post-seed hash should be stamped"
 
     # Step 3 — promote a new rule directly (mirrors _cmd_promote logic).
-    from lib.db import _now, insert_permission, upsert_rule_shape
-    from lib.mirror.writer import sync_affected
+    from nephoscope.lib.db import _now, insert_permission, upsert_rule_shape
+    from nephoscope.lib.mirror.writer import sync_affected
 
     now = _now()
     flags_json = "*"  # wildcard → Bash(ls *)
@@ -178,7 +178,7 @@ def test_tamper_raises_mirror_hash_mismatch(mirror_db, tmp_path):
         yaml.dump([{"verb": "Read", "flags": [], "decision": "approved"}])
     )
 
-    from learners.permission.seed import apply_fixtures
+    from nephoscope.learners.permission.seed import apply_fixtures
 
     apply_fixtures(conn, fixture_path)
 
@@ -192,7 +192,7 @@ def test_tamper_raises_mirror_hash_mismatch(mirror_db, tmp_path):
     fake_settings.write_text('{"tampered": true}')
 
     # Step 3 — attempt sync; must raise MirrorHashMismatch.
-    from lib.mirror.writer import MirrorHashMismatch, sync_global
+    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
 
     with pytest.raises(MirrorHashMismatch) as exc_info:
         sync_global(conn)

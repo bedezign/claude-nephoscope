@@ -15,7 +15,7 @@ import json
 import pytest
 import yaml
 
-from learners.permission.seed import apply_fixtures, export_permissions
+from nephoscope.learners.permission.seed import apply_fixtures, export_permissions
 
 
 class TestApplyFixtures:

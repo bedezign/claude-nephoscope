@@ -14,7 +14,7 @@ def fresh_db():
     """Create a fresh sandbox DB with the extended schema."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
-        schema_path = Path(__file__).parent.parent.parent / "lib" / "schema.sql"
+        schema_path = Path(__file__).parent.parent.parent / "src" / "nephoscope" / "lib" / "schema.sql"
 
         # Apply schema.
         with sqlite3.connect(db_path) as conn:

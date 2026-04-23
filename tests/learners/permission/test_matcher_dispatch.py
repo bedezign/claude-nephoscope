@@ -28,13 +28,13 @@ import pytest
 # Imports under test
 # ---------------------------------------------------------------------------
 
-from learners.permission.match import Verdict, dispatch
-from learners.permission.match._types import Verdict as VerdictDirect
-from learners.permission.match.bash import match as bash_match
-from learners.permission.match.file import match as file_match
-from learners.permission.match.flat import match as flat_match
-from learners.permission.match.mcp import match as mcp_match
-from learners.permission.match.orchestration import match as orch_match
+from nephoscope.learners.permission.match import Verdict, dispatch
+from nephoscope.learners.permission.match._types import Verdict as VerdictDirect
+from nephoscope.learners.permission.match.bash import match as bash_match
+from nephoscope.learners.permission.match.file import match as file_match
+from nephoscope.learners.permission.match.flat import match as flat_match
+from nephoscope.learners.permission.match.mcp import match as mcp_match
+from nephoscope.learners.permission.match.orchestration import match as orch_match
 
 
 # ---------------------------------------------------------------------------

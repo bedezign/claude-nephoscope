@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 
-from observability.lib import db
+from nephoscope.lib import db
 
 
 @pytest.fixture

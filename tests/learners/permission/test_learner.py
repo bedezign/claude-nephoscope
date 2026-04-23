@@ -19,8 +19,8 @@ from unittest import mock
 import pytest
 
 # lib.db is importable because conftest.py adds the sandbox root to sys.path.
-import lib.db as db
-from learners.permission.learner import (
+import nephoscope.lib.db as db
+from nephoscope.learners.permission.learner import (
     Candidate,
     _candidate_leaf,
     _get_cursor,
@@ -952,7 +952,7 @@ def _mock_connect(conn: sqlite3.Connection):
     Suppresses the ``close()`` call so the test fixture connection stays open.
     """
     return mock.patch(
-        "learners.permission.learner._connect",
+        "nephoscope.learners.permission.learner._connect",
         side_effect=lambda: _NonClosingConn(conn),
     )
 

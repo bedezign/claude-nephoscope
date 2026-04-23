@@ -41,7 +41,7 @@ import pytest
 # Module import — reload ensures monkeypatching takes effect cleanly.
 # ---------------------------------------------------------------------------
 
-import learners.permission.hook as hook_mod
+import nephoscope.learners.permission.hook as hook_mod
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from observability.lib.prune import prune_candidates
+from nephoscope.lib.prune import prune_candidates
 
 
 @pytest.fixture

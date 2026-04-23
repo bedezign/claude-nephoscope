@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-SCHEMA_PATH = PROJECT_ROOT / "lib" / "schema.sql"
+SCHEMA_PATH = PROJECT_ROOT / "src" / "nephoscope" / "lib" / "schema.sql"
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def test_reconcile_happy_path(tmp_path: Path, capsys) -> None:
     settings = tmp_path / "settings.json"
     db_file = _make_db(tmp_path, settings)
 
-    from commands.permissions_cmd import reconcile_cmd
+    from nephoscope.cli.permissions_cmd import reconcile_cmd
 
     rc = reconcile_cmd(str(db_file), str(settings), mode="auto-json-wins")
 
@@ -85,7 +85,7 @@ def test_mirror_status_happy_path(tmp_path: Path, capsys) -> None:
     conn.commit()
     conn.close()
 
-    from commands.permissions_cmd import mirror_status_cmd
+    from nephoscope.cli.permissions_cmd import mirror_status_cmd
 
     rc = mirror_status_cmd(str(db_file))
 
@@ -105,7 +105,7 @@ def test_mirror_dry_run_happy_path(tmp_path: Path, capsys) -> None:
     settings = tmp_path / "settings.json"
     db_file = _make_db(tmp_path, settings)
 
-    from commands.permissions_cmd import mirror_dry_run_cmd
+    from nephoscope.cli.permissions_cmd import mirror_dry_run_cmd
 
     rc = mirror_dry_run_cmd(str(db_file), str(settings))
 
@@ -132,7 +132,7 @@ def test_reload_hint_happy_path(tmp_path: Path, capsys) -> None:
     before = settings.stat().st_mtime
     time.sleep(0.01)  # ensure mtime can advance
 
-    from commands.permissions_cmd import reload_hint_cmd
+    from nephoscope.cli.permissions_cmd import reload_hint_cmd
 
     rc = reload_hint_cmd(str(settings))
 
@@ -149,7 +149,7 @@ def test_reload_hint_happy_path(tmp_path: Path, capsys) -> None:
 
 
 def test_reload_hint_missing_file(tmp_path: Path) -> None:
-    from commands.permissions_cmd import reload_hint_cmd
+    from nephoscope.cli.permissions_cmd import reload_hint_cmd
 
     rc = reload_hint_cmd(str(tmp_path / "nonexistent.json"))
 
@@ -178,7 +178,7 @@ def test_reconcile_hash_mismatch_returns_error(tmp_path: Path, capsys) -> None:
     conn.commit()
     conn.close()
 
-    from commands.permissions_cmd import reconcile_cmd
+    from nephoscope.cli.permissions_cmd import reconcile_cmd
 
     # auto-json-wins will attempt sync → MirrorHashMismatch → ReconcileError
     rc = reconcile_cmd(str(db_file), str(settings), mode="auto-json-wins")
@@ -197,7 +197,7 @@ def test_mirror_dry_run_global_scope(tmp_path: Path, capsys) -> None:
     settings = tmp_path / "settings.json"
     db_file = _make_db(tmp_path, settings)
 
-    from commands.permissions_cmd import mirror_dry_run_cmd
+    from nephoscope.cli.permissions_cmd import mirror_dry_run_cmd
 
     # Pass None as target_path → falls back to global (project_id=None)
     rc = mirror_dry_run_cmd(str(db_file), target_path=None)

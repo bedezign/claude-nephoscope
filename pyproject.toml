@@ -1,0 +1,16 @@
+[project]
+name = "nephoscope"
+version = "0.1.0"
+description = "Cloud-observation instrument for Claude Code — session recording, permission learning, and behavioural pattern extraction"
+requires-python = ">=3.10"
+dependencies = ["bashlex", "pyyaml"]
+license = { text = "Apache-2.0" }
+authors = [{ name = "Steve Guns" }]
+keywords = ["claude", "claude-code", "observability", "permissions", "hooks"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

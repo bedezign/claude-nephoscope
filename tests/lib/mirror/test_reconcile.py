@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
-from lib.mirror.reconcile import (
+from nephoscope.lib.mirror.reconcile import (
     ReconcileError,
     _key_from_db_row,
     _key_from_json_row,
@@ -38,7 +38,7 @@ from lib.mirror.reconcile import (
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-SCHEMA_PATH = PROJECT_ROOT / "lib" / "schema.sql"
+SCHEMA_PATH = PROJECT_ROOT / "src" / "nephoscope" / "lib" / "schema.sql"
 
 
 # ---------------------------------------------------------------------------

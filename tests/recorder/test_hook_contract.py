@@ -32,7 +32,7 @@ import pytest
 @pytest.fixture
 def recorder(tmp_db):
     """Import the recorder module under the tmp_db fixture's env."""
-    from recorder import run as mod
+    from nephoscope.recorder import run as mod
 
     return mod
 

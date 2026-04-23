@@ -1,12 +1,14 @@
-"""Shared pytest configuration for observability tests.
+"""Shared pytest configuration for nephoscope tests.
 
-Adds the project observability root to ``sys.path`` so tests can import
-``learners.permission.*``, ``lib.*``, and ``recorder.*`` regardless of where
-pytest is invoked from. Anchored to ``__file__`` so the tests always target the
-real code tree — not a stale sandbox copy that might survive a cutover.
+Adds the project ``src/`` root to ``sys.path`` so tests can import
+``nephoscope.learners.permission.*``, ``nephoscope.lib.*``, and
+``nephoscope.recorder.*`` regardless of where pytest is invoked from — and
+regardless of whether the package has been ``pip install -e``'d. Anchored to
+``__file__`` so tests always target the real code tree.
 
-Provides a ``tmp_db`` fixture that applies ``lib/schema.sql`` to an isolated
-SQLite database. No migration system — schema.sql is the single source of truth.
+Provides a ``tmp_db`` fixture that applies ``nephoscope/lib/schema.sql`` to an
+isolated SQLite database. No migration system — schema.sql is the single
+source of truth.
 """
 
 from __future__ import annotations
@@ -20,8 +22,9 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 _LIVE_DB = Path.home() / ".cache" / "claude" / "observability" / "observations.db"
@@ -50,7 +53,7 @@ def tmp_db(tmp_path, monkeypatch):
     db_path = tmp_path / "observations.db"
     monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
 
-    schema_sql = (PROJECT_ROOT / "lib" / "schema.sql").read_text()
+    schema_sql = (SRC_ROOT / "nephoscope" / "lib" / "schema.sql").read_text()
     conn = sqlite3.connect(str(db_path))
     conn.executescript(schema_sql)
     conn.execute(

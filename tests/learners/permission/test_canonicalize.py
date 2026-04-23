@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable
 
 
-from learners.permission.canonicalize import (
+from nephoscope.learners.permission.canonicalize import (
     CanonicalLeaf,
     PatternVariant,
     Redirection,

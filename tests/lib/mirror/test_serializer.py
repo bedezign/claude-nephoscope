@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import pytest
 
-from lib.mirror.tool_class import (
+from nephoscope.lib.mirror.tool_class import (
     FILE_VERBS,
     FLAT_VERBS,
     ORCHESTRATION_VERBS,
     classify,
     tool_class_for,
 )
-from lib.mirror.serializer import serialize
+from nephoscope.lib.mirror.serializer import serialize
 
 
 # ---------------------------------------------------------------------------

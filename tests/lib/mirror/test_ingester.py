@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.mirror.ingester import IngesterError, parse_entry, parse_permissions_json
+from nephoscope.lib.mirror.ingester import IngesterError, parse_entry, parse_permissions_json
 
 
 # ---------------------------------------------------------------------------
@@ -505,19 +505,19 @@ class TestRoundTrip:
 
     @pytest.fixture(autouse=True)
     def _require_real_serializer(self):
-        from lib.mirror.serializer import serialize  # type: ignore[import]
+        from nephoscope.lib.mirror.serializer import serialize  # type: ignore[import]
 
         # Test the stub detection: if serialize raises NotImplementedError, skip.
         try:
             # Try with a known-good row that the stub would reject.
             serialize({"verb": "WebSearch"})
         except NotImplementedError:
-            pytest.skip("lib.mirror.serializer is a stub (W1A deliverable)")
+            pytest.skip("nephoscope.lib.mirror.serializer is a stub (W1A deliverable)")
         except Exception:
             pass  # Real errors will surface in the round-trip tests themselves.
 
     def _roundtrip(self, entry: str) -> None:
-        from lib.mirror.serializer import serialize  # type: ignore[import]
+        from nephoscope.lib.mirror.serializer import serialize  # type: ignore[import]
 
         row = parse_entry(entry, source="roundtrip-test")
         rendered = serialize(row)

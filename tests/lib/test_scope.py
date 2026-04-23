@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from lib import scope
+from nephoscope.lib import scope
 
 
 # ---------------------------------------------------------------------------

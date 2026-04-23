@@ -28,8 +28,8 @@ from unittest import mock
 import pytest
 import yaml
 
-import lib.db as db
-from learners.permission.learner import main as learner_main
+import nephoscope.lib.db as db
+from nephoscope.learners.permission.learner import main as learner_main
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def _mock_connect(conn: sqlite3.Connection):
             return getattr(self._c, name)
 
     with mock.patch(
-        "learners.permission.learner._connect",
+        "nephoscope.learners.permission.learner._connect",
         side_effect=lambda: _NonClose(conn),
     ):
         yield
@@ -112,7 +112,7 @@ class TestPromoteMirrorSync:
         _seed_global_mirror(tmp_db, fake_settings)
         tmp_db.commit()
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_serialize_bash):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_serialize_bash):
             with _mock_connect(tmp_db):
                 rc = learner_main(
                     [
@@ -145,7 +145,7 @@ class TestPromoteMirrorSync:
         _seed_global_mirror(tmp_db, fake_settings)
         tmp_db.commit()
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with _mock_connect(tmp_db):
                 learner_main(
                     [
@@ -172,17 +172,17 @@ class TestPromoteMirrorSync:
         fake_settings = tmp_path / "settings.json"
 
         # First sync: write file + stamp hash.
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             _seed_global_mirror(tmp_db, fake_settings)
             tmp_db.commit()
-            from lib.mirror.writer import sync_global
+            from nephoscope.lib.mirror.writer import sync_global
 
             sync_global(tmp_db)
 
         # Tamper the file so hash no longer matches.
         fake_settings.write_text('{"tampered": true}')
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with _mock_connect(tmp_db):
                 rc = learner_main(["promote", "--verb", "curl", "--flags", "[]"])
 
@@ -203,10 +203,10 @@ class TestPromoteMirrorSync:
         fake_settings = tmp_path / "settings.json"
 
         # Stamp an initial hash.
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             _seed_global_mirror(tmp_db, fake_settings)
             tmp_db.commit()
-            from lib.mirror.writer import sync_global
+            from nephoscope.lib.mirror.writer import sync_global
 
             sync_global(tmp_db)
 
@@ -214,7 +214,7 @@ class TestPromoteMirrorSync:
         fake_settings.write_text('{"tampered": true}')
 
         # Run promote — mirror sync will fail, but the DB row must still exist.
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with _mock_connect(tmp_db):
                 rc = learner_main(["promote", "--verb", "curl", "--flags", "[]"])
 
@@ -257,8 +257,8 @@ class TestPromoteMirrorSync:
         sess_id = int(sess_row[0])
 
         # Patch at the writer module level so we can detect any call.
-        with mock.patch("lib.mirror.writer.sync_global") as mock_sync:
-            with mock.patch("lib.mirror.writer.sync_affected") as mock_sync_affected:
+        with mock.patch("nephoscope.lib.mirror.writer.sync_global") as mock_sync:
+            with mock.patch("nephoscope.lib.mirror.writer.sync_affected") as mock_sync_affected:
                 with _mock_connect(tmp_db):
                     rc = learner_main(
                         [
@@ -295,7 +295,7 @@ class TestRejectMirrorSync:
         _seed_global_mirror(tmp_db, fake_settings)
         tmp_db.commit()
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_serialize_bash):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_serialize_bash):
             with _mock_connect(tmp_db):
                 rc = learner_main(
                     [
@@ -320,16 +320,16 @@ class TestRejectMirrorSync:
     def test_reject_tampered_hash_surfaces_error(self, tmp_db, tmp_path, capsys):
         """Reject with tampered mirror file yields exit 1 + stderr message."""
         fake_settings = tmp_path / "settings.json"
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             _seed_global_mirror(tmp_db, fake_settings)
             tmp_db.commit()
-            from lib.mirror.writer import sync_global
+            from nephoscope.lib.mirror.writer import sync_global
 
             sync_global(tmp_db)
 
         fake_settings.write_text('{"tampered": true}')
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with _mock_connect(tmp_db):
                 rc = learner_main(["reject", "--verb", "rm", "--flags", "[]"])
 
@@ -378,8 +378,8 @@ class TestUnpermitMirrorSync:
         self._insert_global_rule(tmp_db, "git", "status", "[]")
 
         # Sync the rule into the mirror first.
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_serialize_bash):
-            from lib.mirror.writer import sync_global
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_serialize_bash):
+            from nephoscope.lib.mirror.writer import sync_global
 
             sync_global(tmp_db)
 
@@ -389,7 +389,7 @@ class TestUnpermitMirrorSync:
         )
 
         # Unpermit the rule.
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with _mock_connect(tmp_db):
                 rc = learner_main(
                     [
@@ -415,7 +415,7 @@ class TestUnpermitMirrorSync:
         _seed_global_mirror(tmp_db, fake_settings)
         tmp_db.commit()
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with _mock_connect(tmp_db):
                 rc = learner_main(
                     ["unpermit", "--verb", "nonexistent", "--flags", "[]"]
@@ -437,7 +437,7 @@ class TestApplyFixturesMirrorSync:
 
     def test_empty_fixture_no_mirror_write(self, tmp_db, tmp_path):
         """An empty fixture list leaves the mirror untouched."""
-        from learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.seed import apply_fixtures
 
         fake_settings = tmp_path / "settings.json"
         _seed_global_mirror(tmp_db, fake_settings)
@@ -446,7 +446,7 @@ class TestApplyFixturesMirrorSync:
         fixture = tmp_path / "empty.yaml"
         fixture.write_text("[]")
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             shapes, perms = apply_fixtures(tmp_db, fixture)
 
         assert shapes == 0
@@ -456,7 +456,7 @@ class TestApplyFixturesMirrorSync:
 
     def test_apply_fixtures_writes_to_mirror(self, tmp_db, tmp_path):
         """apply_fixtures on empty settings.json writes rules and stamps hash."""
-        from learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.seed import apply_fixtures
 
         fake_settings = tmp_path / "settings.json"
         _seed_global_mirror(tmp_db, fake_settings)
@@ -472,7 +472,7 @@ class TestApplyFixturesMirrorSync:
             )
         )
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_serialize_bash):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_serialize_bash):
             shapes, perms = apply_fixtures(tmp_db, fixture)
 
         assert perms == 2
@@ -488,7 +488,7 @@ class TestApplyFixturesMirrorSync:
 
     def test_apply_fixtures_first_touch_null_hash(self, tmp_db, tmp_path):
         """First-touch: hash IS NULL + existing file → writes succeed and stamp hash."""
-        from learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.seed import apply_fixtures
 
         fake_settings = tmp_path / "settings.json"
         # Write a pre-existing file (user's hand-written settings).
@@ -504,7 +504,7 @@ class TestApplyFixturesMirrorSync:
             yaml.dump([{"verb": "cargo", "flags": [], "decision": "approved"}])
         )
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_serialize_bash):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_serialize_bash):
             shapes, perms = apply_fixtures(tmp_db, fixture)
 
         assert perms == 1
@@ -514,15 +514,15 @@ class TestApplyFixturesMirrorSync:
 
     def test_apply_fixtures_tampered_json_raises(self, tmp_db, tmp_path):
         """apply_fixtures raises ValueError when mirror file was tampered after last sync."""
-        from learners.permission.seed import apply_fixtures
-        from lib.mirror.writer import sync_global
+        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.lib.mirror.writer import sync_global
 
         fake_settings = tmp_path / "settings.json"
         _seed_global_mirror(tmp_db, fake_settings)
         tmp_db.commit()
 
         # Initial sync to stamp the hash.
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             sync_global(tmp_db)
 
         # Tamper the file after the sync.
@@ -533,7 +533,7 @@ class TestApplyFixturesMirrorSync:
             yaml.dump([{"verb": "node", "flags": [], "decision": "approved"}])
         )
 
-        with mock.patch("lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with mock.patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
             with pytest.raises(ValueError) as exc_info:
                 apply_fixtures(tmp_db, fixture)
 
