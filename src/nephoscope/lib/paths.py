@@ -92,14 +92,22 @@ def canonicalize(p: str | Path | None) -> str:
     - ``file_paths.path``
     - ``sessions.transcript_path``
 
-    Empty / None inputs round-trip to the empty string — some callers
+    Empty / ``None`` inputs round-trip to the empty string — some callers
     pass an unset cwd and we don't want to synthesize a garbage path.
 
     Uses ``resolve(strict=False)`` so non-existent paths don't raise —
-    ``file_paths`` routinely holds paths that existed only briefly. The
-    helper is a pure function; the only I/O is the ``stat`` calls
-    ``resolve()`` does internally for symlink chasing.
+    ``file_paths`` routinely holds paths that existed only briefly. If
+    ``resolve`` itself raises ``OSError`` (permission denied while
+    walking a symlink, for example), falls back to the expanduser-only
+    form rather than propagating — canonicalize sits on hot DB-write
+    paths and a single unreadable dir must not crash the recorder. The
+    fallback is still deterministic and still collapses tilde variants,
+    it just doesn't chase symlinks through the inaccessible segment.
     """
     if not p:
         return ""
-    return str(Path(p).expanduser().resolve(strict=False))
+    expanded = Path(p).expanduser()
+    try:
+        return str(expanded.resolve(strict=False))
+    except OSError:
+        return str(expanded)

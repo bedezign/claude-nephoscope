@@ -20,6 +20,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from nephoscope.lib.paths import canonicalize
+
 
 # ---------------------------------------------------------------------------
 # Exception
@@ -69,7 +71,7 @@ def _read_global_meta(conn: sqlite3.Connection) -> tuple[Path, str | None]:
         raise RuntimeError(
             "global_mirror singleton (id=1) is missing — run setup to seed it"
         )
-    return Path(row[0]).expanduser(), row[1]
+    return Path(canonicalize(row[0])), row[1]
 
 
 def _read_project_meta(
@@ -89,7 +91,7 @@ def _read_project_meta(
         raise ValueError(
             f"project {project_id} has no settings_json_path — set it before syncing"
         )
-    return Path(row[0]).expanduser(), row[1]
+    return Path(canonicalize(row[0])), row[1]
 
 
 def _read_stored_hash(conn: sqlite3.Connection, project_id: int | None) -> str | None:

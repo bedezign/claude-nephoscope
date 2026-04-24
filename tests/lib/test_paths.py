@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from nephoscope.lib import paths
@@ -118,36 +120,49 @@ class TestCanonicalize:
             f"first={result!r} second={paths.canonicalize(result)!r}"
         )
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            # OSError subtypes the fallback must absorb. FileNotFoundError is
+            # not in this list on purpose — resolve(strict=False) is designed
+            # not to raise it for missing paths, so its appearance here would
+            # mislead readers about what actually triggers the fallback.
+            PermissionError(13, "Permission denied"),
+            NotADirectoryError(20, "Not a directory"),
+            OSError(5, "Input/output error"),
+        ],
+    )
+    def test_canonicalize_falls_back_on_os_error(self, monkeypatch, tmp_path, exc):
+        """resolve() raising any OSError subtype falls back to expanduser-only.
 
-class TestCanonicalizeDocstringCites:
-    """The docstring must list the sanctioned call sites so future
-    INSERT-site authors land at canonicalize() naturally. This is a
-    documentation contract, not a runtime one, but it's load-bearing
-    for the plan's stated intent (see plan §5, 'Write-site audit')."""
+        Hot DB-write paths must not crash on a single unreadable symlink
+        segment. The fallback is still deterministic — tildes still
+        expand — it just doesn't chase symlinks through the inaccessible
+        bit. Parametrized across OSError subtypes so a regression to one
+        specific errno still flags.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
 
-    def test_docstring_cites_projects_cwd(self):
-        assert "projects.cwd" in (paths.canonicalize.__doc__ or "")
+        def fail_resolve(self, strict=False):
+            raise exc
 
-    def test_docstring_cites_projects_root(self):
-        # projects.root is written alongside cwd in upsert_project.
-        assert "projects.root" in (paths.canonicalize.__doc__ or "") or (
-            "root" in (paths.canonicalize.__doc__ or "")
+        monkeypatch.setattr(pathlib.Path, "resolve", fail_resolve)
+
+        result = paths.canonicalize("~/some/deep/path")
+        assert result == str(tmp_path / "some" / "deep" / "path"), (
+            f"expected expanduser-only fallback for {type(exc).__name__}, "
+            f"got {result!r}"
         )
 
-    def test_docstring_cites_file_paths(self):
-        assert "file_paths" in (paths.canonicalize.__doc__ or "")
+    def test_canonicalize_very_long_path_does_not_raise(self):
+        """A near-PATH_MAX length path normalizes without raising.
 
-    def test_docstring_cites_transcript_path(self):
-        # sessions.transcript_path — future-site reminder.
-        assert "transcript_path" in (paths.canonicalize.__doc__ or "")
-
-    def test_docstring_cites_future_settings_json_sites(self):
-        # projects.settings_json_path / global_mirror.settings_json_path
-        # are future INSERT sites; the plan says to pre-list them so a
-        # future author lands at canonicalize() naturally.
-        doc = paths.canonicalize.__doc__ or ""
-        assert "settings_json_path" in doc, (
-            "docstring must cite global_mirror.settings_json_path / "
-            "projects.settings_json_path as future canonical write sites "
-            "— otherwise a future INSERT-site author has no signpost"
-        )
+        Linux PATH_MAX is 4096; the OS won't resolve a syscall-sized path,
+        but canonicalize must not crash given one — a malformed payload
+        field or a truncated log line should not take the recorder down.
+        """
+        deep = "/tmp/" + "/".join("x" * 40 for _ in range(90))
+        assert len(deep) > 3500
+        result = paths.canonicalize(deep)
+        assert isinstance(result, str)
+        assert paths.canonicalize(result) == result

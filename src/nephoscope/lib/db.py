@@ -89,35 +89,37 @@ def upsert_project(conn: sqlite3.Connection, cwd: str, now: str) -> int:
     """Insert-or-touch a project row keyed by cwd; return its id.
 
     On first insertion, resolves and stores the project root.
-    On subsequent touches, updates last_seen.
+    On subsequent touches, updates last_seen and backfills root if missing.
 
     ``cwd`` and the derived ``root`` are canonicalized before write so
     tilde/symlink variants of the same logical path collapse to one row.
+
+    Race-safety: the INSERT goes through ``ON CONFLICT(cwd) DO UPDATE``,
+    so two connections racing to create the same project cannot produce
+    duplicate rows. The pre-check via SELECT is retained as a fast path
+    that avoids the cost of ``_resolve_project_root`` (which shells out
+    to ``git``) for the common "already exists" case.
     """
     cwd = canonicalize(cwd)
     row = conn.execute(
         "SELECT id, root FROM projects WHERE cwd = ?;", (cwd,)
     ).fetchone()
-    if row is not None:
+    if row is not None and row[1] is not None:
         proj_id = int(row[0])
-        if row[1] is None:
-            root = canonicalize(_resolve_project_root(cwd) or "")
-            conn.execute(
-                "UPDATE projects SET last_seen = ?, root = ? WHERE id = ?;",
-                (now, root or None, proj_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE projects SET last_seen = ? WHERE id = ?;", (now, proj_id)
-            )
+        conn.execute("UPDATE projects SET last_seen = ? WHERE id = ?;", (now, proj_id))
         return proj_id
-    root = canonicalize(_resolve_project_root(cwd) or "")
+
+    root = canonicalize(_resolve_project_root(cwd) or "") or None
     cur = conn.execute(
         "INSERT INTO projects(cwd, name, root, first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?);",
-        (cwd, _project_name(cwd), root or None, now, now),
+        " VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT(cwd) DO UPDATE SET"
+        "   last_seen = excluded.last_seen,"
+        "   root = COALESCE(projects.root, excluded.root)"
+        " RETURNING id;",
+        (cwd, _project_name(cwd), root, now, now),
     )
-    return int(cur.lastrowid or 0)
+    return int(cur.fetchone()[0])
 
 
 def upsert_session(
@@ -435,25 +437,23 @@ def lookup_or_insert_file_path_id(
 
     On conflict, bumps last_seen. Returns None when path is None.
 
-    The path is canonicalized (expanduser + resolve) before the
-    SELECT/INSERT so tilde/symlink variants dedupe naturally via the
-    existing UNIQUE index on ``file_paths.path``.
+    The path is canonicalized (expanduser + resolve) before the INSERT
+    so tilde/symlink variants dedupe naturally via the UNIQUE index on
+    ``file_paths.path``. The single-statement ``INSERT ... ON CONFLICT
+    DO UPDATE ... RETURNING id`` makes the operation race-safe across
+    concurrent connections.
     """
     if path is None:
         return None
     path = canonicalize(path)
-    row = conn.execute("SELECT id FROM file_paths WHERE path = ?;", (path,)).fetchone()
-    if row is not None:
-        conn.execute(
-            "UPDATE file_paths SET last_seen = ? WHERE id = ?;",
-            (ts, row[0]),
-        )
-        return int(row[0])
     cur = conn.execute(
-        "INSERT INTO file_paths(path, first_seen, last_seen) VALUES (?, ?, ?);",
+        "INSERT INTO file_paths(path, first_seen, last_seen)"
+        " VALUES (?, ?, ?)"
+        " ON CONFLICT(path) DO UPDATE SET last_seen = excluded.last_seen"
+        " RETURNING id;",
         (path, ts, ts),
     )
-    return int(cur.lastrowid or 0)
+    return int(cur.fetchone()[0])
 
 
 def write_extra(

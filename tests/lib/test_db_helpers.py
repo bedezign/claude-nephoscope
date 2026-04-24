@@ -15,6 +15,24 @@ from nephoscope.recorder import run as recorder
 
 
 @pytest.fixture
+def two_connections(tmp_path, monkeypatch):
+    """Open two independent connections to a fresh DB in tmp_path.
+
+    Yields (conn_a, conn_b). Closes both on teardown.
+    Intended for tests that exercise concurrent-writer / ON CONFLICT paths.
+    """
+    db_file = tmp_path / "race.db"
+    monkeypatch.setenv("OBSERVABILITY_DB", str(db_file))
+    conn_a = db._open()
+    conn_b = db._open()
+    try:
+        yield conn_a, conn_b
+    finally:
+        conn_a.close()
+        conn_b.close()
+
+
+@pytest.fixture
 def temp_db():
     """Create a temporary database with the current schema."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -683,17 +701,104 @@ class TestUpsertProjectCanonicalizes:
         stored_root = temp_db.execute(
             "SELECT root FROM projects WHERE id = ?;", (proj_id,)
         ).fetchone()[0]
-        # root may be None if resolution yielded nothing, but if set it must
-        # be canonical.
-        if stored_root is not None:
-            assert "~" not in stored_root, (
-                f"stored root contains '~': {stored_root!r} — tilde not expanded"
-            )
-            # Idempotent: canonicalize(stored) == stored
-            assert canonicalize(stored_root) == stored_root, (
-                f"stored root {stored_root!r} is not canonical "
-                f"— canonicalize not applied to root at write"
-            )
+        assert stored_root is not None, (
+            "resolve_project_root falls back to cwd, so stored root must be set"
+        )
+        assert "~" not in stored_root, (
+            f"stored root contains '~': {stored_root!r} — tilde not expanded"
+        )
+        assert canonicalize(stored_root) == stored_root, (
+            f"stored root {stored_root!r} is not canonical "
+            f"— canonicalize not applied to root at write"
+        )
+
+    def test_upsert_project_idempotent(self, temp_db):
+        """Back-to-back upserts of the same cwd return the same id and one row."""
+        # Fixed timestamps to sidestep same-millisecond collisions — the
+        # assertion below cares that last_seen moved to now2, not that now2
+        # was later than now1 in wall-clock terms.
+        now1 = "2024-01-01T00:00:00.000Z"
+        now2 = "2024-01-01T00:00:00.001Z"
+        id1 = db.upsert_project(temp_db, "/work/proj-x", now1)
+        id2 = db.upsert_project(temp_db, "/work/proj-x", now2)
+
+        assert id1 == id2
+        count = temp_db.execute(
+            "SELECT COUNT(*) FROM projects WHERE cwd = ?;", ("/work/proj-x",)
+        ).fetchone()[0]
+        assert count == 1
+        last_seen = temp_db.execute(
+            "SELECT last_seen FROM projects WHERE id = ?;", (id1,)
+        ).fetchone()[0]
+        assert last_seen == now2, "second upsert must bump last_seen"
+
+    def test_upsert_project_two_connections_dedupe(self, two_connections):
+        """Two connections upserting the same cwd produce one row, same id.
+
+        With autocommit + WAL, connection A's INSERT commits before B starts;
+        B's fast-path SELECT sees the row and takes the UPDATE branch.
+        Proves the user-visible race-safety claim ("two writers → one row"),
+        but does not exercise the ON CONFLICT DO UPDATE branch — see the
+        companion test below for that.
+        """
+        conn_a, conn_b = two_connections
+        id_a = db.upsert_project(conn_a, "/work/race-proj", db._now())
+        id_b = db.upsert_project(conn_b, "/work/race-proj", db._now())
+
+        assert id_a == id_b, (
+            f"UPSERT returned different ids under two-writer scenario: {id_a} vs {id_b}"
+        )
+        count = conn_a.execute(
+            "SELECT COUNT(*) FROM projects WHERE cwd = ?;", ("/work/race-proj",)
+        ).fetchone()[0]
+        assert count == 1, (
+            f"expected one row after two writers, got {count} — dedup failed"
+        )
+
+    def test_upsert_project_on_conflict_branch_returns_existing_id(
+        self, two_connections
+    ):
+        """The ON CONFLICT DO UPDATE branch returns the existing row's id.
+
+        Forces the fast-path SELECT to miss by seeding a row with
+        ``root IS NULL`` (fast-path needs both ``row is not None`` and
+        ``root is not None``). The second caller falls through to the
+        INSERT, hits the UNIQUE constraint, takes DO UPDATE, and must
+        return the pre-existing id — not create a duplicate or return 0.
+        """
+        conn_a, conn_b = two_connections
+        # Seed a row with NULL root directly — simulates a caller that
+        # wrote the cwd row before root could be resolved.
+        conn_a.execute(
+            "INSERT INTO projects(cwd, name, root, first_seen, last_seen)"
+            " VALUES (?, ?, NULL, ?, ?);",
+            ("/work/conflict-proj", "conflict-proj", db._now(), db._now()),
+        )
+        seed_id = conn_a.execute(
+            "SELECT id FROM projects WHERE cwd = ?;", ("/work/conflict-proj",)
+        ).fetchone()[0]
+
+        # conn_b's upsert sees row with root IS NULL → fast-path miss →
+        # ON CONFLICT branch fires.
+        returned_id = db.upsert_project(conn_b, "/work/conflict-proj", db._now())
+
+        assert returned_id == seed_id, (
+            f"ON CONFLICT branch returned {returned_id}; expected existing id "
+            f"{seed_id}. RETURNING must yield the conflict target's id."
+        )
+        count = conn_a.execute(
+            "SELECT COUNT(*) FROM projects WHERE cwd = ?;", ("/work/conflict-proj",)
+        ).fetchone()[0]
+        assert count == 1, f"duplicate row created — got {count}"
+        # The backfill via COALESCE(projects.root, excluded.root) should have
+        # populated root — rule 3 of resolve_project_root returns cwd verbatim
+        # when git fails, so `excluded.root` is non-NULL for any non-empty cwd.
+        root = conn_a.execute(
+            "SELECT root FROM projects WHERE id = ?;", (seed_id,)
+        ).fetchone()[0]
+        assert root is not None, (
+            "ON CONFLICT DO UPDATE should have backfilled root via COALESCE"
+        )
 
 
 class TestLookupOrInsertFilePathCanonicalizes:
@@ -751,6 +856,46 @@ class TestLookupOrInsertFilePathCanonicalizes:
         # Regression guard: the existing None→None contract must survive.
         now = db._now()
         assert db.lookup_or_insert_file_path_id(temp_db, None, now) is None
+
+    def test_file_path_idempotent(self, temp_db):
+        """Same path on one connection twice returns the same id, bumps last_seen."""
+        now1 = "2024-01-01T00:00:00.000Z"
+        now2 = "2024-01-01T00:00:00.001Z"
+        id1 = db.lookup_or_insert_file_path_id(temp_db, "/tmp/idem.txt", now1)
+        id2 = db.lookup_or_insert_file_path_id(temp_db, "/tmp/idem.txt", now2)
+
+        assert id1 == id2
+        count = temp_db.execute(
+            "SELECT COUNT(*) FROM file_paths WHERE path = ?;", ("/tmp/idem.txt",)
+        ).fetchone()[0]
+        assert count == 1
+        last_seen = temp_db.execute(
+            "SELECT last_seen FROM file_paths WHERE id = ?;", (id1,)
+        ).fetchone()[0]
+        assert last_seen == now2
+
+    def test_file_path_concurrent_connections_dedupe(self, two_connections):
+        """Two connections inserting the same path produce one row, same id.
+
+        Exercises the ``INSERT ... ON CONFLICT(path) DO UPDATE ... RETURNING``
+        path: connection A inserts; connection B hits the UNIQUE conflict and
+        takes the UPDATE branch. Both receive the same id.
+        """
+        conn_a, conn_b = two_connections
+        now = db._now()
+        id_a = db.lookup_or_insert_file_path_id(conn_a, "/tmp/race.txt", now)
+        id_b = db.lookup_or_insert_file_path_id(conn_b, "/tmp/race.txt", now)
+
+        assert id_a == id_b, (
+            f"UPSERT returned different ids under concurrent writers: {id_a} vs {id_b}"
+        )
+        count = conn_a.execute(
+            "SELECT COUNT(*) FROM file_paths WHERE path = ?;", ("/tmp/race.txt",)
+        ).fetchone()[0]
+        assert count == 1, (
+            f"expected one row after two writers, got {count} — "
+            f"ON CONFLICT did not take effect"
+        )
 
 
 class TestRecorderCanonicalizesTranscriptPath:

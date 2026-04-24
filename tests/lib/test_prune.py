@@ -294,17 +294,40 @@ def test_prune_idempotent(db_conn: sqlite3.Connection) -> None:
     assert result2 == {"candidates_deleted": 0, "candidate_sessions_deleted": 0}
 
 
+def _iso(d: dt.datetime) -> str:
+    """Render a datetime as the ISO-8601 form the DB stores."""
+    return d.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def test_prune_cutoff_boundary(db_conn: sqlite3.Connection) -> None:
     """Candidates at the cutoff boundary are not deleted."""
-    now = dt.datetime.now(tz=dt.timezone.utc)
-    cutoff_ts = (
-        (now - dt.timedelta(days=30))
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    reference = dt.datetime.now(tz=dt.timezone.utc)
+    cutoff_ts = _iso(reference - dt.timedelta(days=30))
     _insert_candidate(db_conn, "Read", last_seen=cutoff_ts)
 
-    result = prune_candidates(db_conn, stale_days=30, now=now)
+    result = prune_candidates(db_conn, stale_days=30, reference_time=reference)
+    assert result == {"candidates_deleted": 0, "candidate_sessions_deleted": 0}
+
+
+def test_prune_cutoff_just_past_deletes(db_conn: sqlite3.Connection) -> None:
+    """A last_seen one millisecond past the cutoff is pruned."""
+    reference = dt.datetime.now(tz=dt.timezone.utc)
+    past_cutoff = _iso(reference - dt.timedelta(days=30, milliseconds=1))
+    _insert_candidate(db_conn, "Read", last_seen=past_cutoff)
+
+    result = prune_candidates(db_conn, stale_days=30, reference_time=reference)
+    assert result == {"candidates_deleted": 1, "candidate_sessions_deleted": 0}
+
+
+def test_prune_cutoff_just_before_keeps(db_conn: sqlite3.Connection) -> None:
+    """A last_seen one millisecond newer than the cutoff is kept."""
+    reference = dt.datetime.now(tz=dt.timezone.utc)
+    before_cutoff = _iso(
+        reference - dt.timedelta(days=30) + dt.timedelta(milliseconds=1)
+    )
+    _insert_candidate(db_conn, "Read", last_seen=before_cutoff)
+
+    result = prune_candidates(db_conn, stale_days=30, reference_time=reference)
     assert result == {"candidates_deleted": 0, "candidate_sessions_deleted": 0}
 
 

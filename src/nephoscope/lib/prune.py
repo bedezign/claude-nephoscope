@@ -19,7 +19,7 @@ def prune_candidates(
     conn: sqlite3.Connection,
     *,
     stale_days: int = 30,
-    now: dt.datetime | None = None,
+    reference_time: dt.datetime | None = None,
 ) -> dict[str, int]:
     """Remove stale permission_candidates rows not awaiting decision.
 
@@ -33,7 +33,7 @@ def prune_candidates(
     Args:
         conn: Database connection.
         stale_days: Number of days before a candidate is considered stale.
-        now: Reference time used to compute the cutoff. Defaults to
+        reference_time: Clock value used to compute the cutoff. Defaults to
             ``datetime.now(tz=UTC)``. Injecting a fixed value lets callers
             (tests in particular) compute a ``last_seen`` that lands exactly
             on the cutoff without wall-clock drift between the two reads.
@@ -42,10 +42,10 @@ def prune_candidates(
         A dict with keys 'candidates_deleted' and 'candidate_sessions_deleted'
         and their counts.
     """
-    if now is None:
-        now = dt.datetime.now(tz=dt.timezone.utc)
+    if reference_time is None:
+        reference_time = dt.datetime.now(tz=dt.timezone.utc)
     cutoff = (
-        (now - dt.timedelta(days=stale_days))
+        (reference_time - dt.timedelta(days=stale_days))
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
@@ -70,7 +70,7 @@ def prune_candidates(
     stale_candidates = cursor.fetchall()
     candidate_ids_to_delete = [row[0] for row in stale_candidates]
 
-    # Before deletion, count the sessions that will be cascade-deleted.
+    # Count and delete candidates (cascade deletes sessions via FK).
     sessions_count = 0
     if candidate_ids_to_delete:
         placeholders = ",".join("?" * len(candidate_ids_to_delete))
@@ -78,10 +78,6 @@ def prune_candidates(
             f"SELECT COUNT(*) FROM permission_candidate_sessions WHERE candidate_id IN ({placeholders})",
             candidate_ids_to_delete,
         ).fetchone()[0]
-
-    # Delete the candidates (cascade deletes sessions via FK).
-    if candidate_ids_to_delete:
-        placeholders = ",".join("?" * len(candidate_ids_to_delete))
         conn.execute(
             f"DELETE FROM permission_candidates WHERE id IN ({placeholders})",
             candidate_ids_to_delete,

@@ -146,9 +146,9 @@ class TestCanonicalPayloadContract:
         assert parsed["session_id"] == "019673a0-1111-7000-8000-000000000001"
         assert parsed["cwd"].endswith("/foo")
 
-    def test_pre_sets_transcript_path_once(self, tmp_db, recorder):
-        first = "/home/steve/.claude/projects/a/transcript.jsonl"
-        second = "/home/steve/.claude/projects/b/transcript.jsonl"
+    def test_pre_sets_transcript_path_once(self, tmp_db, recorder, tmp_path):
+        first = str(tmp_path / "a" / "transcript.jsonl")
+        second = str(tmp_path / "b" / "transcript.jsonl")
         recorder._handle("pre", canonical_pre_payload(transcript_path=first))
         recorder._handle(
             "pre",
@@ -160,9 +160,9 @@ class TestCanonicalPayloadContract:
             "SELECT session_uuid, transcript_path FROM sessions;"
         ).fetchall()
         assert len(rows) == 1
-        # Stored form is canonicalized (expanduser + resolve); the raw input
-        # may pass through symlinks like .claude → dot_claude, so compare
-        # against the canonical form rather than the literal input.
+        # Stored form is canonicalized; tmp_path is already absolute and
+        # symlink-free, so the literal input and canonicalize() agree on
+        # any host.
         assert rows[0][1] == canonicalize(first), (
             "transcript_path was overwritten — set-once violated"
         )
