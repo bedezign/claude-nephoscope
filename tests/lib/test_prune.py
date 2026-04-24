@@ -296,10 +296,15 @@ def test_prune_idempotent(db_conn: sqlite3.Connection) -> None:
 
 def test_prune_cutoff_boundary(db_conn: sqlite3.Connection) -> None:
     """Candidates at the cutoff boundary are not deleted."""
-    cutoff_ts = _iso_ts(days_ago=30)
+    now = dt.datetime.now(tz=dt.timezone.utc)
+    cutoff_ts = (
+        (now - dt.timedelta(days=30))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
     _insert_candidate(db_conn, "Read", last_seen=cutoff_ts)
 
-    result = prune_candidates(db_conn, stale_days=30)
+    result = prune_candidates(db_conn, stale_days=30, now=now)
     assert result == {"candidates_deleted": 0, "candidate_sessions_deleted": 0}
 
 

@@ -28,6 +28,8 @@ from unittest.mock import patch
 
 import pytest
 
+from nephoscope.lib.paths import canonicalize
+
 
 @pytest.fixture
 def recorder(tmp_db):
@@ -158,7 +160,10 @@ class TestCanonicalPayloadContract:
             "SELECT session_uuid, transcript_path FROM sessions;"
         ).fetchall()
         assert len(rows) == 1
-        assert rows[0][1] == first, (
+        # Stored form is canonicalized (expanduser + resolve); the raw input
+        # may pass through symlinks like .claude → dot_claude, so compare
+        # against the canonical form rather than the literal input.
+        assert rows[0][1] == canonicalize(first), (
             "transcript_path was overwritten — set-once violated"
         )
 

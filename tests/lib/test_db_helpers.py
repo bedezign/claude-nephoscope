@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -9,6 +10,8 @@ from unittest import mock
 import pytest
 
 from nephoscope.lib import db
+from nephoscope.lib.paths import canonicalize
+from nephoscope.recorder import run as recorder
 
 
 @pytest.fixture
@@ -43,9 +46,9 @@ class TestNow:
         assert ts.endswith("Z")
         assert "T" in ts
         # Should be parseable as ISO-8601 if we strip the Z
-        ts[:-1] + "+00:00"
+        assert dt.datetime.fromisoformat(ts[:-1] + "+00:00") is not None
         # Basic format check: YYYY-MM-DDTHH:MM:SS.mmmZ
-        assert len(ts) > 20  # rough check
+        assert len(ts) > 20
 
 
 class TestTruncate:
@@ -518,7 +521,7 @@ class TestLookupHelpers:
     def test_lookup_or_insert_subagent_type_id_inserts_new(self, temp_db):
         """Subagent type id lookup inserts new type on first sight."""
         sa_id = db.lookup_or_insert_subagent_type_id(temp_db, "researcher")
-        assert sa_id > 0
+        assert sa_id is not None and sa_id > 0
 
         sa_id2 = db.lookup_or_insert_subagent_type_id(temp_db, "researcher")
         assert sa_id == sa_id2
@@ -533,7 +536,7 @@ class TestLookupHelpers:
         """File path id lookup inserts new path on first sight."""
         now = db._now()
         path_id = db.lookup_or_insert_file_path_id(temp_db, "/home/user/file.txt", now)
-        assert path_id > 0
+        assert path_id is not None and path_id > 0
 
         path_id2 = db.lookup_or_insert_file_path_id(temp_db, "/home/user/file.txt", now)
         assert path_id == path_id2
@@ -595,3 +598,196 @@ class TestWriteExtra:
             (tool_call_id, "key1"),
         ).fetchone()
         assert row[0] == "value2"
+
+
+class TestUpsertProjectCanonicalizes:
+    """Integration tests: upsert_project must canonicalize cwd + root at write.
+
+    Two forms of the same logical path (tilde vs absolute, symlink vs realpath)
+    must land as one row, not two. Read-side defensive canonicalization is kept
+    for belt-and-braces, but storage identity is the point.
+    """
+
+    def test_upsert_project_dedups_tilde_vs_absolute(
+        self, temp_db, tmp_path, monkeypatch
+    ):
+        """~/proj and /<fake-home>/proj upserted back-to-back yield one row."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+
+        now1 = db._now()
+        id1 = db.upsert_project(temp_db, "~/proj", now1)
+        now2 = db._now()
+        id2 = db.upsert_project(temp_db, str(proj_dir), now2)
+
+        assert id1 == id2, (
+            f"tilde ~/proj and absolute {proj_dir} produced different ids "
+            f"({id1} vs {id2}) — canonicalize() not applied at write"
+        )
+        count = temp_db.execute(
+            "SELECT COUNT(*) FROM projects WHERE cwd = ?;", (str(proj_dir),)
+        ).fetchone()[0]
+        assert count == 1, (
+            f"expected exactly one row for canonical {proj_dir}, got {count}"
+        )
+
+    def test_upsert_project_dedups_symlink_vs_realpath(self, temp_db, tmp_path):
+        """Symlink path and its realpath dedupe to one row."""
+        real = tmp_path / "real-proj"
+        real.mkdir()
+        link = tmp_path / "link-proj"
+        link.symlink_to(real)
+
+        now1 = db._now()
+        id1 = db.upsert_project(temp_db, str(link), now1)
+        now2 = db._now()
+        id2 = db.upsert_project(temp_db, str(real), now2)
+
+        assert id1 == id2, (
+            f"symlink {link} and realpath {real} produced different ids "
+            f"({id1} vs {id2}) — canonicalize() not applied at write"
+        )
+        count = temp_db.execute("SELECT COUNT(*) FROM projects;").fetchone()[0]
+        assert count == 1, f"expected exactly one project row, got {count}"
+
+    def test_upsert_project_stores_canonical_cwd(self, temp_db, tmp_path, monkeypatch):
+        """The stored cwd column holds the canonical (expanduser+resolve) form."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+
+        now = db._now()
+        proj_id = db.upsert_project(temp_db, "~/proj", now)
+
+        stored = temp_db.execute(
+            "SELECT cwd FROM projects WHERE id = ?;", (proj_id,)
+        ).fetchone()[0]
+        assert stored == str(proj_dir), (
+            f"stored cwd is {stored!r}; expected canonical {str(proj_dir)!r} "
+            f"— upsert_project did not canonicalize on insert"
+        )
+        assert "~" not in stored, (
+            f"stored cwd still contains '~': {stored!r} — tilde not expanded"
+        )
+
+    def test_upsert_project_stores_canonical_root(self, temp_db, tmp_path, monkeypatch):
+        """The stored root column holds a canonical form (no tilde, no symlink)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+
+        now = db._now()
+        proj_id = db.upsert_project(temp_db, "~/proj", now)
+
+        stored_root = temp_db.execute(
+            "SELECT root FROM projects WHERE id = ?;", (proj_id,)
+        ).fetchone()[0]
+        # root may be None if resolution yielded nothing, but if set it must
+        # be canonical.
+        if stored_root is not None:
+            assert "~" not in stored_root, (
+                f"stored root contains '~': {stored_root!r} — tilde not expanded"
+            )
+            # Idempotent: canonicalize(stored) == stored
+            assert canonicalize(stored_root) == stored_root, (
+                f"stored root {stored_root!r} is not canonical "
+                f"— canonicalize not applied to root at write"
+            )
+
+
+class TestLookupOrInsertFilePathCanonicalizes:
+    """lookup_or_insert_file_path_id must canonicalize before SELECT/INSERT."""
+
+    def test_file_path_dedups_tilde_vs_absolute(self, temp_db, tmp_path, monkeypatch):
+        """~/foo.txt and /<fake-home>/foo.txt are one row."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        now = db._now()
+
+        id1 = db.lookup_or_insert_file_path_id(temp_db, "~/foo.txt", now)
+        id2 = db.lookup_or_insert_file_path_id(temp_db, str(tmp_path / "foo.txt"), now)
+
+        assert id1 == id2, (
+            f"tilde ~/foo.txt and absolute {tmp_path}/foo.txt got different ids "
+            f"({id1} vs {id2}) — canonicalize() not applied"
+        )
+        count = temp_db.execute("SELECT COUNT(*) FROM file_paths;").fetchone()[0]
+        assert count == 1, f"expected exactly one file_paths row, got {count}"
+
+    def test_file_path_dedups_symlink_vs_realpath(self, temp_db, tmp_path):
+        """Symlink path and realpath dedupe to one file_paths row."""
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "file.txt").write_text("x")
+        link = tmp_path / "link"
+        link.symlink_to(real)
+
+        now = db._now()
+        id1 = db.lookup_or_insert_file_path_id(temp_db, str(link / "file.txt"), now)
+        id2 = db.lookup_or_insert_file_path_id(temp_db, str(real / "file.txt"), now)
+
+        assert id1 == id2, (
+            f"symlink and realpath got different ids ({id1} vs {id2}) "
+            f"— canonicalize() not applied at write"
+        )
+
+    def test_file_path_stores_canonical(self, temp_db, tmp_path, monkeypatch):
+        """The stored path column holds the canonical form."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        now = db._now()
+        path_id = db.lookup_or_insert_file_path_id(temp_db, "~/foo.txt", now)
+
+        stored = temp_db.execute(
+            "SELECT path FROM file_paths WHERE id = ?;", (path_id,)
+        ).fetchone()[0]
+        assert stored == str(tmp_path / "foo.txt"), (
+            f"stored path is {stored!r}; expected canonical "
+            f"{str(tmp_path / 'foo.txt')!r}"
+        )
+        assert "~" not in stored, f"stored path still has '~': {stored!r}"
+
+    def test_file_path_none_still_returns_none(self, temp_db):
+        """Canonicalization of file_paths does not change the None short-circuit."""
+        # Regression guard: the existing None→None contract must survive.
+        now = db._now()
+        assert db.lookup_or_insert_file_path_id(temp_db, None, now) is None
+
+
+class TestRecorderCanonicalizesTranscriptPath:
+    """recorder/run.py must canonicalize transcript_path before UPDATE.
+
+    The recorder's pre-phase writes transcript_path into sessions (set-once).
+    If two callers send the same logical transcript with different tilde/symlink
+    forms, the set-once semantics only work if the stored form is canonical.
+    """
+
+    def test_transcript_path_stored_canonical(self, tmp_db, tmp_path, monkeypatch):
+        """transcript_path is canonicalized before being stored on sessions."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        transcript_dir = tmp_path / "transcripts"
+        transcript_dir.mkdir()
+
+        payload = {
+            "session_id": "019673a0-aaaa-7000-8000-000000000099",
+            "transcript_path": "~/transcripts/t.jsonl",
+            "cwd": str(tmp_path / "proj"),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo x"},
+            "tool_use_id": "toolu_canonical_transcript_test",
+        }
+        (tmp_path / "proj").mkdir()
+        recorder._handle("pre", payload)
+
+        stored = tmp_db.execute(
+            "SELECT transcript_path FROM sessions WHERE session_uuid = ?;",
+            (payload["session_id"],),
+        ).fetchone()[0]
+        expected = str(transcript_dir / "t.jsonl")
+        assert stored == expected, (
+            f"stored transcript_path is {stored!r}, expected canonical "
+            f"{expected!r} — canonicalize() not applied at recorder UPDATE site"
+        )
+        assert "~" not in (stored or ""), (
+            f"stored transcript_path contains '~': {stored!r}"
+        )

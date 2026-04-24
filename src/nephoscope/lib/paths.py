@@ -76,3 +76,30 @@ def is_disabled() -> bool:
         return disable_marker_path().is_file()
     except OSError:
         return False
+
+
+def canonicalize(p: str | Path | None) -> str:
+    """Return a stored-path form: expanduser + resolve, str-ified.
+
+    Use at every DB path-write site so the following columns hold one
+    canonical string per logical file regardless of which tilde/symlink
+    form the caller passed in:
+
+    - ``projects.cwd``
+    - ``projects.root``
+    - ``projects.settings_json_path`` (future INSERT sites)
+    - ``global_mirror.settings_json_path`` (future INSERT sites)
+    - ``file_paths.path``
+    - ``sessions.transcript_path``
+
+    Empty / None inputs round-trip to the empty string — some callers
+    pass an unset cwd and we don't want to synthesize a garbage path.
+
+    Uses ``resolve(strict=False)`` so non-existent paths don't raise —
+    ``file_paths`` routinely holds paths that existed only briefly. The
+    helper is a pure function; the only I/O is the ``stat`` calls
+    ``resolve()`` does internally for symlink chasing.
+    """
+    if not p:
+        return ""
+    return str(Path(p).expanduser().resolve(strict=False))

@@ -52,7 +52,11 @@ from nephoscope.lib.db import (  # noqa: E402
     upsert_session,
     write_extra,
 )
-from nephoscope.lib.paths import is_disabled, observations_db_path  # noqa: E402
+from nephoscope.lib.paths import (  # noqa: E402
+    canonicalize,
+    is_disabled,
+    observations_db_path,
+)
 
 PAYLOAD_MAX = 4096
 RESPONSE_MAX = 2048
@@ -180,7 +184,7 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
                 payload_blob = _safe_minify(data)[:PAYLOAD_MAX]
                 write_extra(conn, tool_call_id, "payload", payload_blob)
 
-            transcript_path = data.get("transcript_path")
+            transcript_path = canonicalize(data.get("transcript_path") or "")
             if transcript_path and session_id_int is not None:
                 conn.execute(
                     "UPDATE sessions SET transcript_path = ? "

@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from nephoscope.lib.paths import observations_db_path
+from nephoscope.lib.paths import canonicalize, observations_db_path
 
 MAX_STR = 500
 
@@ -90,28 +90,32 @@ def upsert_project(conn: sqlite3.Connection, cwd: str, now: str) -> int:
 
     On first insertion, resolves and stores the project root.
     On subsequent touches, updates last_seen.
+
+    ``cwd`` and the derived ``root`` are canonicalized before write so
+    tilde/symlink variants of the same logical path collapse to one row.
     """
+    cwd = canonicalize(cwd)
     row = conn.execute(
         "SELECT id, root FROM projects WHERE cwd = ?;", (cwd,)
     ).fetchone()
     if row is not None:
         proj_id = int(row[0])
         if row[1] is None:
-            root = _resolve_project_root(cwd)
+            root = canonicalize(_resolve_project_root(cwd) or "")
             conn.execute(
                 "UPDATE projects SET last_seen = ?, root = ? WHERE id = ?;",
-                (now, root, proj_id),
+                (now, root or None, proj_id),
             )
         else:
             conn.execute(
                 "UPDATE projects SET last_seen = ? WHERE id = ?;", (now, proj_id)
             )
         return proj_id
-    root = _resolve_project_root(cwd)
+    root = canonicalize(_resolve_project_root(cwd) or "")
     cur = conn.execute(
         "INSERT INTO projects(cwd, name, root, first_seen, last_seen)"
         " VALUES (?, ?, ?, ?, ?);",
-        (cwd, _project_name(cwd), root, now, now),
+        (cwd, _project_name(cwd), root or None, now, now),
     )
     return int(cur.lastrowid or 0)
 
@@ -430,9 +434,14 @@ def lookup_or_insert_file_path_id(
     """Resolve a file path to its lookup id; insert on first sight.
 
     On conflict, bumps last_seen. Returns None when path is None.
+
+    The path is canonicalized (expanduser + resolve) before the
+    SELECT/INSERT so tilde/symlink variants dedupe naturally via the
+    existing UNIQUE index on ``file_paths.path``.
     """
     if path is None:
         return None
+    path = canonicalize(path)
     row = conn.execute("SELECT id FROM file_paths WHERE path = ?;", (path,)).fetchone()
     if row is not None:
         conn.execute(

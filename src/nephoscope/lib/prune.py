@@ -16,7 +16,10 @@ from nephoscope.lib.db import _open
 
 
 def prune_candidates(
-    conn: sqlite3.Connection, *, stale_days: int = 30
+    conn: sqlite3.Connection,
+    *,
+    stale_days: int = 30,
+    now: dt.datetime | None = None,
 ) -> dict[str, int]:
     """Remove stale permission_candidates rows not awaiting decision.
 
@@ -30,13 +33,19 @@ def prune_candidates(
     Args:
         conn: Database connection.
         stale_days: Number of days before a candidate is considered stale.
+        now: Reference time used to compute the cutoff. Defaults to
+            ``datetime.now(tz=UTC)``. Injecting a fixed value lets callers
+            (tests in particular) compute a ``last_seen`` that lands exactly
+            on the cutoff without wall-clock drift between the two reads.
 
     Returns:
         A dict with keys 'candidates_deleted' and 'candidate_sessions_deleted'
         and their counts.
     """
+    if now is None:
+        now = dt.datetime.now(tz=dt.timezone.utc)
     cutoff = (
-        (dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=stale_days))
+        (now - dt.timedelta(days=stale_days))
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
