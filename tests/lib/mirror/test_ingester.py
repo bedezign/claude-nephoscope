@@ -2,8 +2,8 @@
 
 Positive cases cover all canonical forms observed in real settings.json files.
 Negative cases exercise every structural defect the ingester must reject.
-Round-trip tests couple with W1A's serializer (lib.mirror.serializer.serialize);
-they are skipped automatically until the serializer is fully implemented.
+Round-trip tests couple with the serializer (lib.mirror.serializer.serialize);
+they are skipped automatically when it is a stub.
 """
 
 from __future__ import annotations
@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from nephoscope.lib.mirror.ingester import IngesterError, parse_entry, parse_permissions_json
+from nephoscope.lib.mirror.ingester import (
+    IngesterError,
+    parse_entry,
+    parse_permissions_json,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -491,16 +495,16 @@ class TestParsePermissionsJsonErrors:
 
 
 # ---------------------------------------------------------------------------
-# Round-trip tests (coupled with W1A serializer)
+# Round-trip tests (coupled with the serializer)
 # ---------------------------------------------------------------------------
 
 
 class TestRoundTrip:
     """Ingest a canonical string → structured row → serialize → same string.
 
-    Skipped when lib.mirror.serializer.serialize raises NotImplementedError
-    (W1A stub).  The Wave 1 gate (task #5) runs the full suite once both
-    workers have landed their implementations.
+    Skipped when lib.mirror.serializer.serialize raises NotImplementedError —
+    a defensive guard for environments where the serializer implementation
+    is absent.
     """
 
     @pytest.fixture(autouse=True)
@@ -512,7 +516,7 @@ class TestRoundTrip:
             # Try with a known-good row that the stub would reject.
             serialize({"verb": "WebSearch"})
         except NotImplementedError:
-            pytest.skip("nephoscope.lib.mirror.serializer is a stub (W1A deliverable)")
+            pytest.skip("nephoscope.lib.mirror.serializer is a stub")
         except Exception:
             pass  # Real errors will surface in the round-trip tests themselves.
 

@@ -307,7 +307,7 @@ while IFS='|' read -r verb sub flags obs sessions <&3; do
     # Check if failure was a MirrorHashMismatch (external edit detected).
     if grep -qi "edited externally\|hash mismatch" "$_promote_stderr_file" 2>/dev/null; then
       rm -f "$_promote_stderr_file"
-      echo "Settings file modified externally. Run '/permissions reconcile' and retry."
+      echo "Settings file modified externally. Run '/nephoscope:permissions reconcile' and retry."
       exit 1
     fi
     cat "$_promote_stderr_file" >&2

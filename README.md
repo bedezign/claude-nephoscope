@@ -14,7 +14,7 @@ Nephoscope is distributed as a Claude Code plugin. Installing the plugin registe
 - Claude Code (recent release — plugin support is required).
 - Python 3.10 or newer, available on `PATH`.
 - [`uv`](https://docs.astral.sh/uv/) for dependency management. The SessionStart bootstrap hook calls `uv venv` and `uv pip install -e`.
-- SQLite CLI (`sqlite3`) for the `/permissions` slash command's ad-hoc queries.
+- SQLite CLI (`sqlite3`) for the `/nephoscope:permissions` slash command's ad-hoc queries.
 
 ## Install
 
@@ -151,7 +151,7 @@ nephoscope/
     hooks.json                         declares the 4 runtime hooks
     bootstrap.sh                       idempotent venv + package install
   commands/
-    permissions.md                     /permissions slash-command doc
+    permissions.md                     /nephoscope:permissions slash-command doc
   src/nephoscope/
     cli/
       init_cmd.py                      nephoscope-init CLI (explicit DB bootstrap)
@@ -186,7 +186,7 @@ nephoscope/
 1. Learner writes the DB row and commits.
 2. `lib.mirror.writer.sync_affected(permission_id)` acquires `flock` on the target mirror, re-hashes the on-disk file, and compares to the stored `sha256`.
 3. On match: build the new content from DB rows → write `<path>.tmp` → `fsync` → atomic `rename` → rehash → stamp `settings_json_sha256` + `settings_json_last_synced`.
-4. On hash mismatch: raise `MirrorHashMismatch`. The learner CLI surfaces `"Settings file modified externally. Run '/permissions reconcile' and retry."`
+4. On hash mismatch: raise `MirrorHashMismatch`. The learner CLI surfaces `"Settings file modified externally. Run '/nephoscope:permissions reconcile' and retry."`
 5. Three-attempt retry loop absorbs the rare race between re-hash and rename. Stale `.tmp` siblings older than 5 min get cleaned on startup.
 
 **Canonical forms** rendered by `serializer.py`:
@@ -205,7 +205,7 @@ nephoscope/
 
 ## Reconcile
 
-`/permissions reconcile` diffs the JSON mirror against the DB and offers three resolutions:
+`/nephoscope:permissions reconcile` diffs the JSON mirror against the DB and offers three resolutions:
 
 - `db-wins` — the DB is authoritative; the JSON file gets regenerated to match.
 - `json-wins` — the user's hand edits are authoritative; the DB adopts the JSON entries.
@@ -233,20 +233,20 @@ The JSON mirror is the primary gate: once a rule is in `settings.json`, the nati
 
 ## Review CLI
 
-Candidates accumulate as tool calls are observed. The primary entry is `/permissions review` from a Claude Code session (Claude Code expands `${CLAUDE_PLUGIN_ROOT}` for the hook-hosted shell). To invoke the script directly from a terminal, resolve the plugin cache path first:
+Candidates accumulate as tool calls are observed. The primary entry is `/nephoscope:permissions review` from a Claude Code session (Claude Code expands `${CLAUDE_PLUGIN_ROOT}` for the hook-hosted shell). To invoke the script directly from a terminal, resolve the plugin cache path first:
 
 ```bash
 PLUGIN_ROOT=$(ls -d ~/.claude/plugins/cache/bedezign/nephoscope/*/ | sort -V | tail -n1)
 bash "${PLUGIN_ROOT}src/nephoscope/learners/permission/scripts/review.sh"
 ```
 
-Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). The script shells out to `nephoscope-learn promote --sync`; on `MirrorHashMismatch` it stops and instructs the user to run `/permissions reconcile`.
+Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). The script shells out to `nephoscope-learn promote --sync`; on `MirrorHashMismatch` it stops and instructs the user to run `/nephoscope:permissions reconcile`.
 
 ## Fixture round-trip
 
 `src/nephoscope/learners/permission/config/fixtures/safe_shapes.yaml` is the durable, version-controlled snapshot of user trust decisions. `nephoscope-learn seed` loads it into the DB (and syncs mirrors); `nephoscope-learn seed --export` dumps the DB back to YAML.
 
-## `/permissions` subcommands
+## `/nephoscope:permissions` subcommands
 
 Full docs in `commands/permissions.md`. Key subcommands:
 
@@ -296,7 +296,7 @@ Test suites cover:
 - Housekeeping: GC, prune, sweep.
 - Mirror pipeline: serializer + ingester + writer (including `flock`, `fsync`, hash-mismatch, retry loop).
 - Reconcile engine (adopt / interactive / auto modes).
-- `/permissions` subcommands and end-to-end integration flow.
+- `/nephoscope:permissions` subcommands and end-to-end integration flow.
 
 **Regression guard:** `tests/test_live_db_isolation.py` records the live DB's sha256 at pytest collection (via a `pytest_configure` hook in `tests/conftest.py`) and asserts byte-equality at test-session end. This guards against the test-leak-to-live failure mode where a fixture or teardown inadvertently mutates the live DB during a test run.
 

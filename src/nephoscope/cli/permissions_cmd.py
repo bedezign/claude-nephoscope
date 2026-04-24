@@ -1,6 +1,6 @@
-"""Command-level implementations for /permissions subcommands.
+"""Command-level implementations for /nephoscope:permissions subcommands.
 
-Implements the new subcommands introduced in Wave 4:
+Subcommands:
   reconcile      Diff DB vs JSON mirror and (optionally) apply resolution.
   mirror_status  Print a table of global mirror + registered projects.
   mirror_dry_run Build mirror content from DB and write JSON to stdout.
@@ -44,7 +44,11 @@ def reconcile_cmd(
 
     Returns 0 on success, 1 on ReconcileError.
     """
-    from nephoscope.lib.mirror.reconcile import ReconcileReport, ReconcileError, reconcile
+    from nephoscope.lib.mirror.reconcile import (
+        ReconcileReport,
+        ReconcileError,
+        reconcile,
+    )
 
     from nephoscope.lib.mirror.writer import MirrorHashMismatch
 
@@ -235,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="nephoscope.cli.permissions_cmd",
-        description="Extended /permissions subcommands (Wave 4).",
+        description="Extended /nephoscope:permissions subcommands.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 

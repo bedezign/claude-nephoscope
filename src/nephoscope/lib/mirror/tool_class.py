@@ -133,5 +133,5 @@ def classify(verb: str) -> str:
     return "bash"
 
 
-# Alias used by W1B ingester — identical semantics, different call-site name.
+# Alias used by the ingester — identical semantics, different call-site name.
 tool_class_for = classify

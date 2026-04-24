@@ -1,9 +1,8 @@
-"""Tests for commands.permissions_cmd — Wave 4 /permissions subcommands.
+"""Tests for commands.permissions_cmd — /nephoscope:permissions subcommands.
 
-One happy-path test per new subcommand (reconcile, mirror-status,
-mirror-dry-run, reload-hint) + one hash-mismatch propagation test.
-Wave 1/2/3 covered doom-path / edge cases; this suite covers the command
-layer only.
+One happy-path test per subcommand (reconcile, mirror-status, mirror-dry-run,
+reload-hint) plus one hash-mismatch propagation test. Doom-path and edge-case
+coverage for the underlying lib.mirror primitives lives in tests/lib/mirror/.
 """
 
 from __future__ import annotations

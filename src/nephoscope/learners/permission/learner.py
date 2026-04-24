@@ -471,7 +471,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
                 path = str(exc).split(":")[0]
                 print(
                     f"settings file at {path} was edited externally — "
-                    f"run '/permissions reconcile' and retry",
+                    f"run '/nephoscope:permissions reconcile' and retry",
                     file=sys.stderr,
                 )
                 return 1
@@ -521,7 +521,7 @@ def _cmd_reject(args: argparse.Namespace) -> int:
                 path = str(exc).split(":")[0]
                 print(
                     f"settings file at {path} was edited externally — "
-                    f"run '/permissions reconcile' and retry",
+                    f"run '/nephoscope:permissions reconcile' and retry",
                     file=sys.stderr,
                 )
                 return 1
@@ -545,7 +545,11 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
     both NULL and non-NULL values (IS NULL when arg is None, IS <val>
     otherwise), satisfying the three-tier (session/project/global) lookup.
     """
-    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global, sync_project
+    from nephoscope.lib.mirror.writer import (
+        MirrorHashMismatch,
+        sync_global,
+        sync_project,
+    )
 
     flags_json = _parse_flags_arg(args.flags)
     path_spec: str | None = args.path_spec
@@ -596,7 +600,7 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
                 path = str(exc).split(":")[0]
                 print(
                     f"settings file at {path} was edited externally — "
-                    f"run '/permissions reconcile' and retry",
+                    f"run '/nephoscope:permissions reconcile' and retry",
                     file=sys.stderr,
                 )
                 return 1

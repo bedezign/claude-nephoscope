@@ -135,7 +135,7 @@ class TestClassify:
             classify(None)  # type: ignore[arg-type]
 
     def test_tool_class_for_alias_matches_classify(self):
-        """tool_class_for is the W1B ingester alias — must be identical."""
+        """tool_class_for is the ingester alias — must be identical."""
         for verb in ["Bash", "git", "Read", "Grep", "mcp__ns__*", "Agent"]:
             assert tool_class_for(verb) == classify(verb)
 
@@ -212,7 +212,7 @@ class TestSerializeBash:
 
 class TestSerializeFile:
     # ---- Ingester convention: path_spec has // prefix (from parse_entry) ----
-    # W1B's ingester stores path_spec including the // prefix so that
+    # The ingester stores path_spec including the // prefix so that
     # serialize(ingester_row) → canonical string without double-adding //.
 
     def test_read_ingester_format_double_slash(self):

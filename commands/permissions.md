@@ -4,6 +4,12 @@ argument-hint: "[status|review|scan|propose|list|promote|reject|unpermit|seed|pr
 allowed-tools: Bash(${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-*:*), Bash(${CLAUDE_PLUGIN_DATA}/.venv/bin/python:*), Bash(grep:*), Bash(cut:*), Bash(awk:*), Bash(sort:*), Bash(uniq:*), Bash(head:*), Bash(tail:*), Bash(sqlite3:*), Bash(pwd:*), Bash(cd:*), Bash(echo:*), Read
 ---
 
+## Invocation
+
+Always invoked as **`/nephoscope:permissions`**. The unqualified `/permissions`
+is Claude Code's built-in allow/deny UI; our command lives under the plugin
+namespace so the two don't collide.
+
 ## Context
 
 - Plugin venv: !`test -f "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" && echo "ready" || echo "not bootstrapped — start a new session and the SessionStart hook will install it"`
@@ -100,14 +106,14 @@ List permission rules with optional filtering.
 
 **Usage:**
 ```
-/permissions list [approved|rejected|candidates] [--tier global|project|session]
+/nephoscope:permissions list [approved|rejected|candidates] [--tier global|project|session]
 ```
 
 **Examples:**
-- `/permissions list` — all rules
-- `/permissions list approved --tier global` — approved global-tier rules
-- `/permissions list rejected --tier project` — rejected project-tier rules
-- `/permissions list candidates` — all candidates (not rules)
+- `/nephoscope:permissions list` — all rules
+- `/nephoscope:permissions list approved --tier global` — approved global-tier rules
+- `/nephoscope:permissions list rejected --tier project` — rejected project-tier rules
+- `/nephoscope:permissions list candidates` — all candidates (not rules)
 
 Implemented via SQLite queries:
 
@@ -125,7 +131,7 @@ Promote a candidate to an approved rule at the specified tier.
 
 **Usage:**
 ```
-/permissions promote --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session [--path-spec <spec>] [--reason <text>]
+/nephoscope:permissions promote --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session [--path-spec <spec>] [--reason <text>]
 ```
 
 ```bash
@@ -137,7 +143,7 @@ Promote a candidate to an approved rule at the specified tier.
 After the DB op, print one-line sync status: `sync: ok` or `sync: skipped (session-tier)`.
 
 On `MirrorHashMismatch` (exit 1): echo
-`"Settings file modified externally. Run '/permissions reconcile' and retry."`
+`"Settings file modified externally. Run '/nephoscope:permissions reconcile' and retry."`
 
 If flags promoted to wildcard (`*`), offer to subsume sibling concrete rules:
 
@@ -161,7 +167,7 @@ Reject a candidate (add a rejected rule).
 
 **Usage:**
 ```
-/permissions reject --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session [--reason <text>]
+/nephoscope:permissions reject --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session [--reason <text>]
 ```
 
 ```bash
@@ -178,7 +184,7 @@ Delete a permission rule.
 
 **Usage:**
 ```
-/permissions unpermit --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session
+/nephoscope:permissions unpermit --verb <verb> [--subcommand <sub>] --flags <flags> --tier global|project|session
 ```
 
 ```bash
@@ -194,11 +200,11 @@ Seed fixture rules (load from YAML or export to YAML).
 
 **Usage:**
 ```
-/permissions seed [--export]
+/nephoscope:permissions seed [--export]
 ```
 
-- `/permissions seed` — load `config/fixtures/safe_shapes.yaml` into the DB
-- `/permissions seed --export` — dump current `permissions` to stdout in YAML format
+- `/nephoscope:permissions seed` — load `config/fixtures/safe_shapes.yaml` into the DB
+- `/nephoscope:permissions seed --export` — dump current `permissions` to stdout in YAML format
 
 ```bash
 "${CLAUDE_PLUGIN_DATA}/.venv/bin/python" -m nephoscope.learners.permission.seed [--export]
@@ -212,7 +218,7 @@ Delete stale candidates (older than threshold, no corresponding ask_pending row)
 
 **Usage:**
 ```
-/permissions prune [--stale-days N]
+/nephoscope:permissions prune [--stale-days N]
 ```
 
 Default: 30 days.
@@ -227,7 +233,7 @@ Garbage collect: drop session-tier rules from idle sessions, drop stale ask_pend
 
 **Usage:**
 ```
-/permissions gc [--session-idle-days N] [--ask-pending-hours H]
+/nephoscope:permissions gc [--session-idle-days N] [--ask-pending-hours H]
 ```
 
 Defaults: 7 days (sessions), 1 hour (asks).
@@ -241,7 +247,7 @@ Defaults: 7 days (sessions), 1 hour (asks).
 Run both `prune` and `gc` in sequence.
 
 ```bash
-/permissions prune && /permissions gc
+/nephoscope:permissions prune && /nephoscope:permissions gc
 ```
 
 ### `reconcile [--project <path>]`
@@ -250,7 +256,7 @@ Diff the JSON mirror against the DB and (optionally) apply a resolution.
 
 **Usage:**
 ```
-/permissions reconcile [--project <settings-json-path>]
+/nephoscope:permissions reconcile [--project <settings-json-path>]
 ```
 
 - Omit `--project` to reconcile the global mirror.
@@ -277,7 +283,7 @@ Build the mirror JSON from DB (same path `sync_*` uses) and write to stdout — 
 
 **Usage:**
 ```
-/permissions mirror-dry-run [--project <settings-json-path>]
+/nephoscope:permissions mirror-dry-run [--project <settings-json-path>]
 ```
 
 ```bash
@@ -312,23 +318,23 @@ Touch `settings.json` mtime via `Path.touch()` to force Claude Code's settings r
 
 **View current state:**
 ```
-/permissions status
+/nephoscope:permissions status
 ```
 
 **Review and promote a candidate:**
 ```
-/permissions propose      # see candidates
-/permissions review       # walk through prompts
+/nephoscope:permissions propose      # see candidates
+/nephoscope:permissions review       # walk through prompts
 ```
 
 **Clean up old data:**
 ```
-/permissions prune --stale-days 30
-/permissions gc --session-idle-days 7
+/nephoscope:permissions prune --stale-days 30
+/nephoscope:permissions gc --session-idle-days 7
 ```
 
 **Export and seed fixture:**
 ```
-/permissions seed --export > my_rules.yaml
-/permissions seed            # reload from config/fixtures/safe_shapes.yaml
+/nephoscope:permissions seed --export > my_rules.yaml
+/nephoscope:permissions seed            # reload from config/fixtures/safe_shapes.yaml
 ```

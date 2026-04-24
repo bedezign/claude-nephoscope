@@ -169,7 +169,7 @@ def apply_fixtures(
             path = str(exc).split(":")[0]
             raise ValueError(
                 f"settings file at {path} was edited externally — "
-                f"run '/permissions reconcile' and retry"
+                f"run '/nephoscope:permissions reconcile' and retry"
             ) from exc
         except RuntimeError:
             pass  # global_mirror singleton not configured — skip sync
@@ -181,7 +181,7 @@ def apply_fixtures(
             path = str(exc).split(":")[0]
             raise ValueError(
                 f"settings file at {path} was edited externally — "
-                f"run '/permissions reconcile' and retry"
+                f"run '/nephoscope:permissions reconcile' and retry"
             ) from exc
         except (RuntimeError, ValueError):
             pass  # project mirror not configured — skip sync

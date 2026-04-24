@@ -13,7 +13,8 @@ Forbidden substrings (in priority order):
 4. ``rules/<kebab>.md`` — references to private rule pages.
 5. ``claude-peers`` — peer MCP server (not a functional dependency).
 6. ``continuous-learning-v2`` — predecessor skill.
-7. ``Phase [0-9]`` / ``WP[0-9]+`` — internal phase / work-package nomenclature.
+7. ``Phase [0-9]`` / ``WP[0-9]+`` / ``Wave [0-9]+`` / ``W[0-9]+[A-Z]`` —
+   internal phase, work-package, and wave nomenclature.
 
 Expected state: zero hits across the source tree.
 """
@@ -36,6 +37,8 @@ FORBIDDEN_RE = (
     r"|wiki\.bedezign\.casa"
     r"|Phase [0-9]"
     r"|WP[0-9]+"
+    r"|Wave [0-9]+"
+    r"|\bW[0-9]+[A-Z]\b"
 )
 
 
@@ -150,6 +153,8 @@ def test_hygiene_walker_detects_fixtures(tmp_path):
         "# wiki.bedezign.casa link",
         "# Phase 8.5 rewrite",
         "# WP7 wrap-up",
+        "# Wave 4 follow-up",
+        "# W1A deliverable",
     ]
 
     for forbidden_str in test_strings:
