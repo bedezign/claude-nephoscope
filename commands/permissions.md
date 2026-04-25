@@ -30,47 +30,116 @@ Parse `$ARGUMENTS` to extract the subcommand and options:
 
 ### `status` (default if no subcommand)
 
-Display current permission state: per-tier rule counts, candidate count, recent asks.
+Show a summary of the current permission state: approved/rejected rules per tier,
+queued asks and candidates, the most frequent asks, and a suggested next step.
 
 ```bash
 DB="${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"
-sqlite3 "$DB" <<EOF
-.headers on
-.mode column
-SELECT 'Approved global' as tier, COUNT(*) as count
-  FROM permissions p JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-  WHERE p.session_id IS NULL AND p.project_id IS NULL AND p.decision = 'approved'
-UNION ALL
-SELECT 'Rejected global', COUNT(*) FROM permissions p JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-  WHERE p.session_id IS NULL AND p.project_id IS NULL AND p.decision = 'rejected'
-UNION ALL
-SELECT 'Approved (project scope)', COUNT(*) FROM permissions p JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-  WHERE p.project_id IS NOT NULL AND p.decision = 'approved'
-UNION ALL
-SELECT 'Rejected (project scope)', COUNT(*) FROM permissions p JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-  WHERE p.project_id IS NOT NULL AND p.decision = 'rejected'
-UNION ALL
-SELECT 'Approved (session scope)', COUNT(*) FROM permissions p JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-  WHERE p.session_id IS NOT NULL AND p.decision = 'approved'
-UNION ALL
-SELECT 'Rejected (session scope)', COUNT(*) FROM permissions p JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-  WHERE p.session_id IS NOT NULL AND p.decision = 'rejected'
-UNION ALL
-SELECT 'Candidates pending', COUNT(*) FROM permission_candidates
-UNION ALL
-SELECT 'Asks pending', COUNT(*) FROM permission_ask_pending;
-EOF
-```
 
-Then show recent asks:
+# Collect every number we need in one sqlite3 call, tagged per line so the
+# formatter can pick fields without doing its own SQL. Pipe-separated so a
+# verb containing whitespace (e.g. an absolute path with spaces) still parses
+# as a single field. Output shape:
+#   M|<decision>|<tier>|<count>     rule-matrix cells
+#   A|<count>                       total asks pending
+#   C|<count>                       total candidates pending
+#   T|<verb>|<count>                top ask verbs (up to 5)
+sqlite3 "$DB" <<'EOF' | awk '
+BEGIN {
+  FS = "|"
+  # Rule-matrix defaults — always show zero cells.
+  decisions["approved"]=1; decisions["rejected"]=1
+  tiers["global"]=1; tiers["project"]=1; tiers["session"]=1
+  for (d in decisions) for (t in tiers) rules[d,t]=0
+  asks=0; candidates=0; top_count=0
+}
+$1 == "M" { rules[$2,$3] = $4 ; next }
+$1 == "A" { asks       = $2 ; next }
+$1 == "C" { candidates = $2 ; next }
+$1 == "T" { top_count++; top_verb[top_count]=$2; top_n[top_count]=$3 ; next }
+END {
+  # --- Rules matrix --------------------------------------------------------
+  printf "  Rules       %6s  %7s  %7s\n", "global", "project", "session"
+  printf "    approved  %6d  %7d  %7d\n",
+    rules["approved","global"], rules["approved","project"], rules["approved","session"]
+  printf "    rejected  %6d  %7d  %7d\n",
+    rules["rejected","global"], rules["rejected","project"], rules["rejected","session"]
+  printf "\n"
 
-```bash
-DB="${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"
-sqlite3 "$DB" <<EOF
-.headers on
-.mode column
-SELECT asked_at, verb, subcommand, flags FROM permission_ask_pending
-  ORDER BY asked_at DESC LIMIT 10;
+  # --- Queue block ---------------------------------------------------------
+  if (asks == 0 && candidates == 0) {
+    printf "  Queue:      no asks, no candidates. All caught up.\n"
+  } else {
+    if (asks > 0) {
+      printf "  Queue:      %d asks (prompts awaiting a rule)\n", asks
+      if (candidates > 0) {
+        printf "              %d candidates (recurring patterns for promotion)\n", candidates
+      } else {
+        printf "              0 candidates\n"
+      }
+    } else {
+      printf "  Queue:      0 asks\n"
+      printf "              %d candidates (recurring patterns for promotion)\n", candidates
+    }
+  }
+
+  # --- Top asks ------------------------------------------------------------
+  if (top_count > 0) {
+    line = "  Top asks:   "
+    for (i = 1; i <= top_count; i++) {
+      if (i > 1) line = line ", "
+      line = line top_verb[i] " \xc3\x97" top_n[i]
+    }
+    print line
+  }
+
+  # --- Try next ------------------------------------------------------------
+  if (asks > 0 || candidates > 0) {
+    # Pick a sample verb for the scoped-rule example. Use the dominant verb
+    # when one verb owns >= 60% of asks; otherwise fall back to "rm".
+    sample = "rm"
+    if (top_count > 0 && asks > 0) {
+      if (top_n[1] * 100 >= asks * 60) sample = top_verb[1]
+    }
+    printf "\n"
+    printf "  Try next:   /nephoscope:permissions scan \xe2\x86\x92 propose \xe2\x86\x92 review\n"
+    printf "  Or write a scoped rule directly, e.g. allow %s inside this project:\n", sample
+    printf "    /nephoscope:permissions promote --verb %s --flags '"'"'*'"'"' \\\n", sample
+    printf "        --path-spec '"'"'$PROJECT_ROOT/**'"'"' --tier project\n"
+  }
+}
+'
+.mode list
+.separator "|"
+-- Rules matrix: approved/rejected per tier.
+SELECT 'M', 'approved', 'global',  COUNT(*) FROM permissions
+ WHERE session_id IS NULL AND project_id IS NULL AND decision = 'approved'
+UNION ALL
+SELECT 'M', 'approved', 'project', COUNT(*) FROM permissions
+ WHERE project_id IS NOT NULL AND decision = 'approved'
+UNION ALL
+SELECT 'M', 'approved', 'session', COUNT(*) FROM permissions
+ WHERE session_id IS NOT NULL AND decision = 'approved'
+UNION ALL
+SELECT 'M', 'rejected', 'global',  COUNT(*) FROM permissions
+ WHERE session_id IS NULL AND project_id IS NULL AND decision = 'rejected'
+UNION ALL
+SELECT 'M', 'rejected', 'project', COUNT(*) FROM permissions
+ WHERE project_id IS NOT NULL AND decision = 'rejected'
+UNION ALL
+SELECT 'M', 'rejected', 'session', COUNT(*) FROM permissions
+ WHERE session_id IS NOT NULL AND decision = 'rejected';
+
+-- Queue totals.
+SELECT 'A', COUNT(*) FROM permission_ask_pending;
+SELECT 'C', COUNT(*) FROM permission_candidates;
+
+-- Top 5 ask verbs by count.
+SELECT 'T', verb, COUNT(*) AS n
+  FROM permission_ask_pending
+ GROUP BY verb
+ ORDER BY n DESC, verb ASC
+ LIMIT 5;
 EOF
 ```
 

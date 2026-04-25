@@ -23,10 +23,12 @@ import nephoscope.lib.db as db
 from nephoscope.learners.permission.learner import (
     Candidate,
     _candidate_leaf,
+    _describe_rule,
     _get_cursor,
     _parse_flags_arg,
     _resolve_tier_ids,
     _set_cursor,
+    _tier_phrase,
     main as learner_main,
     propose_promotions,
     scan_candidates,
@@ -1256,3 +1258,102 @@ class TestSubsumeSiblings:
         # Global permission should still be there.
         remaining = tmp_db.execute("SELECT COUNT(*) FROM permissions").fetchone()[0]
         assert remaining == 1
+
+
+# ---------------------------------------------------------------------------
+# _describe_rule / _tier_phrase — pure-function output formatters
+# ---------------------------------------------------------------------------
+
+
+class TestTierPhrase:
+    """_tier_phrase decodes tier tokens into plain-English phrases."""
+
+    def test_known_tiers_humanize(self):
+        assert _tier_phrase("global") == "everywhere"
+        assert _tier_phrase("project") == "in this project"
+        assert _tier_phrase("session") == "in this session"
+
+    def test_unknown_tier_falls_back_to_token(self):
+        # Defensive: an unrecognized tier value should not crash, just echo.
+        assert _tier_phrase("rogue") == "rogue"
+
+
+class TestDescribeRule:
+    """_describe_rule renders a rule shape as a plain-English description.
+
+    flags_json axis: literal sentinel "*" / valid JSON array / malformed string / empty list.
+    subcommand axis: None / non-empty string / empty string (falsy → no sub-part).
+    path_spec axis:  None / "" / arbitrary glob.
+    """
+
+    # ---- flags_json axis -----------------------------------------------
+
+    def test_wildcard_flags_sentinel(self):
+        out = _describe_rule("ls", None, "*", None)
+        assert out == "ls with any options"
+
+    def test_concrete_flags_array(self):
+        out = _describe_rule("git", "commit", '["--amend"]', None)
+        assert out == "git commit with options --amend"
+
+    def test_multiple_concrete_flags_preserve_order(self):
+        # JSON array entries are joined in their stored order — no sorting,
+        # so tests pin the exact rendering for stability.
+        out = _describe_rule("ls", None, '["-a","-l"]', None)
+        assert out == "ls with options -a -l"
+
+    def test_empty_flags_array_renders_no_options(self):
+        out = _describe_rule("ls", None, "[]", None)
+        assert out == "ls (no options)"
+
+    def test_malformed_flags_json_falls_back_to_no_options(self):
+        # Malformed JSON should not crash; the helper degrades to "(no options)".
+        out = _describe_rule("ls", None, "not-json", None)
+        assert out == "ls (no options)"
+
+    def test_none_flags_json_renders_no_options(self):
+        # None is an explicit valid input — early-exits to the no-options branch
+        # before json.loads is reached.
+        out = _describe_rule("ls", None, None, None)
+        assert out == "ls (no options)"
+
+    # ---- subcommand axis -----------------------------------------------
+
+    def test_subcommand_inserts_with_leading_space(self):
+        out = _describe_rule("git", "status", "[]", None)
+        assert out == "git status (no options)"
+
+    def test_none_subcommand_omits_sub_part(self):
+        out = _describe_rule("ls", None, "[]", None)
+        # No double space between verb and flags-part.
+        assert "  " not in out
+        assert out == "ls (no options)"
+
+    def test_empty_string_subcommand_omits_sub_part(self):
+        # Falsy subcommand should be treated like None — no stray space.
+        out = _describe_rule("ls", "", "[]", None)
+        assert out == "ls (no options)"
+        assert "  " not in out
+
+    # ---- path_spec axis ------------------------------------------------
+
+    def test_none_path_spec_renders_no_path_clause(self):
+        out = _describe_rule("ls", None, "[]", None)
+        assert "paths" not in out
+        assert out == "ls (no options)"
+
+    def test_empty_path_spec_renders_no_paths_clause(self):
+        out = _describe_rule("ls", None, "[]", "")
+        assert out == "ls (no options) (only when no paths are given)"
+
+    def test_glob_path_spec_renders_matching_clause(self):
+        out = _describe_rule("rm", None, "*", "$PROJECT_ROOT/**")
+        assert out == "rm with any options on paths matching $PROJECT_ROOT/**"
+
+    # ---- combined -------------------------------------------------------
+
+    def test_full_rule_combines_all_parts(self):
+        out = _describe_rule("git", "push", '["--force"]', "$HOME/projects/**")
+        assert (
+            out == "git push with options --force on paths matching $HOME/projects/**"
+        )

@@ -93,6 +93,49 @@ def test_mirror_status_happy_path(tmp_path: Path, capsys) -> None:
     assert "global" in captured.out
     assert "project:" in captured.out
     assert "hash_status" in captured.out  # header row present
+    # Stable status tokens still printed (header + at least one row).
+    assert "null" in captured.out
+    # Humanized word shown alongside the token for known statuses.
+    assert "(not tracked)" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# mirror-status: unknown status token does not duplicate itself
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_status_unknown_status_no_duplicate(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """If a row carries an unrecognized hash_status, do not print '<token> (<token>)'.
+
+    Guards against a future refactor that adds a fourth status without updating
+    _HASH_STATUS_WORDS. The fallback should print the bare token, not duplicate it
+    inside parentheses.
+    """
+    settings = tmp_path / "settings.json"
+    db_file = _make_db(tmp_path, settings)
+
+    from nephoscope.cli import permissions_cmd as mod
+
+    def _fake_rows(_conn):
+        return [
+            {
+                "scope": "global",
+                "path": str(settings),
+                "last_synced": None,
+                "hash_status": "weird",
+            }
+        ]
+
+    monkeypatch.setattr(mod, "_collect_mirror_rows", _fake_rows)
+
+    rc = mod.mirror_status_cmd(str(db_file))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "weird" in out  # token still shown
+    assert "weird (weird)" not in out  # but not duplicated inside parens
 
 
 # ---------------------------------------------------------------------------

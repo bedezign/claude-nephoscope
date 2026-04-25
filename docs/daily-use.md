@@ -1,0 +1,186 @@
+# Daily use
+
+Hands-on coverage of the commands you'll run day to day. For the concepts behind these commands, see [how it works](how-it-works.md). For copy-paste-ready command patterns, see [recipes](recipes.md).
+
+## Reading `/nephoscope:permissions status`
+
+`status` is the dashboard. Run it any time to see where things stand. A typical output looks like this:
+
+```
+  Rules       global  project  session
+    approved      14        2        0
+    rejected       3        0        0
+
+  Queue:      7 asks (prompts awaiting a rule)
+              2 candidates (recurring patterns for promotion)
+  Top asks:   rm ×4, curl ×2, chmod ×1
+
+  Try next:   /nephoscope:permissions scan → propose → review
+  Or write a scoped rule directly, e.g. allow rm inside this project:
+    /nephoscope:permissions promote --verb rm --flags '*' \
+        --path-spec '$PROJECT_ROOT/**' --tier project
+```
+
+Walk through it block by block.
+
+### Rules matrix
+
+The 2×3 grid at the top shows how many rules you currently have, broken down by decision (approved or rejected) and tier (global, project, session). In this example you have 14 global allow-rules, 2 project-scoped allow-rules, no session rules, and 3 global deny-rules.
+
+A healthy mature install usually has a small double-digit number of global approved rules for your most-used read-only commands (`ls`, `cat`, `grep`, `git` read operations), a handful of project-tier rules for a few specific projects, and a small number of rejected rules for things you never want done.
+
+### Queue
+
+Two numbers here:
+
+- **Asks** are permission prompts that have already happened but don't yet have a rule covering them. Each ask started life as a click on *Allow* or *Deny*; it sits in the queue until either a rule gets written or the ask is cleaned up.
+- **Candidates** are recurring patterns nephoscope has flagged as ready for review. A candidate is born from a handful of related asks — if you've approved `rm` a few times on different paths, a candidate for `rm` will show up here.
+
+If both numbers are zero, you're caught up. `status` will say so and skip the *Try next* block.
+
+### Top asks
+
+The most frequent verbs in the ask queue. If Claude keeps asking about `rm`, `rm` will be on top here. This is your hint about what's worth promoting next.
+
+### Try next
+
+A suggested next step. If there are asks or candidates pending, `status` points you at the scan → propose → review flow, and also shows a concrete `promote` command for the most common verb, so you can copy-paste a starter rule if you'd rather not go through the queue.
+
+## Reviewing candidates
+
+The `scan → propose → review` pipeline turns piled-up asks into actual rules. You'll run it when *Top asks* starts to look repetitive.
+
+### `scan`
+
+```
+/nephoscope:permissions scan
+```
+
+This looks at recent asks, groups related ones together, and writes candidates into the database. It's fast and idempotent — run it as often as you like. Nothing changes about Claude's behaviour yet; you're just letting the tool notice patterns.
+
+### `propose`
+
+```
+/nephoscope:permissions propose
+```
+
+Lists candidates that meet the threshold for review — typically, patterns that have shown up enough times that nephoscope thinks they're worth promoting. If the list is empty, there's nothing ripe yet; come back after more activity.
+
+### `review`
+
+```
+/nephoscope:permissions review
+```
+
+The interactive part. For each candidate you'll see:
+
+1. **Which verb.** E.g. "`rm` has shown up 5 times in the last day."
+2. **Paths: literal or generalize?** If the asks were on `build/a.o`, `build/b.o`, `build/c.o`, nephoscope may offer a choice: narrow (match only that exact path), or generalize to a placeholder-based pattern like `$PROJECT_ROOT/build/**`.
+3. **Flags: literal or wildcard?** Same idea for the options passed to the command. Match exactly the flags you've seen, or allow any flags with `*`.
+4. **Tier.** Session, project, or global. The walkthrough explains what each means inline.
+
+At the end of each candidate you either approve it (becomes an allow-rule), reject it (becomes a deny-rule), or skip it (nephoscope asks again next time). Approved and rejected rules are written to the database, and the matching settings file is updated immediately so Claude Code picks them up right away.
+
+If you need to bail out mid-review, hit Ctrl-C. Your already-answered candidates stay as rules; the unanswered ones remain candidates for next time.
+
+## Writing a rule by hand
+
+Worked example: you keep getting asked about `rm` while working inside one specific project. You don't want to allow `rm` everywhere — that's too broad — but you do trust yourself to remove files inside this project's tree.
+
+The command:
+
+```
+/nephoscope:permissions promote --verb rm --flags '*' --path-spec '$PROJECT_ROOT/**' --tier project
+```
+
+Piece by piece:
+
+- **`--verb rm`** — this rule is about the `rm` command.
+- **`--flags '*'`** — match `rm` with *any* options. `rm file`, `rm -rf folder`, `rm -i thing` — all of them. Without this, the rule would match only `rm` with no options at all.
+- **`--path-spec '$PROJECT_ROOT/**'`** — only match when the path being removed is somewhere inside the current project. The `**` part means "any depth", so subfolders are covered too. If you ran `rm` against a file in your home directory, this rule would *not* match and you'd still get a prompt.
+- **`--tier project`** — store the rule as a project rule, not a global one. It will apply automatically the next time you open Claude Code in this project, and not in any other project.
+
+After you run that command, two things happen:
+
+1. The rule is saved in nephoscope's database.
+2. The rule is written into the project's `.claude/settings.local.json` file (or your `~/.claude/settings.json` for global rules), so Claude Code's built-in permission gate can use it.
+
+From the next prompt onward, `rm` inside the project just works — no popup.
+
+## Undoing a rule
+
+If you promoted something by mistake, or you changed your mind:
+
+```
+/nephoscope:permissions unpermit --verb rm --flags '*' --tier project
+```
+
+The flags must match the rule you originally wrote. If you only want to remove the rule for this session and keep the global one, pass `--tier session`. If you want to remove the global one and keep a project-specific one, pass `--tier global`. The match is exact — only the rule at the named tier is touched.
+
+Not sure what's in place? List first:
+
+```
+/nephoscope:permissions list
+```
+
+That prints every rule as a table. Copy the exact verb, flags, and tier from the row you want to remove and paste them into the `unpermit` command.
+
+## Troubleshooting
+
+### Claude still asks about X even though I approved it
+
+Most likely explanations, in order:
+
+1. **You promoted at the session tier and started a new chat.** Session-tier rules live only for the current Claude Code conversation. When the chat ends, the rule is gone. Run `/nephoscope:permissions status` — if the rule you expected is missing, re-promote at `--tier project` or `--tier global` so it sticks.
+2. **The flags don't match.** A rule for `rm` with `--flags '[]'` (no options) won't match `rm -rf`. Use `--flags '*'` if you want any options allowed, or list exactly the flags you use. Re-run `/nephoscope:permissions list` to see what's actually stored.
+3. **The path-spec doesn't cover the path.** `$PROJECT_ROOT/**` matches anywhere in the current project but nothing outside it. If you're running the command from a different working directory, check what `$PROJECT_ROOT` resolves to.
+
+### `mirror-status` shows a mismatch
+
+`mirror-status` compares what nephoscope thinks your settings file should be against what's actually on disk. A mismatch means something else changed the file — usually a hand-edit or another tool.
+
+Run:
+
+```
+/nephoscope:permissions reconcile
+```
+
+This shows you the difference and asks which side should win: the database, the file, or per-entry (a walkthrough that lets you pick for each differing rule). For a first reconcile on a file nephoscope has never touched before, the default is to adopt what's already there (so existing rules land in the database cleanly).
+
+### I see 0 rules but I've approved lots of things via Claude Code's UI
+
+Two separate things are going on here.
+
+First: Claude Code has its own "allow always" option in the permission dialog, and that writes straight to `~/.claude/settings.json`. Those entries are real, persistent rules — they work — but they bypass nephoscope. On the next run of `/nephoscope:permissions reconcile`, nephoscope notices those entries and adopts them into its own database, after which they show up in `status` counts.
+
+Second: approving a Claude Code prompt through the normal (non-"always") path doesn't create a rule at all. It only records the ask in nephoscope's database. To turn those approvals into real rules, run the learner pipeline:
+
+```
+/nephoscope:permissions scan
+/nephoscope:permissions propose
+/nephoscope:permissions review
+```
+
+Or, if you already know what you want, skip the queue and use `promote` directly as shown above.
+
+### How do I wipe everything and start over
+
+Delete the database file. That erases every ask, every candidate, and every rule nephoscope has learned:
+
+```bash
+rm "${CLAUDE_PLUGIN_DATA:-$HOME/.claude/plugins/data/nephoscope-bedezign}/observations.db"
+```
+
+The next time a tool call fires, the recorder lazily recreates an empty database.
+
+One caveat: deleting the database does not clean up the rule entries nephoscope already mirrored into your Claude Code settings files. Either remove those entries by hand for a fully fresh state, or run `/nephoscope:permissions reconcile` afterwards and pick *json-wins* to re-import them into the new database.
+
+## Next
+
+- [Recipes](recipes.md) — starter patterns for common situations.
+- [Reference](reference.md) — environment variables, placeholders, subcommand table.
+
+## See also
+
+- [How it works](how-it-works.md) — the concepts behind the dashboard and the pipeline.
+- [`../commands/permissions.md`](../commands/permissions.md) — every flag, every subcommand.

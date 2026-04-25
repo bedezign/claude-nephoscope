@@ -59,18 +59,25 @@ def reconcile_cmd(
         print(f"reconcile error: {exc}", file=sys.stderr)
         return 1
     except MirrorHashMismatch as exc:
-        print(f"reconcile error: hash mismatch — {exc}", file=sys.stderr)
+        print(
+            f"reconcile error: settings file was edited externally — {exc}",
+            file=sys.stderr,
+        )
         return 1
     finally:
         conn.close()
 
-    first = " [first-touch: auto-adopt]" if report.first_touch else ""
+    first = (
+        " (first-time setup: adopted what was in the file)"
+        if report.first_touch
+        else ""
+    )
     print(
-        f"reconcile mode={report.mode}{first}: "
-        f"applied={report.applied} "
-        f"inserts={report.db_inserts} "
-        f"deletes={report.db_deletes} "
-        f"updates={report.db_updates}"
+        f"reconcile finished (mode={report.mode}){first}:"
+        f" applied {report.applied} change(s),"
+        f" added {report.db_inserts} rule(s),"
+        f" removed {report.db_deletes} rule(s),"
+        f" updated {report.db_updates} rule(s)."
     )
     return 0
 
@@ -78,6 +85,13 @@ def reconcile_cmd(
 # ---------------------------------------------------------------------------
 # mirror_status
 # ---------------------------------------------------------------------------
+
+
+_HASH_STATUS_WORDS = {
+    "stamped": "in sync",
+    "null": "not tracked",
+    "mismatch": "file changed externally",
+}
 
 
 def mirror_status_cmd(db_path: str | Path) -> int:
@@ -92,7 +106,7 @@ def mirror_status_cmd(db_path: str | Path) -> int:
     finally:
         conn.close()
 
-    # Header
+    # Header — column names are stable tokens (hash_status is asserted in tests).
     print(f"{'scope':<20}  {'path':<50}  {'last_synced':<26}  hash_status")
     print("-" * 110)
     for row in rows:
@@ -100,15 +114,15 @@ def mirror_status_cmd(db_path: str | Path) -> int:
         path = row["path"] or "(not set)"
         last_synced = row["last_synced"] or "(never)"
         hash_status = row["hash_status"]
-        print(f"{scope:<20}  {path:<50}  {last_synced:<26}  {hash_status}")
+        status_word = _HASH_STATUS_WORDS.get(hash_status)
+        suffix = f" ({status_word})" if status_word else ""
+        print(f"{scope:<20}  {path:<50}  {last_synced:<26}  {hash_status}{suffix}")
     return 0
 
 
 def _hash_status(path_str: str | None, stored_hash: str | None) -> str:
     """Compute hash_status: stamped | null | mismatch."""
-    if stored_hash is None:
-        return "null"
-    if path_str is None:
+    if stored_hash is None or path_str is None:
         return "null"
     p = Path(path_str).expanduser()
     if not p.exists():
@@ -131,12 +145,10 @@ def _collect_mirror_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             {
                 "scope": "global",
                 "path": gm[0],
-                "last_synced": gm[1] if len(gm) > 2 else gm[1],
+                "last_synced": gm[2],
                 "hash_status": _hash_status(gm[0], gm[1]),
             }
         )
-        # gm[2] is last_synced
-        rows[-1]["last_synced"] = gm[2] if gm[2] is not None else None
 
     projects = conn.execute(
         "SELECT id, cwd, settings_json_path, settings_json_sha256, settings_json_last_synced"
@@ -221,10 +233,17 @@ def reload_hint_cmd(settings_path: str | Path) -> int:
     """
     p = Path(settings_path)
     if not p.exists():
-        print(f"reload-hint: {p} does not exist; nothing to touch", file=sys.stderr)
+        print(
+            f"reload-hint: the file {p} does not exist, so there is"
+            " nothing to refresh.",
+            file=sys.stderr,
+        )
         return 1
     p.touch()
-    print(f"reload-hint: touched {p}")
+    print(
+        f"reload-hint: refreshed {p} so Claude Code will pick up the"
+        " latest permission rules."
+    )
     return 0
 
 
@@ -239,45 +258,129 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="nephoscope.cli.permissions_cmd",
-        description="Extended /nephoscope:permissions subcommands.",
+        description=(
+            "Housekeeping commands for nephoscope permission rules.\n"
+            "\n"
+            "These tools help you keep Claude Code's settings.json file\n"
+            "and the nephoscope rules database in agreement, and to inspect\n"
+            "or refresh them when needed."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("reconcile", help="Diff DB vs JSON mirror and resolve.")
-    r.add_argument("--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db")
+    _db_help = (
+        "Path to the nephoscope observations database file.\n"
+        "Defaults to the OBSERVABILITY_DB environment variable."
+    )
+
+    r = sub.add_parser(
+        "reconcile",
+        help=(
+            "Compare the rules database with the settings.json file and make\n"
+            "them match."
+        ),
+        description=(
+            "Compare the rules stored in the database with what is in the\n"
+            "settings.json file, and apply a resolution — either by updating\n"
+            "the database from the file, or writing the database rules back\n"
+            "out to the file."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    r.add_argument(
+        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
+    )
     r.add_argument(
         "--project",
         default=None,
         dest="target_path",
-        help="Path to settings JSON to reconcile (default: global mirror).",
+        help=(
+            "Path to a project-specific settings.json file to reconcile.\n"
+            "Leave out to reconcile the global settings file."
+        ),
     )
     r.add_argument(
         "--mode",
         default="interactive",
         choices=["interactive", "plan", "auto-db-wins", "auto-json-wins", "adopt"],
+        help=(
+            "How to resolve differences. One of:\n"
+            "  interactive       ask about each difference (the default)\n"
+            "  plan              show the differences without changing anything\n"
+            "  auto-db-wins      overwrite the file with the database rules\n"
+            "  auto-json-wins    update the database to match the file\n"
+            "  adopt             trust the file on the first sync only"
+        ),
     )
 
-    ms = sub.add_parser("mirror-status", help="Print mirror table.")
-    ms.add_argument("--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db")
+    ms = sub.add_parser(
+        "mirror-status",
+        help="Show which settings files are being tracked and their status.",
+        description=(
+            "Print a table showing the global settings file and every project\n"
+            "that has its own settings file, along with when each was last\n"
+            "synchronized and whether it still matches what was recorded."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    ms.add_argument(
+        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
+    )
 
-    md = sub.add_parser("mirror-dry-run", help="Print mirror JSON to stdout.")
-    md.add_argument("--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db")
+    md = sub.add_parser(
+        "mirror-dry-run",
+        help="Preview what would be written to a settings file, without writing it.",
+        description=(
+            "Build the JSON that would be written to the given settings file\n"
+            "based on the current database rules, and print it to standard\n"
+            "output. No file is changed."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    md.add_argument(
+        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
+    )
     md.add_argument(
         "--project",
         default=None,
         dest="target_path",
-        help="Project settings path (omit for global).",
+        help=(
+            "Path to a project-specific settings.json file to preview.\n"
+            "Leave out to preview the global settings file."
+        ),
     )
 
-    rh = sub.add_parser("reload-hint", help="Touch settings.json mtime.")
-    rh.add_argument("--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db")
-    rh.add_argument("--settings-path", required=True, dest="settings_path")
+    rh = sub.add_parser(
+        "reload-hint",
+        help=("Refresh a settings file's timestamp so Claude Code re-reads it."),
+        description=(
+            "Update the modification time of a settings.json file so that\n"
+            "Claude Code notices the change and re-reads the file. Useful\n"
+            "when rules were changed in the database but the settings file\n"
+            "itself has not been modified."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    rh.add_argument(
+        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
+    )
+    rh.add_argument(
+        "--settings-path",
+        required=True,
+        dest="settings_path",
+        help="Path of the settings.json file whose timestamp should be refreshed.",
+    )
 
     args = parser.parse_args(argv)
 
     if args.cmd == "reconcile":
         if not args.db:
-            print("reconcile: --db or OBSERVABILITY_DB required", file=sys.stderr)
+            print(
+                "reconcile: please give a database path with --db, or set the"
+                " OBSERVABILITY_DB environment variable.",
+                file=sys.stderr,
+            )
             return 1
         if not args.target_path:
             # Resolve global mirror path from DB.
@@ -287,20 +390,32 @@ def main(argv: list[str] | None = None) -> int:
             ).fetchone()
             conn.close()
             if not row or not row[0]:
-                print("reconcile: global_mirror not configured", file=sys.stderr)
+                print(
+                    "reconcile: the global settings file path has not been"
+                    " set up yet in the database.",
+                    file=sys.stderr,
+                )
                 return 1
             args.target_path = row[0]
         return reconcile_cmd(args.db, args.target_path, mode=args.mode)
 
     elif args.cmd == "mirror-status":
         if not args.db:
-            print("mirror-status: --db or OBSERVABILITY_DB required", file=sys.stderr)
+            print(
+                "mirror-status: please give a database path with --db, or set"
+                " the OBSERVABILITY_DB environment variable.",
+                file=sys.stderr,
+            )
             return 1
         return mirror_status_cmd(args.db)
 
     elif args.cmd == "mirror-dry-run":
         if not args.db:
-            print("mirror-dry-run: --db or OBSERVABILITY_DB required", file=sys.stderr)
+            print(
+                "mirror-dry-run: please give a database path with --db, or set"
+                " the OBSERVABILITY_DB environment variable.",
+                file=sys.stderr,
+            )
             return 1
         return mirror_dry_run_cmd(args.db, args.target_path)
 

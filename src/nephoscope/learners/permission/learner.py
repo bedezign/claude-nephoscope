@@ -297,8 +297,54 @@ def _connect() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
-def _format_flags(flags: frozenset[str]) -> str:
-    return " ".join(sorted(flags)) if flags else "-"
+_TIER_NAME = {
+    "global": "everywhere",
+    "project": "in this project",
+    "session": "in this session",
+}
+
+
+def _tier_phrase(tier: str) -> str:
+    """Turn a tier name into a plain-English phrase for user output."""
+    return _TIER_NAME.get(tier, tier)
+
+
+def _describe_rule(
+    verb: str,
+    subcommand: str | None,
+    flags_json: str | None,
+    path_spec: str | None,
+) -> str:
+    """Render a rule shape as a plain-English command description.
+
+    flags_json accepts None as well as string forms because some callers
+    (e.g. malformed DB rows) may pass null-equivalents; the function
+    degrades gracefully to the no-options branch.
+    """
+    sub_part = f" {subcommand}" if subcommand else ""
+
+    if flags_json == "*":
+        flags_part = " with any options"
+    elif flags_json is None:
+        flags_part = " (no options)"
+    else:
+        try:
+            flags = json.loads(flags_json)
+        except json.JSONDecodeError:
+            flags = []
+        if flags:
+            flags_part = f" with options {' '.join(str(f) for f in flags)}"
+        else:
+            flags_part = " (no options)"
+
+    if path_spec is None:
+        path_part = ""
+    elif path_spec == "":
+        path_part = " (only when no paths are given)"
+    else:
+        path_part = f" on paths matching {path_spec}"
+
+    return f"{verb}{sub_part}{flags_part}{path_part}"
 
 
 def _parse_flags_arg(raw: str | None) -> str:
@@ -323,14 +369,6 @@ def _parse_flags_arg(raw: str | None) -> str:
     if not isinstance(parsed, list):
         raise SystemExit("error: --flags must be a JSON array literal, e.g. '[]'")
     return db.minify_json(sorted(str(x) for x in parsed))
-
-
-def _format_cli_flags(flags_json: str) -> str:
-    """Render a stored flags-json blob as a compact list for CLI output."""
-    try:
-        return str(json.loads(flags_json))
-    except (json.JSONDecodeError, TypeError):
-        return flags_json
 
 
 def _resolve_tier_ids(
@@ -373,16 +411,23 @@ def _cmd_scan(_args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
-    print(f"scanned {processed} tool_call rows past cursor")
+    if processed == 0:
+        print("No new Bash commands since the last scan.")
+    else:
+        cmd_word = "command" if processed == 1 else "commands"
+        print(f"Scanned {processed} new Bash {cmd_word} since the last run.")
     if not proposals:
-        print("no promotion candidates meet thresholds yet")
+        print("No recurring patterns are ready to promote yet.")
         return 0
-    print(f"{len(proposals)} candidate(s) eligible for promotion:")
+    rule_word = "rule" if len(proposals) == 1 else "rules"
+    print(f"{len(proposals)} pattern(s) ready to promote to {rule_word}:")
     for c in proposals:
-        sub = c.subcommand or "-"
+        flags_json = json.dumps(sorted(c.flags))
+        description = _describe_rule(c.verb, c.subcommand, flags_json, None)
         print(
-            f"  {c.verb:<10} {sub:<15} flags=[{_format_flags(c.flags)}] "
-            f"obs={c.observations} sessions={c.distinct_sessions}"
+            f"  {description}"
+            f"  — seen {c.observations} times across"
+            f" {c.distinct_sessions} session(s)"
         )
     return 0
 
@@ -402,17 +447,15 @@ def _cmd_candidates(_args: argparse.Namespace) -> int:
         conn.close()
 
     if not rows:
-        print("permission_candidates is empty")
+        print("No command patterns have been noticed yet.")
         return 0
+    print(f"{len(rows)} command pattern(s) noticed so far:")
     for verb, subcommand, flags_json, obs, sess, first_seen, last_seen in rows:
-        sub = subcommand or "-"
-        try:
-            flags = json.loads(flags_json)
-        except (json.JSONDecodeError, TypeError):
-            flags = []
+        description = _describe_rule(verb, subcommand, flags_json, None)
         print(
-            f"  {verb:<10} {sub:<15} flags={flags} "
-            f"obs={obs} sessions={sess} first={first_seen} last={last_seen}"
+            f"  {description}"
+            f"  — seen {obs} times across {sess} session(s),"
+            f" first {first_seen}, last {last_seen}"
         )
     return 0
 
@@ -437,8 +480,8 @@ def _cmd_propose(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_promote(args: argparse.Namespace) -> int:
-    """Upsert a rule_shape and insert an 'approved' permissions row."""
+def _cmd_write_permission(args: argparse.Namespace, decision: str) -> int:
+    """Upsert a rule_shape and insert a permission row for the given decision."""
     from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_affected
 
     flags_json = _parse_flags_arg(args.flags)
@@ -458,7 +501,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
             shape_id,
             session_id,
             project_id,
-            "approved",
+            decision,
             "learner",
             now,
             args.reason,
@@ -470,72 +513,31 @@ def _cmd_promote(args: argparse.Namespace) -> int:
             except MirrorHashMismatch as exc:
                 path = str(exc).split(":")[0]
                 print(
-                    f"settings file at {path} was edited externally — "
-                    f"run '/nephoscope:permissions reconcile' and retry",
+                    f"The settings file at {path} was edited externally — "
+                    f"run '/nephoscope:permissions reconcile' and retry.",
                     file=sys.stderr,
                 )
                 return 1
     finally:
         conn.close()
 
-    sub = args.subcommand or "-"
-    ps = f" path_spec={path_spec!r}" if path_spec is not None else ""
-    print(
-        f"promoted: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f" tier={args.tier}{ps}"
-    )
+    description = _describe_rule(args.verb, args.subcommand, flags_json, path_spec)
+    if decision == "approved":
+        print(f"Approved {_tier_phrase(args.tier)}: {description}.")
+    else:
+        reason_part = f" (reason: {args.reason})" if args.reason else ""
+        print(f"Rejected {_tier_phrase(args.tier)}: {description}{reason_part}.")
     return 0
+
+
+def _cmd_promote(args: argparse.Namespace) -> int:
+    """Upsert a rule_shape and insert an 'approved' permissions row."""
+    return _cmd_write_permission(args, "approved")
 
 
 def _cmd_reject(args: argparse.Namespace) -> int:
     """Upsert a rule_shape and insert a 'rejected' permissions row."""
-    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_affected
-
-    flags_json = _parse_flags_arg(args.flags)
-    path_spec: str | None = args.path_spec
-    conn = _connect()
-    try:
-        session_id, project_id = _resolve_tier_ids(
-            conn, args.tier, args.session_id, args.project_id
-        )
-        db = _lib_db()
-        now = _now()
-        shape_id = db.upsert_rule_shape(
-            conn, args.verb, args.subcommand, flags_json, path_spec, now
-        )
-        perm_id = db.insert_permission(
-            conn,
-            shape_id,
-            session_id,
-            project_id,
-            "rejected",
-            "learner",
-            now,
-            args.reason,
-        )
-        # Mirror sync: session-tier rules have no JSON analogue; skip them.
-        if session_id is None:
-            try:
-                sync_affected(conn, perm_id)
-            except MirrorHashMismatch as exc:
-                path = str(exc).split(":")[0]
-                print(
-                    f"settings file at {path} was edited externally — "
-                    f"run '/nephoscope:permissions reconcile' and retry",
-                    file=sys.stderr,
-                )
-                return 1
-    finally:
-        conn.close()
-
-    sub = args.subcommand or "-"
-    ps = f" path_spec={path_spec!r}" if path_spec is not None else ""
-    reason_part = f" reason={args.reason!r}" if args.reason else ""
-    print(
-        f"rejected: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f" tier={args.tier}{ps}{reason_part}"
-    )
-    return 0
+    return _cmd_write_permission(args, "rejected")
 
 
 def _cmd_unpermit(args: argparse.Namespace) -> int:
@@ -569,11 +571,11 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
             (args.verb, args.subcommand, flags_json, path_spec),
         ).fetchone()
         if row is None:
+            description = _describe_rule(
+                args.verb, args.subcommand, flags_json, path_spec
+            )
             print(
-                f"no matching rule_shape for verb={args.verb!r} "
-                f"subcommand={args.subcommand!r} "
-                f"flags={_format_cli_flags(flags_json)} "
-                f"path_spec={path_spec!r}",
+                f"No rule found matching: {description}.",
                 file=sys.stderr,
             )
             return 1
@@ -599,25 +601,19 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
             except MirrorHashMismatch as exc:
                 path = str(exc).split(":")[0]
                 print(
-                    f"settings file at {path} was edited externally — "
-                    f"run '/nephoscope:permissions reconcile' and retry",
+                    f"The settings file at {path} was edited externally — "
+                    f"run '/nephoscope:permissions reconcile' and retry.",
                     file=sys.stderr,
                 )
                 return 1
     finally:
         conn.close()
 
-    sub = args.subcommand or "-"
+    description = _describe_rule(args.verb, args.subcommand, flags_json, path_spec)
     if deleted == 0:
-        print(
-            f"no matching permission row for verb={args.verb!r} "
-            f"subcommand={args.subcommand!r} tier={args.tier}"
-        )
+        print(f"No matching rule found {_tier_phrase(args.tier)}: {description}.")
         return 0
-    print(
-        f"unpermitted: {args.verb} {sub} flags={_format_cli_flags(flags_json)}"
-        f" tier={args.tier} ({deleted} row(s) deleted)"
-    )
+    print(f"Removed {_tier_phrase(args.tier)}: {description}.")
     return 0
 
 
@@ -792,7 +788,13 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
-    print(f"subsumed {deleted} concrete sibling rule(s)")
+    rule_word = "rule" if deleted == 1 else "rules"
+    if deleted == 0:
+        print(f"Removed 0 more-specific {rule_word} (nothing to clean up).")
+    else:
+        print(
+            f"Removed {deleted} more-specific {rule_word} that the wildcard rule now covers."
+        )
     return 0
 
 
@@ -812,8 +814,9 @@ def _cmd_permissions(_args: argparse.Namespace) -> int:
         conn.close()
 
     if not rows:
-        print("permissions table is empty")
+        print("No permission rules have been set up yet.")
         return 0
+    print(f"{len(rows)} permission rule(s):")
     for (
         verb,
         subcommand,
@@ -825,16 +828,12 @@ def _cmd_permissions(_args: argparse.Namespace) -> int:
         decided_at,
         reason,
     ) in rows:
-        sub = subcommand or "-"
-        try:
-            flags = json.loads(flags_json)
-        except (json.JSONDecodeError, TypeError):
-            flags = []
-        ps = f" path_spec={path_spec!r}" if path_spec is not None else ""
-        reason_part = f" reason={reason!r}" if reason else ""
+        description = _describe_rule(verb, subcommand, flags_json, path_spec)
+        decision_word = "APPROVED" if decision == "approved" else "REJECTED"
+        reason_part = f' — "{reason}"' if reason else ""
         print(
-            f"  {decision:<8} {tier:<8} {verb:<10} {sub:<15} "
-            f"flags={flags}{ps} source={source} at={decided_at}{reason_part}"
+            f"  [{decision_word}] {_tier_phrase(tier)}: {description}"
+            f"  (set {decided_at} by {source}){reason_part}"
         )
     return 0
 
@@ -843,20 +842,81 @@ def _cmd_permissions(_args: argparse.Namespace) -> int:
 # argparse
 # ---------------------------------------------------------------------------
 
-_tier_help = "Tier: session, project, or global (default: global)."
-_session_id_help = "sessions.id integer (required when --tier session)."
-_project_id_help = "projects.id integer (required when --tier project)."
-_verb_help = "Command verb, e.g. 'git'."
-_subcommand_help = "Subcommand (omit for no-subcommand verbs; matches NULL)."
+_tier_help = (
+    "How widely the rule applies. One of:\n"
+    "\n"
+    "  global   applies everywhere you use Claude Code (the default)\n"
+    "  project  applies only in the current project\n"
+    "  session  applies only in the current Claude Code session\n"
+    "\n"
+    'Use "project" when the permission only makes sense in one codebase\n'
+    '(for example, allowing a project-specific build command). Use "session"\n'
+    "for a one-off trial that should disappear when the session ends.\n"
+    "\n"
+    "--tier session requires --session-id; --tier project requires --project-id."
+)
+_session_id_help = (
+    "Internal numeric ID of the session (from the observations database).\n"
+    "Required when --tier session. Usually filled in by the review tool for you."
+)
+_project_id_help = (
+    "Internal numeric ID of the project (from the observations database).\n"
+    "Required when --tier project. Usually filled in by the review tool for you."
+)
+_verb_help = (
+    'The command name this rule is about — for example, "git", "ls", or "rm".\n'
+    "\n"
+    "You can also give an absolute path to a specific executable\n"
+    '(for example, "/usr/local/bin/my-tool"). If the path sits under your\n'
+    "home, project root, or current working directory, you may use the\n"
+    "matching placeholder ($HOME, $PROJECT_ROOT, $CWD) instead, like\n"
+    '"$PROJECT_ROOT/scripts/deploy.sh".'
+)
+_subcommand_help = (
+    'The sub-action of the command — for example, with "git commit",\n'
+    '"commit" is the subcommand.\n'
+    "\n"
+    'Leave this option out if the command takes no subcommand (like "ls").\n'
+    "Not all commands have subcommands; when in doubt, omit it."
+)
 _flags_help = (
-    "JSON array literal of flags, e.g. '[\"--amend\"]' or '[]'; "
-    'or the wildcard sentinel "*".'
+    "Which command-line options this rule matches, written as a list.\n"
+    "\n"
+    "Examples:\n"
+    "  --flags '[]'                  match the command with no options\n"
+    '  --flags \'["-l"]\'              match only when "-l" is used\n'
+    '  --flags \'["--amend"]\'         match only when "--amend" is used\n'
+    '  --flags \'["-a","-l"]\'         match only when both options are used\n'
+    '  --flags "*"                     match any options (a wildcard)\n'
+    "\n"
+    "The list must be written in JSON form (square brackets, quoted entries).\n"
+    "Leave the option out or use '[]' for the no-options case."
 )
 _path_spec_help = (
-    'path_spec stored on the rule_shape: NULL=any, ""=no-paths, '
-    '"$VAR/**"=glob. Omit for NULL (any).'
+    "Restrict the rule to match only certain file or folder paths.\n"
+    "\n"
+    "Leave this option out (the default) to let the rule match any path.\n"
+    'Pass "" (empty string) to match only commands that take no paths at all.\n'
+    "\n"
+    "To restrict to a specific area, start with one of these placeholders:\n"
+    "  $PROJECT_ROOT   the root of the project you are currently working in\n"
+    "  $CWD            the working directory of the current Claude Code session\n"
+    "  $HOME           your home directory\n"
+    "\n"
+    "After the placeholder, add a path fragment:\n"
+    "  /**             matches anything inside that area, at any depth\n"
+    "  /subdir/**      matches anything under that specific subfolder\n"
+    "  /specific/file  matches only that one path\n"
+    "\n"
+    "Examples:\n"
+    '  --path-spec "$PROJECT_ROOT/**"     allow anywhere in the current project\n'
+    '  --path-spec "$HOME/Downloads/**"   allow anywhere under your Downloads folder\n'
+    '  --path-spec "$CWD/build/**"        allow only the build folder of this session'
 )
-_reason_help = "Optional free-text reason stored with the permission."
+_reason_help = (
+    "A short free-text note saved with the rule — a reminder of why you\n"
+    "made this decision. Shown later when you review the rule."
+)
 
 
 def _add_shape_args(p: argparse.ArgumentParser) -> None:
@@ -891,23 +951,77 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="nephoscope.learners.permission.learner",
         description=(
-            "Permission learner — scan candidates, propose promotions, "
-            "promote/reject/unpermit rules."
+            "Learn and manage Bash permission rules for Claude Code.\n"
+            "\n"
+            "This tool watches which Bash commands you run in Claude Code,\n"
+            "notices the ones that come up often, and helps you turn them into\n"
+            "permission rules so Claude Code can run them without asking every\n"
+            "time. You can also write rules by hand using 'promote' or 'reject'."
         ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser(
-        "scan", help="Scan new Bash rows; upsert into permission_candidates."
+        "scan",
+        help="Look for new Bash commands to learn from.",
+        description=(
+            "Look at recent Bash commands you have run in Claude Code and\n"
+            "record new patterns that might be worth turning into rules."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
-    sub.add_parser("candidates", help="Dump v_candidates.")
+    sub.add_parser(
+        "candidates",
+        help="List recurring command patterns that have been noticed.",
+        description=(
+            "List the command patterns that have been noticed often enough\n"
+            "to be worth reviewing. Each row shows the command, how many\n"
+            "times it has been seen, and across how many sessions."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     sub.add_parser(
         "propose",
-        help="Emit eligible promotions as pipe-delimited lines (for review.sh).",
+        help="Emit patterns ready for review (machine-readable; used by the review tool).",
+        description=(
+            "Print patterns that are ready to be turned into rules, one per\n"
+            "line in a compact pipe-separated format. Intended for the\n"
+            "interactive review tool, not for direct reading."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
-    sub.add_parser("permissions", help="Dump v_permissions (all permission rows).")
+    sub.add_parser(
+        "permissions",
+        help="List every permission rule, approved and rejected.",
+        description=(
+            "Print every permission rule currently stored — both the approved\n"
+            "ones (commands Claude Code may run without asking) and the\n"
+            "rejected ones (commands Claude Code must never run)."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
 
-    promote = sub.add_parser("promote", help="Promote a shape to approved.")
+    promote = sub.add_parser(
+        "promote",
+        help="Approve a command pattern so Claude Code can run it without asking.",
+        description=(
+            "Approve a command pattern. Once approved, Claude Code may run\n"
+            "commands matching this pattern without asking for permission.\n"
+            "\n"
+            "Examples:\n"
+            "  promote --verb ls\n"
+            '      allow "ls" with no options, anywhere\n'
+            "\n"
+            "  promote --verb git --subcommand status --flags '[]'\n"
+            '      allow "git status" with no extra options\n'
+            "\n"
+            "  promote --verb rm --flags '*' --path-spec '$PROJECT_ROOT/**' \\\n"
+            "          --tier project\n"
+            '      allow "rm" with any options, but only inside this project'
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     _add_shape_args(promote)
     _add_tier_args(promote)
     promote.add_argument("--reason", default=None, help=_reason_help)
@@ -915,50 +1029,137 @@ def main(argv: list[str] | None = None) -> int:
         "--sync",
         action="store_true",
         default=False,
-        help="Explicitly request mirror sync after promote (default: on for non-session tier).",
+        help=(
+            "Also update the settings.json file after approving the rule.\n"
+            "This happens automatically for project and global rules, so\n"
+            "you normally do not need this option."
+        ),
     )
 
-    reject = sub.add_parser("reject", help="Reject a shape.")
+    reject = sub.add_parser(
+        "reject",
+        help="Mark a command pattern as never-allowed so Claude Code will refuse it.",
+        description=(
+            "Mark a command pattern as rejected. Claude Code will refuse to\n"
+            "run commands matching this pattern, even if you would otherwise\n"
+            "approve them when asked.\n"
+            "\n"
+            "Example:\n"
+            "  reject --verb rm --flags '[\"-rf\"]' --reason 'too dangerous'"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     _add_shape_args(reject)
     _add_tier_args(reject)
     reject.add_argument("--reason", default=None, help=_reason_help)
 
-    unpermit = sub.add_parser("unpermit", help="Delete a permission row.")
+    unpermit = sub.add_parser(
+        "unpermit",
+        help="Remove a previously approved or rejected rule.",
+        description=(
+            "Remove an existing permission rule. Use this to undo an earlier\n"
+            "approval or rejection; Claude Code will ask for permission again\n"
+            "the next time it wants to run a matching command.\n"
+            "\n"
+            "You must give the same verb, subcommand, flags, path, and tier\n"
+            "that the original rule used."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     _add_shape_args(unpermit)
     _add_tier_args(unpermit)
 
     pv = sub.add_parser(
         "pattern-variants",
-        help="Compute pattern variants for a candidate (JSON output, for review.sh).",
+        help=(
+            "Compute placeholder-form variants of a command (machine-readable;\n"
+            "used by the review tool)."
+        ),
+        description=(
+            "For a single command pattern, print JSON describing its variants\n"
+            "with $HOME, $PROJECT_ROOT, and $CWD placeholders substituted.\n"
+            "Used by the interactive review tool to build its prompts."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     pv.add_argument("--verb", required=True, help=_verb_help)
     pv.add_argument("--subcommand", default=None, help=_subcommand_help)
     pv.add_argument("--flags", default=None, help=_flags_help)
-    pv.add_argument("--home", default=None, help="$HOME path for pattern substitution.")
-    pv.add_argument("--cwd", default=None, help="Current working directory.")
+    pv.add_argument(
+        "--home",
+        default=None,
+        help=(
+            "Your home directory, used to substitute $HOME in path patterns.\n"
+            "Normally the review tool fills this in for you."
+        ),
+    )
+    pv.add_argument(
+        "--cwd",
+        default=None,
+        help=(
+            "The current working directory, used to substitute $CWD in path\n"
+            "patterns. Normally the review tool fills this in for you."
+        ),
+    )
     pv.add_argument(
         "--project-root",
         default=None,
         dest="project_root",
-        help="Project root path.",
+        help=(
+            "The project root directory, used to substitute $PROJECT_ROOT in\n"
+            "path patterns. Normally the review tool fills this in for you."
+        ),
     )
 
     ci = sub.add_parser(
         "context-ids",
-        help="Resolve project_id and session_id for a cwd (shell-assignment output).",
+        help=(
+            "Look up the internal project and session IDs for a directory\n"
+            "(machine-readable; used by the review tool)."
+        ),
+        description=(
+            "Print the internal numeric project ID and most-recent session ID\n"
+            "for a given working directory, in a format suitable for shell\n"
+            "consumption. Used by the interactive review tool."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
-    ci.add_argument("--cwd", default=None, help="Directory to look up.")
+    ci.add_argument(
+        "--cwd",
+        default=None,
+        help="The directory to look up.",
+    )
 
     ccs = sub.add_parser(
         "count-concrete-siblings",
-        help="Count concrete (non-wildcard) sibling permissions for verb+sub at tier.",
+        help=(
+            "Count how many specific-option rules exist alongside a wildcard\n"
+            "rule (machine-readable; used by the review tool)."
+        ),
+        description=(
+            "Count the number of existing rules for the same command that\n"
+            "match a specific set of options, rather than any options.\n"
+            "Used after approving a wildcard rule to ask whether the older,\n"
+            "now-redundant specific rules should be cleaned up."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     _add_verb_sub_args(ccs)
     _add_tier_args(ccs)
 
     ss = sub.add_parser(
         "subsume-siblings",
-        help="Delete concrete sibling permissions for verb+sub at tier (after flags=* promote).",
+        help=(
+            "Remove specific-option rules that a wildcard rule now covers.\n"
+            "(Run this after approving a wildcard rule to tidy up.)"
+        ),
+        description=(
+            "Delete rules for the same command that match a specific set of\n"
+            "options, leaving the wildcard rule as the sole match. Run this\n"
+            "after approving a wildcard rule so the older, now-redundant\n"
+            "rules do not clutter the rule list."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     _add_verb_sub_args(ss)
     _add_tier_args(ss)
