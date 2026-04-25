@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
+
 
 # ---------------------------------------------------------------------------
 # Helper: open an isolated connection (hash-check guard off for dry-run)
@@ -121,15 +123,20 @@ def mirror_status_cmd(db_path: str | Path) -> int:
 
 
 def _hash_status(path_str: str | None, stored_hash: str | None) -> str:
-    """Compute hash_status: stamped | null | mismatch."""
+    """Compute hash_status: stamped | null | mismatch.
+
+    Returns "mismatch" when the file is unreadable, empty, or contains
+    malformed JSON — same UX as a real hash mismatch.
+    """
     if stored_hash is None or path_str is None:
         return "null"
     p = Path(path_str).expanduser()
     if not p.exists():
         return "null"
-    import hashlib
-
-    on_disk = hashlib.sha256(p.read_bytes()).hexdigest()
+    try:
+        on_disk = settings_permissions_hash(p.read_bytes())
+    except (ValueError, TypeError):
+        return "mismatch"
     return "stamped" if on_disk == stored_hash else "mismatch"
 
 

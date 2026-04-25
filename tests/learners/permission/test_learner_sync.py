@@ -18,7 +18,6 @@ touched.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -30,15 +29,12 @@ import yaml
 
 import nephoscope.lib.db as db
 from nephoscope.learners.permission.learner import main as learner_main
+from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _serialize_bash(row: dict) -> str | None:
@@ -139,7 +135,7 @@ class TestPromoteMirrorSync:
 
         stored_hash = _read_global_hash(tmp_db)
         assert stored_hash is not None, "hash must be stamped after promote"
-        assert stored_hash == _sha256(fake_settings.read_bytes())
+        assert stored_hash == settings_permissions_hash(fake_settings.read_bytes())
 
     def test_promote_db_row_has_source_learner(self, tmp_db, tmp_path):
         """Promote inserts a permissions row with source='learner'."""
@@ -185,8 +181,10 @@ class TestPromoteMirrorSync:
 
             sync_global(tmp_db)
 
-        # Tamper the file so hash no longer matches.
-        fake_settings.write_text('{"tampered": true}')
+        # Tamper the permissions arrays so the permissions hash no longer matches.
+        fake_settings.write_text(
+            '{"permissions": {"allow": ["Bash(intruder)"], "deny": [], "ask": []}}'
+        )
 
         with mock.patch(
             "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
@@ -220,8 +218,10 @@ class TestPromoteMirrorSync:
 
             sync_global(tmp_db)
 
-        # Tamper.
-        fake_settings.write_text('{"tampered": true}')
+        # Tamper: modify the permissions arrays so the hash shifts.
+        fake_settings.write_text(
+            '{"permissions": {"allow": ["Bash(intruder)"], "deny": [], "ask": []}}'
+        )
 
         # Run promote — mirror sync will fail, but the DB row must still exist.
         with mock.patch(
@@ -345,7 +345,10 @@ class TestRejectMirrorSync:
 
             sync_global(tmp_db)
 
-        fake_settings.write_text('{"tampered": true}')
+        # Tamper: modify the permissions arrays so the hash shifts.
+        fake_settings.write_text(
+            '{"permissions": {"allow": ["Bash(intruder)"], "deny": [], "ask": []}}'
+        )
 
         with mock.patch(
             "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
@@ -514,7 +517,7 @@ class TestApplyFixturesMirrorSync:
 
         stored_hash = _read_global_hash(tmp_db)
         assert stored_hash is not None, "hash must be stamped"
-        assert stored_hash == _sha256(fake_settings.read_bytes())
+        assert stored_hash == settings_permissions_hash(fake_settings.read_bytes())
 
     def test_apply_fixtures_first_touch_null_hash(self, tmp_db, tmp_path):
         """First-touch: hash IS NULL + existing file → writes succeed and stamp hash."""
@@ -542,7 +545,7 @@ class TestApplyFixturesMirrorSync:
         assert perms == 1
         stored_hash = _read_global_hash(tmp_db)
         assert stored_hash is not None, "hash must be stamped after first-touch"
-        assert stored_hash == _sha256(fake_settings.read_bytes())
+        assert stored_hash == settings_permissions_hash(fake_settings.read_bytes())
 
     def test_apply_fixtures_tampered_json_raises(self, tmp_db, tmp_path):
         """apply_fixtures raises ValueError when mirror file was tampered after last sync."""
@@ -559,8 +562,10 @@ class TestApplyFixturesMirrorSync:
         ):
             sync_global(tmp_db)
 
-        # Tamper the file after the sync.
-        fake_settings.write_text('{"tampered": true}')
+        # Tamper the permissions arrays so the hash no longer matches.
+        fake_settings.write_text(
+            '{"permissions": {"allow": ["Bash(intruder)"], "deny": [], "ask": []}}'
+        )
 
         fixture = tmp_path / "rules.yaml"
         fixture.write_text(

@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import fcntl
-import hashlib
 import json
 import os
 import sqlite3
 import time
 from pathlib import Path
 
+from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
 from nephoscope.lib.paths import canonicalize
 
 
@@ -48,14 +48,6 @@ def _now() -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
-
-
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
 
 
 def _read_global_meta(conn: sqlite3.Connection) -> tuple[Path, str | None]:
@@ -147,7 +139,9 @@ def _build_content(
     Raises ``ValueError`` when *target* exists but cannot be parsed as JSON —
     we never silently overwrite a file we cannot understand.
     """
-    from nephoscope.lib.mirror import serializer  # late import: serializer lives in same package
+    from nephoscope.lib.mirror import (
+        serializer,
+    )  # late import: serializer lives in same package
 
     if project_id is None:
         rows = conn.execute(
@@ -262,7 +256,13 @@ def _atomic_write(
 
             # Hash check: skip when stored hash is NULL (first-touch) or file absent.
             if stored_hash is not None and target.exists():
-                on_disk_hash = _sha256_file(target)
+                try:
+                    on_disk_hash = settings_permissions_hash(target.read_bytes())
+                except (ValueError, TypeError) as exc:
+                    raise MirrorHashMismatch(
+                        f"{target}: settings.json is malformed"
+                        f" (cannot compute permissions hash) — {exc}"
+                    ) from exc
                 if on_disk_hash != stored_hash:
                     if attempt < max_retries - 1:
                         # Brief pause before retry — another writer may have
@@ -286,7 +286,7 @@ def _atomic_write(
             os.rename(tmp_path, target)
 
             # Re-hash the written content and persist to DB.
-            new_hash = _sha256_bytes(content)
+            new_hash = settings_permissions_hash(content)
             _stamp_hash(conn, project_id, new_hash, _now())
             return  # success — release flock in finally
 

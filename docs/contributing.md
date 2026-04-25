@@ -67,10 +67,12 @@ nephoscope/
 **Write flow** (any promote / reject / unpermit / seed):
 
 1. Learner writes the DB row and commits.
-2. `lib.mirror.writer.sync_affected(permission_id)` acquires `flock` on the target mirror, re-hashes the on-disk file, and compares to the stored `sha256`.
-3. On match: build the new content from DB rows → write `<path>.tmp` → `fsync` → atomic `rename` → rehash → stamp `settings_json_sha256` + `settings_json_last_synced`.
+2. `lib.mirror.writer.sync_affected(permission_id)` acquires `flock` on the target mirror and computes the **permissions-slice hash** of the on-disk file via `lib.mirror.permissions_hash.settings_permissions_hash` (covers only `permissions.{allow, deny, ask}`, sorted to a canonical form). Compares that hash to the stored `sha256`.
+3. On match: build the new content from DB rows → write `<path>.tmp` → `fsync` → atomic `rename` → re-hash the new content's permissions slice → stamp `settings_json_sha256` + `settings_json_last_synced`.
 4. On hash mismatch: raise `MirrorHashMismatch`. The learner CLI surfaces `"Settings file modified externally. Run '/nephoscope:permissions reconcile' and retry."`
 5. Three-attempt retry loop absorbs the rare race between re-hash and rename. Stale `.tmp` siblings older than 5 min get cleaned on startup.
+
+The slice-only hash means edits to **non-permissions** parts of `settings.json` (hooks block, env, model, `permissions.defaultMode`, `permissions.additionalDirectories`) do not flip the stored hash to mismatch — only changes to the rule arrays themselves do. Malformed or non-UTF-8 content is treated as a mismatch (the writer raises `MirrorHashMismatch` with a "settings.json is malformed" message; `mirror-status` reports `mismatch`).
 
 **Canonical forms** rendered by `serializer.py`:
 

@@ -16,6 +16,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SCHEMA_PATH = PROJECT_ROOT / "src" / "nephoscope" / "lib" / "schema.sql"
 
+_SENTINEL_HASH = "a" * 64
+
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
@@ -42,6 +44,30 @@ def _make_db(tmp_path: Path, settings_path: Path) -> Path:
     conn.commit()
     conn.close()
     return db_file
+
+
+def _make_db_with_bad_content(
+    tmp_path: Path, bad_content: bytes | str
+) -> tuple[Path, Path]:
+    """Write bad_content to settings.json and stamp a sentinel hash in the DB.
+
+    Returns (db_file, settings_path). The sentinel hash ensures _hash_status
+    takes the comparison branch rather than short-circuiting to "null".
+    """
+    settings = tmp_path / "settings.json"
+    if isinstance(bad_content, bytes):
+        settings.write_bytes(bad_content)
+    else:
+        settings.write_text(bad_content)
+    db_file = _make_db(tmp_path, settings)
+    conn = sqlite3.connect(str(db_file), isolation_level=None)
+    conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
+        (_SENTINEL_HASH,),
+    )
+    conn.commit()
+    conn.close()
+    return db_file, settings
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +254,41 @@ def test_reconcile_hash_mismatch_returns_error(tmp_path: Path, capsys) -> None:
     assert rc == 1
     captured = capsys.readouterr()
     assert "reconcile error" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# _hash_status: malformed / empty file returns "mismatch" (not a crash)
+# ---------------------------------------------------------------------------
+
+
+def _assert_hash_status_mismatch(db_file: Path, capsys) -> None:
+    """Shared assertion: mirror_status_cmd exits 0 and prints "mismatch"."""
+    from nephoscope.cli.permissions_cmd import mirror_status_cmd
+
+    rc = mirror_status_cmd(str(db_file))
+
+    assert rc == 0
+    assert "mismatch" in capsys.readouterr().out
+
+
+def test_hash_status_returns_mismatch_for_malformed_json(
+    tmp_path: Path, capsys
+) -> None:
+    """_hash_status returns "mismatch" (not JSONDecodeError) for a malformed file."""
+    db_file, _ = _make_db_with_bad_content(tmp_path, "not valid json")
+    _assert_hash_status_mismatch(db_file, capsys)
+
+
+def test_hash_status_returns_mismatch_for_empty_file(tmp_path: Path, capsys) -> None:
+    """_hash_status returns "mismatch" (not JSONDecodeError) for an empty file."""
+    db_file, _ = _make_db_with_bad_content(tmp_path, b"")
+    _assert_hash_status_mismatch(db_file, capsys)
+
+
+def test_hash_status_returns_mismatch_for_non_utf8_file(tmp_path: Path, capsys) -> None:
+    """_hash_status returns "mismatch" (no crash) when file contains non-UTF-8 bytes."""
+    db_file, _ = _make_db_with_bad_content(tmp_path, b"\x80{}")
+    _assert_hash_status_mismatch(db_file, capsys)
 
 
 # ---------------------------------------------------------------------------

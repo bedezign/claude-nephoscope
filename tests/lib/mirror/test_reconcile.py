@@ -17,7 +17,6 @@ Coverage targets (per plan W2-reconcile gate):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -25,6 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
+from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
 from nephoscope.lib.mirror.reconcile import (
     ReconcileError,
     _key_from_db_row,
@@ -92,17 +92,13 @@ def _write_settings(path: Path, *, allow=None, deny=None, ask=None) -> None:
     )
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _stamp_real_hash(conn: sqlite3.Connection, settings: Path) -> None:
-    """Stamp the actual on-disk hash of settings into global_mirror.
+    """Stamp the actual on-disk permissions hash of settings into global_mirror.
 
     Use this in interactive-mode tests to avoid first-touch auto-adopt
     while keeping the hash consistent with the file so sync() succeeds.
     """
-    real_hash = _sha256(settings.read_bytes())
+    real_hash = settings_permissions_hash(settings.read_bytes())
     conn.execute(
         "UPDATE global_mirror SET settings_json_sha256=? WHERE id=1;",
         (real_hash,),
@@ -1036,7 +1032,7 @@ class TestMirrorContent:
         stored_hash = conn.execute(
             "SELECT settings_json_sha256 FROM global_mirror WHERE id=1;"
         ).fetchone()[0]
-        actual_hash = _sha256(settings.read_bytes())
+        actual_hash = settings_permissions_hash(settings.read_bytes())
         assert stored_hash == actual_hash
 
 

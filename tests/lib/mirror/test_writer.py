@@ -6,7 +6,6 @@ to real paths (~/.claude/settings.json, ~/.cache/claude/observability/, etc.).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -17,16 +16,14 @@ from unittest.mock import patch
 
 import pytest
 
+from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 SCHEMA_PATH = PROJECT_ROOT / "src" / "nephoscope" / "lib" / "schema.sql"
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 @pytest.fixture()
@@ -76,7 +73,9 @@ def _allow_serialize(row):
 
 def test_sync_global_creates_mirror_with_empty_db(tmp_path, db_conn):
     """sync_global on an empty DB writes a valid JSON mirror and stamps the hash."""
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         from nephoscope.lib.mirror.writer import sync_global
 
         sync_global(db_conn)
@@ -102,7 +101,7 @@ def test_sync_global_creates_mirror_with_empty_db(tmp_path, db_conn):
         "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
     ).fetchone()[0]
     assert stored_hash is not None, "hash was not stamped"
-    assert stored_hash == _sha256(target.read_bytes())
+    assert stored_hash == settings_permissions_hash(target.read_bytes())
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +117,9 @@ def test_first_touch_null_hash_succeeds(tmp_path, db_conn):
     ).fetchone()[0]
     assert stored is None
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         from nephoscope.lib.mirror.writer import sync_global
 
         sync_global(db_conn)
@@ -140,7 +141,9 @@ def test_first_touch_null_hash_with_existing_file_succeeds(tmp_path, db_conn):
     # Pre-write a file (simulates user's hand-written settings).
     target.write_text('{"permissions":{"allow":[],"deny":[],"ask":[]}}')
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         from nephoscope.lib.mirror.writer import sync_global
 
         # Must not raise even though stored hash is NULL.
@@ -161,7 +164,9 @@ def test_hash_mismatch_raises_after_tampering(tmp_path, db_conn):
     """Tampering the mirror file after a sync raises MirrorHashMismatch on re-sync."""
     from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)  # first sync stamps the hash
 
     target = Path(
@@ -170,10 +175,13 @@ def test_hash_mismatch_raises_after_tampering(tmp_path, db_conn):
         ).fetchone()[0]
     )
 
-    # Tamper: write different content to the file.
-    target.write_text('{"tampered": true}')
+    # Tamper: inject a permissions entry so the permissions-only hash shifts.
+    tampered = {"permissions": {"allow": ["Bash(intruder)"], "deny": [], "ask": []}}
+    target.write_text(json.dumps(tampered))
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with pytest.raises(MirrorHashMismatch) as exc_info:
             sync_global(db_conn)
 
@@ -187,7 +195,9 @@ def test_hash_mismatch_exception_message_contains_hashes(tmp_path, db_conn):
     """MirrorHashMismatch message includes first-8-char snippets of both hashes."""
     from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)
 
     target = Path(
@@ -199,11 +209,16 @@ def test_hash_mismatch_exception_message_contains_hashes(tmp_path, db_conn):
         "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
     ).fetchone()[0]
 
-    tampered_content = b'{"not": "valid"}'
+    # Tamper: inject a permissions entry so the permissions-only hash shifts.
+    tampered_content = json.dumps(
+        {"permissions": {"allow": ["Bash(intruder)"], "deny": [], "ask": []}}
+    ).encode("utf-8")
     target.write_bytes(tampered_content)
-    on_disk_hash = _sha256(tampered_content)
+    on_disk_hash = settings_permissions_hash(tampered_content)
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with pytest.raises(MirrorHashMismatch) as exc_info:
             sync_global(db_conn)
 
@@ -219,7 +234,9 @@ def test_hash_mismatch_exception_message_contains_hashes(tmp_path, db_conn):
 
 def test_fsync_is_called_during_write(tmp_path, db_conn):
     """os.fsync must be called when writing the mirror file."""
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with patch("os.fsync") as mock_fsync:
             from nephoscope.lib.mirror import writer
 
@@ -227,7 +244,10 @@ def test_fsync_is_called_during_write(tmp_path, db_conn):
             import importlib
 
             importlib.reload(writer)
-            with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+            with patch(
+                "nephoscope.lib.mirror.serializer.serialize",
+                side_effect=_null_serialize,
+            ):
                 writer.sync_global(db_conn)
 
             assert mock_fsync.called, "os.fsync must be called to flush the .tmp file"
@@ -262,7 +282,10 @@ def test_flock_contention_serializes_writers(tmp_path, db_conn):
         try:
             c = _open_thread_conn()
             barrier.wait()
-            with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+            with patch(
+                "nephoscope.lib.mirror.serializer.serialize",
+                side_effect=_null_serialize,
+            ):
                 sync_global(c)
             with results_lock:
                 results.append("done-1")
@@ -274,7 +297,10 @@ def test_flock_contention_serializes_writers(tmp_path, db_conn):
         try:
             c = _open_thread_conn()
             barrier.wait()
-            with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+            with patch(
+                "nephoscope.lib.mirror.serializer.serialize",
+                side_effect=_null_serialize,
+            ):
                 sync_global(c)
             with results_lock:
                 results.append("done-2")
@@ -377,7 +403,9 @@ def test_sync_project_writes_mirror_for_project(tmp_path, db_conn):
     )
     project_id = cur.lastrowid
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_project(db_conn, project_id)
 
     assert local_json.exists()
@@ -389,7 +417,7 @@ def test_sync_project_writes_mirror_for_project(tmp_path, db_conn):
         "SELECT settings_json_sha256 FROM projects WHERE id = ?;",
         (project_id,),
     ).fetchone()[0]
-    assert stored == _sha256(local_json.read_bytes())
+    assert stored == settings_permissions_hash(local_json.read_bytes())
 
 
 def test_sync_project_raises_for_unknown_project(tmp_path, db_conn):
@@ -397,7 +425,9 @@ def test_sync_project_raises_for_unknown_project(tmp_path, db_conn):
     from nephoscope.lib.mirror.writer import sync_project
 
     with pytest.raises(ValueError, match="9999"):
-        with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with patch(
+            "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+        ):
             sync_project(db_conn, 9999)
 
 
@@ -413,7 +443,9 @@ def test_sync_project_raises_when_no_path_configured(tmp_path, db_conn):
     project_id = cur.lastrowid
 
     with pytest.raises(ValueError, match="settings_json_path"):
-        with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with patch(
+            "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+        ):
             sync_project(db_conn, project_id)
 
 
@@ -438,7 +470,9 @@ def test_sync_affected_dispatches_global_for_null_project(tmp_path, db_conn):
         (shape_id,),
     ).lastrowid
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with patch("nephoscope.lib.mirror.writer.sync_global") as mock_global:
             with patch("nephoscope.lib.mirror.writer.sync_project") as mock_project:
                 sync_affected(db_conn, perm_id)
@@ -506,7 +540,9 @@ def test_retry_settles_within_budget(tmp_path, db_conn):
     from nephoscope.lib.mirror.writer import sync_global
 
     # First sync to establish the file and get a real hash.
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)
 
     fake_hash = "deadbeef" * 8  # 64-char wrong hash
@@ -522,7 +558,9 @@ def test_retry_settles_within_budget(tmp_path, db_conn):
         return real_read(conn, project_id)  # subsequent: real value
 
     with patch.object(writer_mod, "_read_stored_hash", side_effect=patched_read):
-        with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+        with patch(
+            "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+        ):
             # Should succeed on the second attempt.
             sync_global(db_conn)
 
@@ -549,7 +587,9 @@ def test_retry_exhaustion_raises_mirror_hash_mismatch(tmp_path, db_conn):
         (wrong_hash,),
     )
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with pytest.raises(MirrorHashMismatch):
             writer_mod.sync_global(db_conn)
 
@@ -563,7 +603,9 @@ def test_sync_global_idempotent(tmp_path, db_conn):
     """Calling sync_global twice produces identical mirror content."""
     from nephoscope.lib.mirror.writer import sync_global
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)
 
     target = Path(
@@ -573,7 +615,9 @@ def test_sync_global_idempotent(tmp_path, db_conn):
     )
     content_after_first = target.read_bytes()
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)
 
     content_after_second = target.read_bytes()
@@ -605,7 +649,9 @@ def test_approved_row_lands_in_allow_list(tmp_path, db_conn):
     def serialize_stub(row):
         return f"Bash({row['verb']} *)"
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub
+    ):
         sync_global(db_conn)
 
     target = Path(
@@ -636,7 +682,9 @@ def test_rejected_row_lands_in_deny_list(tmp_path, db_conn):
     def serialize_stub(row):
         return f"Bash({row['verb']} *)"
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub
+    ):
         sync_global(db_conn)
 
     target = Path(
@@ -705,7 +753,9 @@ def test_session_tier_rows_excluded_from_global_mirror(tmp_path, db_conn):
     def serialize_stub(row):
         return "Bash(git *)"
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub
+    ):
         sync_global(db_conn)
 
     target = Path(
@@ -746,7 +796,7 @@ def test_sync_preserves_foreign_top_level_keys(tmp_path, db_conn):
     }
     target.write_text(json.dumps(existing, indent=2))
     # Stamp the hash so the mismatch check passes.
-    current_hash = _sha256(target.read_bytes())
+    current_hash = settings_permissions_hash(target.read_bytes())
     db_conn.execute(
         "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
         (current_hash,),
@@ -766,7 +816,9 @@ def test_sync_preserves_foreign_top_level_keys(tmp_path, db_conn):
     def serialize_stub(row):
         return f"Bash({row['verb']} *)"
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub
+    ):
         sync_global(db_conn)
 
     data = json.loads(target.read_bytes())
@@ -796,13 +848,15 @@ def test_sync_preserves_permissions_default_mode(tmp_path, db_conn):
         },
     }
     target.write_text(json.dumps(existing, indent=2))
-    current_hash = _sha256(target.read_bytes())
+    current_hash = settings_permissions_hash(target.read_bytes())
     db_conn.execute(
         "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
         (current_hash,),
     )
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)
 
     data = json.loads(target.read_bytes())
@@ -822,7 +876,9 @@ def test_sync_creates_fresh_file_when_target_absent(tmp_path, db_conn):
     )
     assert not target.exists(), "precondition: file must not exist"
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         sync_global(db_conn)
 
     assert target.exists()
@@ -843,7 +899,9 @@ def test_sync_raises_on_malformed_json_target(tmp_path, db_conn):
     # Leave stored hash NULL so the hash-check gate is skipped; the parse error
     # must surface from _build_content before we ever reach the write step.
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with pytest.raises(ValueError) as exc_info:
             sync_global(db_conn)
 
@@ -864,6 +922,271 @@ def test_sync_global_raises_when_singleton_missing(tmp_path, db_conn):
 
     db_conn.execute("DELETE FROM global_mirror WHERE id = 1;")
 
-    with patch("nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize):
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
         with pytest.raises(RuntimeError, match="global_mirror singleton"):
             sync_global(db_conn)
+
+
+# ---------------------------------------------------------------------------
+# _atomic_write: malformed target raises MirrorHashMismatch (not JSONDecodeError)
+# ---------------------------------------------------------------------------
+
+_SENTINEL_HASH = "a" * 64
+
+
+def _stamp_sentinel_and_write(db_conn, content: bytes | str) -> Path:
+    """Write *content* to the mirror target and stamp a sentinel non-null hash.
+
+    Returns the target path. The sentinel hash ensures the hash-check branch
+    fires on the next sync_global call.
+    """
+    target = Path(
+        db_conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+    )
+    if isinstance(content, bytes):
+        target.write_bytes(content)
+    else:
+        target.write_text(content)
+    db_conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
+        (_SENTINEL_HASH,),
+    )
+    return target
+
+
+def test_atomic_write_raises_mirror_hash_mismatch_for_malformed_target(
+    tmp_path, db_conn
+):
+    """When the target file contains malformed JSON, sync_global raises
+    MirrorHashMismatch (not JSONDecodeError) — corruption is not transient,
+    so the retry loop must not run.
+    """
+    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
+
+    # Write corrupt content so settings_permissions_hash raises JSONDecodeError.
+    target = _stamp_sentinel_and_write(db_conn, "not valid json")
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        with pytest.raises(MirrorHashMismatch) as exc_info:
+            sync_global(db_conn)
+
+    msg = str(exc_info.value)
+    assert "malformed" in msg, "exception message must mention malformed"
+    assert str(target) in msg, "exception message must include the file path"
+
+
+def test_atomic_write_raises_mirror_hash_mismatch_for_heterogeneous_allow(
+    tmp_path, db_conn
+):
+    """When permissions.allow contains heterogeneous types (int + str), sorted()
+    raises TypeError; sync_global must surface that as MirrorHashMismatch.
+    """
+    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
+
+    # Write content whose allow list mixes int and str — triggers TypeError in
+    # settings_permissions_hash's sorted() call.
+    _stamp_sentinel_and_write(
+        db_conn, '{"permissions":{"allow":[1,"Bash(ls)"],"deny":[],"ask":[]}}'
+    )
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        with pytest.raises(MirrorHashMismatch) as exc_info:
+            sync_global(db_conn)
+
+    assert "malformed" in str(exc_info.value), (
+        "exception message must mention malformed"
+    )
+
+
+def test_atomic_write_raises_mirror_hash_mismatch_for_non_utf8_target(
+    tmp_path, db_conn
+):
+    """When the target file contains non-UTF-8 bytes, sync_global raises
+    MirrorHashMismatch — UnicodeDecodeError is a ValueError and must be caught
+    by the (ValueError, TypeError) guard in _atomic_write.
+    """
+    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
+
+    # Write non-UTF-8 bytes so settings_permissions_hash raises UnicodeDecodeError.
+    target = _stamp_sentinel_and_write(db_conn, b"\x80{}")
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        with pytest.raises(MirrorHashMismatch) as exc_info:
+            sync_global(db_conn)
+
+    msg = str(exc_info.value)
+    assert "malformed" in msg, "exception message must mention malformed"
+    assert str(target) in msg, "exception message must include the file path"
+
+
+def test_pre_b1_whole_file_stamp_raises_on_first_sync(tmp_path, db_conn):
+    """Document migration semantics for installs with pre-B1 stamps.
+
+    Pre-B1 nephoscope stamped sha256(entire_settings.json). After this change,
+    the first sync raises MirrorHashMismatch because the new permissions-only
+    hash will not equal the old whole-file hash. The workaround for an existing
+    install is to clear the stamp manually (e.g. via SQL or a future migration
+    helper) before re-syncing — at which point the first-touch branch fires
+    and the new hash gets stamped cleanly.
+    """
+    import hashlib
+
+    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
+
+    target = Path(
+        db_conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+    )
+
+    # Simulate a real settings.json with content (permissions + foreign keys).
+    settings_content = json.dumps(
+        {
+            "attribution": False,
+            "model": "claude-sonnet-4-6",
+            "permissions": {"allow": ["Bash(git *)"], "deny": [], "ask": []},
+        },
+        indent=2,
+    ).encode("utf-8")
+    target.write_bytes(settings_content)
+
+    # Pre-B1 stamp: sha256 of the *entire* file, not just the permissions slice.
+    whole_file_hash = hashlib.sha256(settings_content).hexdigest()
+    db_conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
+        (whole_file_hash,),
+    )
+
+    # The permissions-only hash differs from the whole-file hash.
+    from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
+
+    perms_only_hash = settings_permissions_hash(settings_content)
+    assert perms_only_hash != whole_file_hash, (
+        "precondition: permissions-only hash must differ from whole-file hash"
+        " when the file has non-permissions content"
+    )
+
+    # First sync after upgrade: stored (whole-file) hash ≠ on-disk (perms-only) hash
+    # → MirrorHashMismatch.  Workaround: clear the stamp first.
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        with pytest.raises(MirrorHashMismatch):
+            sync_global(db_conn)
+
+    # Workaround: clear the stamp so next sync uses first-touch path.
+    db_conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = NULL WHERE id = 1;"
+    )
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        # Must succeed: first-touch path skips the hash check and re-stamps.
+        sync_global(db_conn)
+
+    new_hash = db_conn.execute(
+        "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    assert new_hash is not None, "hash must be stamped after first-touch sync"
+    assert len(new_hash) == 64, "stamped hash must be a full SHA-256 hex digest"
+
+
+# ---------------------------------------------------------------------------
+# Integration: unrelated edits don't flip the permissions hash
+# ---------------------------------------------------------------------------
+
+
+def test_unrelated_edits_do_not_flip_hash(tmp_path, db_conn):
+    """Edits outside the permissions arrays (hooks, model, env) must not cause
+    MirrorHashMismatch on the next sync_global call.
+
+    Flow:
+    1. Insert one approved permission and run sync_global — file written, hash stamped.
+    2. Enrich the on-disk file with extra top-level keys (hooks, env, model) that
+       nephoscope never owns.  The permissions allow/deny/ask arrays are untouched.
+    3. Re-compute the permissions hash over the modified file — it must equal the
+       stored hash (proving the hash covers only the permissions slice).
+    4. Call sync_global again — must NOT raise MirrorHashMismatch.
+    5. Confirm _hash_status reports "stamped" after the second sync.
+    """
+    from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
+    from nephoscope.cli.permissions_cmd import _hash_status
+
+    # Step 1 — insert an approved permission and run sync.
+    shape_id = db_conn.execute(
+        "INSERT INTO rule_shapes (verb, flags, first_seen, last_seen)"
+        " VALUES ('Bash', '[]', '2026-01-01Z', '2026-01-01Z');"
+    ).lastrowid
+    db_conn.execute(
+        "INSERT INTO permissions"
+        " (rule_shape_id, session_id, project_id, decision, source, decided_at)"
+        " VALUES (?, NULL, NULL, 'approved', 'seed', '2026-01-01Z');",
+        (shape_id,),
+    )
+
+    def serialize_bash(row):
+        return f"Bash({row['verb']} *)"
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_bash
+    ):
+        sync_global(db_conn)
+
+    target = Path(
+        db_conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+    )
+    assert target.exists(), "mirror file must be created after first sync"
+    stored_hash_after_first = db_conn.execute(
+        "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    assert stored_hash_after_first is not None, "hash must be stamped after first sync"
+
+    # Step 2 — enrich the file with keys nephoscope never owns.
+    data = json.loads(target.read_bytes())
+    data["hooks"] = {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}
+    data["env"] = {"MY_VAR": "hello"}
+    data["model"] = "claude-sonnet-4-6"
+    # permissions.allow/deny/ask are byte-identical — only foreign keys were added.
+    target.write_text(json.dumps(data, indent=2))
+
+    # Step 3 — permissions hash over the modified file must still match stored hash.
+    hash_over_modified = settings_permissions_hash(target.read_bytes())
+    assert hash_over_modified == stored_hash_after_first, (
+        "adding non-permissions keys must not change the permissions hash"
+    )
+
+    # Step 4 — second sync must not raise MirrorHashMismatch.
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_bash
+    ):
+        try:
+            sync_global(db_conn)
+        except MirrorHashMismatch as exc:
+            raise AssertionError(
+                "sync_global raised MirrorHashMismatch after an unrelated edit"
+                f" (old whole-file scheme would have done this): {exc}"
+            ) from exc
+
+    # Step 5 — _hash_status must report "stamped" after the second sync.
+    path_str = db_conn.execute(
+        "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    stored_hash_after_second = db_conn.execute(
+        "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    assert _hash_status(path_str, stored_hash_after_second) == "stamped", (
+        "_hash_status must report 'stamped' after sync with unrelated edits present"
+    )

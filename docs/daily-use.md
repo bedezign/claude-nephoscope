@@ -137,7 +137,7 @@ Most likely explanations, in order:
 
 ### `mirror-status` shows a mismatch
 
-`mirror-status` compares what nephoscope thinks your settings file should be against what's actually on disk. A mismatch means something else changed the file — usually a hand-edit or another tool.
+`mirror-status` compares the permission rules nephoscope wrote into your settings file against what's actually there. A mismatch means the `permissions.allow`/`deny`/`ask` arrays were changed by something other than nephoscope — usually a hand-edit or another tool. Edits to other parts of `settings.json` (hooks, env, model, anything outside those three arrays) are ignored on purpose, so unrelated edits never trigger a mismatch.
 
 Run:
 
