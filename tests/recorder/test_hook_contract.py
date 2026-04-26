@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 from typing import Any
 from unittest.mock import patch
 
@@ -377,3 +379,185 @@ class TestEndToEndMain:
         assert row[0] == 1
         assert row[1] is not None
         assert row[2] == "ok"
+
+
+class TestSessionStartSweep:
+    """B6: SessionStart sweeps stale .tmp files via cleanup_stale_tmp."""
+
+    def _session_start_payload(
+        self, cwd: str = "/home/steve/project"
+    ) -> dict[str, Any]:
+        return {
+            "session_id": "019673a0-aabb-7000-8000-000000000099",
+            "hook_event_name": "SessionStart",
+            "cwd": cwd,
+        }
+
+    def test_session_start_sweeps_stale_tmp_files(self, tmp_db, recorder, tmp_path):
+        """A .tmp file older than 300 s in the global mirror dir is removed on SessionStart."""
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir()
+        settings_json = settings_dir / "settings.json"
+        settings_json.write_text("{}")
+
+        # Seed global_mirror so the recorder knows where to sweep.
+        tmp_db.execute(
+            "INSERT OR REPLACE INTO global_mirror"
+            " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+            " VALUES (1, ?, NULL, NULL);",
+            (str(settings_json),),
+        )
+        tmp_db.commit()
+
+        # Create a stale .tmp sibling (older than 300 s).
+        stale_tmp = settings_dir / "settings.json.tmp"
+        stale_tmp.write_text("stale")
+        old_mtime = time.time() - 600
+        os.utime(stale_tmp, (old_mtime, old_mtime))
+
+        # Also create a fresh .tmp (should survive).
+        fresh_tmp = settings_dir / "other.tmp"
+        fresh_tmp.write_text("in progress")
+
+        recorder._handle_session_start(self._session_start_payload())
+
+        assert not stale_tmp.exists(), (
+            "stale .tmp must be removed by SessionStart sweep"
+        )
+        assert fresh_tmp.exists(), "fresh .tmp must survive the sweep"
+
+    def test_session_start_sweep_failure_does_not_crash(
+        self, tmp_db, recorder, tmp_path, capsys
+    ):
+        """A sweep failure must not crash SessionStart or block cache warm-up."""
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir()
+        settings_json = settings_dir / "settings.json"
+        settings_json.write_text("{}")
+
+        tmp_db.execute(
+            "INSERT OR REPLACE INTO global_mirror"
+            " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+            " VALUES (1, ?, NULL, NULL);",
+            (str(settings_json),),
+        )
+        tmp_db.commit()
+
+        def _boom(_dir, _age=300):
+            raise RuntimeError("simulated sweep failure")
+
+        with patch("nephoscope.recorder.run.cleanup_stale_tmp", side_effect=_boom):
+            # Must not raise.
+            recorder._handle_session_start(self._session_start_payload())
+
+        # Session row must still be written (warm-up didn't abort).
+        row = tmp_db.execute(
+            "SELECT session_uuid FROM sessions WHERE session_uuid = ?;",
+            ("019673a0-aabb-7000-8000-000000000099",),
+        ).fetchone()
+        assert row is not None, "session must be upserted even when sweep raises"
+
+        # A WARNING must be emitted naming the failure mode and the exception.
+        err = capsys.readouterr().err
+        assert (
+            "WARNING" in err and "sweep" in err and "simulated sweep failure" in err
+        ), f"expected WARNING naming sweep + error on stderr; got: {err!r}"
+
+    def test_session_start_sweeps_stale_tmp_files_for_active_project(
+        self, tmp_db, recorder, tmp_path
+    ):
+        """Stale .tmp files in BOTH the global mirror dir and the active project dir
+        are removed on SessionStart; fresh .tmp files survive in both."""
+        # --- global mirror setup ---
+        global_dir = tmp_path / "global" / ".claude"
+        global_dir.mkdir(parents=True)
+        global_settings = global_dir / "settings.json"
+        global_settings.write_text("{}")
+
+        tmp_db.execute(
+            "INSERT OR REPLACE INTO global_mirror"
+            " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+            " VALUES (1, ?, NULL, NULL);",
+            (str(global_settings),),
+        )
+
+        # --- project setup ---
+        project_cwd = str(tmp_path / "project")
+        project_dir = tmp_path / "project" / ".claude"
+        project_dir.mkdir(parents=True)
+        project_settings = project_dir / "settings.local.json"
+        project_settings.write_text("{}")
+
+        ts = "2025-01-01T00:00:00.000Z"
+        tmp_db.execute(
+            "INSERT INTO projects(cwd, name, root, first_seen, last_seen, settings_json_path)"
+            " VALUES (?, ?, ?, ?, ?, ?);",
+            (project_cwd, "project", project_cwd, ts, ts, str(project_settings)),
+        )
+        tmp_db.commit()
+
+        # --- stale .tmp in global dir ---
+        global_stale = global_dir / "settings.json.tmp"
+        global_stale.write_text("stale-global")
+        old_mtime = time.time() - 600
+        os.utime(global_stale, (old_mtime, old_mtime))
+
+        # --- fresh .tmp in global dir ---
+        global_fresh = global_dir / "other.tmp"
+        global_fresh.write_text("in-progress-global")
+
+        # --- stale .tmp in project dir ---
+        project_stale = project_dir / "settings.local.json.tmp"
+        project_stale.write_text("stale-project")
+        os.utime(project_stale, (old_mtime, old_mtime))
+
+        # --- fresh .tmp in project dir ---
+        project_fresh = project_dir / "other.tmp"
+        project_fresh.write_text("in-progress-project")
+
+        recorder._handle_session_start(self._session_start_payload(cwd=project_cwd))
+
+        assert not global_stale.exists(), (
+            "stale .tmp in global mirror dir must be removed by SessionStart sweep"
+        )
+        assert global_fresh.exists(), "fresh .tmp in global mirror dir must survive"
+        assert not project_stale.exists(), (
+            "stale .tmp in active project dir must be removed by SessionStart sweep"
+        )
+        assert project_fresh.exists(), "fresh .tmp in active project dir must survive"
+
+    def test_session_start_warmup_failure_does_not_crash(
+        self, tmp_db, recorder, tmp_path, capsys
+    ):
+        """A cache warm-up failure must not crash SessionStart; session row still written + WARNING emitted."""
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir()
+        settings_json = settings_dir / "settings.json"
+        settings_json.write_text("{}")
+
+        tmp_db.execute(
+            "INSERT OR REPLACE INTO global_mirror"
+            " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+            " VALUES (1, ?, NULL, NULL);",
+            (str(settings_json),),
+        )
+        tmp_db.commit()
+
+        def _boom(_conn, _scope):
+            raise RuntimeError("simulated warm-up failure")
+
+        with patch("nephoscope.recorder.run.get_additional_dirs", side_effect=_boom):
+            recorder._handle_session_start(self._session_start_payload())
+
+        # Session row must still be written.
+        row = tmp_db.execute(
+            "SELECT session_uuid FROM sessions WHERE session_uuid = ?;",
+            ("019673a0-aabb-7000-8000-000000000099",),
+        ).fetchone()
+        assert row is not None, "session must be upserted even when warm-up raises"
+
+        # A WARNING must be emitted naming the warm-up failure + the exception.
+        err = capsys.readouterr().err
+        assert (
+            "WARNING" in err and "warm-up" in err and "simulated warm-up failure" in err
+        ), f"expected WARNING naming warm-up + error on stderr; got: {err!r}"

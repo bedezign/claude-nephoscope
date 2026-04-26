@@ -35,6 +35,7 @@ import json
 import sqlite3
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 
 from nephoscope.lib.db import (  # noqa: E402
@@ -57,6 +58,7 @@ from nephoscope.lib.paths import (  # noqa: E402
     is_disabled,
     observations_db_path,
 )
+from nephoscope.lib.mirror.writer import cleanup_stale_tmp
 from nephoscope.lib.scope import Scope, get_additional_dirs
 
 PAYLOAD_MAX = 4096
@@ -276,18 +278,39 @@ def _handle_session_start(data: dict[str, Any]) -> None:
             project_id = upsert_project(conn, cwd, now)
         upsert_session(conn, session_uuid, project_id, now)
 
-        # Warm the additionalDirectories cache for the global mirror.
-        try:
-            get_additional_dirs(conn, Scope("global_mirror", 1))
-        except Exception:  # noqa: BLE001 — cache refresh must not crash.
-            pass
-
-        # Warm the additionalDirectories cache for the active project.
-        if project_id is not None:
+        def _sweep(query: str, args: tuple = (), *, label: str) -> None:
             try:
-                get_additional_dirs(conn, Scope("projects", project_id))
-            except Exception:  # noqa: BLE001
-                pass
+                row = conn.execute(query, args).fetchone()
+                if row and row[0]:
+                    cleanup_stale_tmp(Path(row[0]).parent, 300)
+            except Exception as exc:  # noqa: BLE001 — sweep failure must not crash the session.
+                print(
+                    f"WARNING: _handle_session_start sweep failed ({label}): {exc}",
+                    file=sys.stderr,
+                )
+
+        def _warm(scope: Scope, *, label: str) -> None:
+            try:
+                get_additional_dirs(conn, scope)
+            except Exception as exc:  # noqa: BLE001 — cache refresh must not crash.
+                print(
+                    f"WARNING: _handle_session_start cache warm-up failed ({label}): {exc}",
+                    file=sys.stderr,
+                )
+
+        # Sweep stale .tmp files and warm the additionalDirectories cache.
+        _sweep(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;",
+            label="global mirror",
+        )
+        _warm(Scope("global_mirror", 1), label="global mirror")
+        if project_id is not None:
+            _sweep(
+                "SELECT settings_json_path FROM projects WHERE id = ?;",
+                (project_id,),
+                label="active project",
+            )
+            _warm(Scope("projects", project_id), label="active project")
     finally:
         conn.close()
 

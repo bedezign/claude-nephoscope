@@ -53,6 +53,7 @@ from __future__ import annotations
 import enum
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -672,20 +673,22 @@ def _stamp_additional_dirs_cache(
             (raw_data.get("permissions") or {}).get("additionalDirectories") or []
         )
     ]
-    dirs_json = json.dumps(dirs)
-    if project_id is None:
-        conn.execute(
-            "UPDATE global_mirror"
-            " SET settings_json_mtime = ?, additional_dirs = ?"
-            " WHERE id = 1;",
-            (mtime, dirs_json),
-        )
-    else:
-        conn.execute(
-            "UPDATE projects"
-            " SET settings_json_mtime = ?, additional_dirs = ?"
-            " WHERE id = ?;",
-            (mtime, dirs_json, project_id),
+    table = "global_mirror" if project_id is None else "projects"
+    id_clause = "id = 1" if project_id is None else "id = ?"
+    id_args: tuple[int, ...] = () if project_id is None else (project_id,)
+    cur = conn.execute(
+        f"UPDATE {table}"
+        f" SET settings_json_mtime = ?, additional_dirs = ?"
+        f" WHERE {id_clause};",
+        (mtime, json.dumps(dirs)) + id_args,
+    )
+    if cur.rowcount == 0:
+        row_id = 1 if project_id is None else project_id
+        print(
+            f"WARNING: _stamp_additional_dirs_cache: no row updated"
+            f" (table={table}, id={row_id});"
+            f" cache will fall back to slow path until row exists",
+            file=sys.stderr,
         )
 
 

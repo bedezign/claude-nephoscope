@@ -586,6 +586,57 @@ def test_retry_settles_within_budget(tmp_path, db_conn):
     assert call_count >= 2, "must have retried at least once"
 
 
+# ---------------------------------------------------------------------------
+# B9: _stamp_hash rowcount observability
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_hash_warns_on_missing_row(db_conn, capsys):
+    """_stamp_hash emits a WARNING to stderr when the target row doesn't exist."""
+    from nephoscope.lib.mirror.writer import _stamp_hash
+
+    # project_id=999 has no matching projects row — UPDATE touches zero rows.
+    _stamp_hash(db_conn, project_id=999, new_hash="a" * 64, now="2026-01-01Z")
+
+    err = capsys.readouterr().err
+    assert "WARNING" in err, "expected WARNING in stderr when rowcount == 0"
+    assert "_stamp_hash" in err, (
+        "WARNING must name the function so the source is locatable"
+    )
+
+
+def test_stamp_hash_silent_on_existing_row(db_conn, capsys, tmp_path):
+    """_stamp_hash produces no stderr when the UPDATE actually hits a row."""
+    from nephoscope.lib.mirror.writer import _stamp_hash
+
+    # global_mirror row id=1 is seeded by the db_conn fixture.
+    _stamp_hash(db_conn, project_id=None, new_hash="b" * 64, now="2026-01-01Z")
+
+    err = capsys.readouterr().err
+    assert err == "", f"unexpected stderr when row exists: {err!r}"
+
+
+def test_stamp_cache_warns_on_missing_row(db_conn, capsys):
+    """_stamp_cache emits a WARNING to stderr when the target row doesn't exist."""
+    from nephoscope.lib.mirror.writer import _stamp_cache
+
+    _stamp_cache(db_conn, project_id=888, mtime=1234567890.0, dirs=[])
+
+    err = capsys.readouterr().err
+    assert "WARNING" in err, "expected WARNING in stderr when rowcount == 0"
+    assert "_stamp_cache" in err, "WARNING must name the function"
+
+
+def test_stamp_cache_silent_on_existing_row(db_conn, capsys, tmp_path):
+    """_stamp_cache produces no stderr when the UPDATE actually hits a row."""
+    from nephoscope.lib.mirror.writer import _stamp_cache
+
+    _stamp_cache(db_conn, project_id=None, mtime=1234567890.0, dirs=[])
+
+    err = capsys.readouterr().err
+    assert err == "", f"unexpected stderr when row exists: {err!r}"
+
+
 def test_retry_exhaustion_raises_mirror_hash_mismatch(tmp_path, db_conn):
     """Retry loop: after max_retries mismatches the exception propagates."""
     from nephoscope.lib.mirror import writer as writer_mod

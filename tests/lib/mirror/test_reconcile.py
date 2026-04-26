@@ -1431,3 +1431,32 @@ def test_plan_mode_stamps_cache(tmp_path):
     assert mtime is not None, "settings_json_mtime must be stamped in plan mode"
     assert dirs_json is not None, "additional_dirs must be stamped in plan mode"
     assert json.loads(dirs_json) == ["/plan/extra"]
+
+
+# ---------------------------------------------------------------------------
+# B9: _stamp_additional_dirs_cache rowcount observability
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_additional_dirs_cache_warns_on_missing_row(tmp_path, capsys):
+    """_stamp_additional_dirs_cache emits a WARNING when the target row doesn't exist."""
+    from nephoscope.lib.mirror.reconcile import _stamp_additional_dirs_cache
+
+    # Use an in-memory DB with schema applied but no global_mirror row seeded.
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.executescript(SCHEMA_PATH.read_text())
+    # Do NOT insert a global_mirror row — UPDATE must touch zero rows.
+
+    _stamp_additional_dirs_cache(
+        conn,
+        project_id=None,
+        target_path=tmp_path / "settings.json",
+        raw_data={},
+        mtime=0.0,
+    )
+
+    err = capsys.readouterr().err
+    assert "WARNING" in err, "expected WARNING in stderr when rowcount == 0"
+    assert "_stamp_additional_dirs_cache" in err, (
+        "WARNING must name the function so the source is locatable"
+    )

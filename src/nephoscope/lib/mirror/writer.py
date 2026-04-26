@@ -16,6 +16,7 @@ import fcntl
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -100,24 +101,43 @@ def _read_stored_hash(conn: sqlite3.Connection, project_id: int | None) -> str |
     return row[0] if row else None
 
 
+def _scope_params(
+    project_id: int | None,
+) -> tuple[str, str, tuple[int, ...]]:
+    """Return (table, id_clause, id_args) for the given scope.
+
+    Global mirror → ('global_mirror', 'id = 1', ()).
+    Project scope → ('projects', 'id = ?', (project_id,)).
+    """
+    if project_id is None:
+        return "global_mirror", "id = 1", ()
+    return "projects", "id = ?", (project_id,)
+
+
+def _warn_if_no_row(fn_name: str, table: str, project_id: int | None) -> None:
+    """Emit a WARNING when a stamp UPDATE touched zero rows."""
+    row_id = 1 if project_id is None else project_id
+    print(
+        f"WARNING: {fn_name}: no row updated"
+        f" (table={table}, id={row_id});"
+        f" cache will fall back to slow path until row exists",
+        file=sys.stderr,
+    )
+
+
 def _stamp_hash(
     conn: sqlite3.Connection, project_id: int | None, new_hash: str, now: str
 ) -> None:
     """Persist the new hash and last_synced timestamp to the DB."""
-    if project_id is None:
-        conn.execute(
-            "UPDATE global_mirror"
-            " SET settings_json_sha256 = ?, settings_json_last_synced = ?"
-            " WHERE id = 1;",
-            (new_hash, now),
-        )
-    else:
-        conn.execute(
-            "UPDATE projects"
-            " SET settings_json_sha256 = ?, settings_json_last_synced = ?"
-            " WHERE id = ?;",
-            (new_hash, now, project_id),
-        )
+    table, id_clause, id_args = _scope_params(project_id)
+    cur = conn.execute(
+        f"UPDATE {table}"
+        f" SET settings_json_sha256 = ?, settings_json_last_synced = ?"
+        f" WHERE {id_clause};",
+        (new_hash, now) + id_args,
+    )
+    if cur.rowcount == 0:
+        _warn_if_no_row("_stamp_hash", table, project_id)
 
 
 def _stamp_cache(
@@ -127,21 +147,16 @@ def _stamp_cache(
     dirs: list[str],
 ) -> None:
     """Persist settings_json_mtime and additional_dirs to the DB cache."""
+    table, id_clause, id_args = _scope_params(project_id)
     dirs_json = json.dumps(dirs)
-    if project_id is None:
-        conn.execute(
-            "UPDATE global_mirror"
-            " SET settings_json_mtime = ?, additional_dirs = ?"
-            " WHERE id = 1;",
-            (mtime, dirs_json),
-        )
-    else:
-        conn.execute(
-            "UPDATE projects"
-            " SET settings_json_mtime = ?, additional_dirs = ?"
-            " WHERE id = ?;",
-            (mtime, dirs_json, project_id),
-        )
+    cur = conn.execute(
+        f"UPDATE {table}"
+        f" SET settings_json_mtime = ?, additional_dirs = ?"
+        f" WHERE {id_clause};",
+        (mtime, dirs_json) + id_args,
+    )
+    if cur.rowcount == 0:
+        _warn_if_no_row("_stamp_cache", table, project_id)
 
 
 def _build_content(
