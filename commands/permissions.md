@@ -163,10 +163,10 @@ Emit eligible candidates (thresholds met, not on deny list) for review.
 
 Interactively walk through candidates with per-axis (verb/paths/flags) and tier prompts.
 
-The `review.sh` launcher lives inside the installed package; invoke it via its absolute path under `${CLAUDE_PLUGIN_ROOT}`:
+Invoke the `nephoscope-review` console script:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/src/nephoscope/learners/permission/scripts/review.sh"
+nephoscope-review
 ```
 
 ### `list`
@@ -381,7 +381,7 @@ Touch `settings.json` mtime via `Path.touch()` to force Claude Code's settings r
 
 4. **Narrow tool allowlist**: Only Bash (scoped to the plugin venv, standard text utilities, and `sqlite3`) and Read. No Agent spawning, no external API calls, no network access.
 
-5. **Output format**: Learner commands produce pipe-delimited or JSON output; `review.sh` and GC scripts print counts/results to stdout; SQLite queries use `.headers` and `.mode column` for readability.
+5. **Output format**: Learner commands produce pipe-delimited or JSON output; `nephoscope-review` and GC scripts print counts/results to stdout; SQLite queries use `.headers` and `.mode column` for readability.
 
 ## Example workflows
 

@@ -33,6 +33,8 @@ nephoscope-learn             = "nephoscope.learners.permission.learner:main"
 nephoscope-summarize         = "nephoscope.learners.instinct.summarize:main"
 nephoscope-permissions       = "nephoscope.cli.permissions_cmd:main"
 nephoscope-init              = "nephoscope.cli.init_cmd:main"
+nephoscope-review            = "nephoscope.cli.review_cmd:main"
+nephoscope-observer          = "nephoscope.cli.observer_cmd:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -40,3 +42,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

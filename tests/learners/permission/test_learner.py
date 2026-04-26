@@ -1144,7 +1144,10 @@ class TestSubsumeSiblings:
             db.insert_permission(tmp_db, shape_id, None, None, "approved", "seed", now)
         tmp_db.commit()
 
-        with _mock_connect(tmp_db):
+        with (
+            _mock_connect(tmp_db),
+            mock.patch("nephoscope.lib.mirror.writer.sync_global", return_value=None),
+        ):
             learner_main(
                 [
                     "subsume-siblings",
@@ -1172,7 +1175,10 @@ class TestSubsumeSiblings:
         db.insert_permission(tmp_db, shape_wild, None, None, "approved", "seed", now)
         tmp_db.commit()
 
-        with _mock_connect(tmp_db):
+        with (
+            _mock_connect(tmp_db),
+            mock.patch("nephoscope.lib.mirror.writer.sync_global", return_value=None),
+        ):
             learner_main(
                 [
                     "subsume-siblings",

@@ -765,6 +765,12 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
 
     Prints a one-line summary: ``"subsumed N concrete sibling rule(s)"``.
     """
+    from nephoscope.lib.mirror.writer import (
+        MirrorHashMismatch,
+        sync_global,
+        sync_project,
+    )
+
     conn = _connect()
     try:
         session_id, project_id = _resolve_tier_ids(
@@ -785,12 +791,26 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
             (session_id, project_id, args.verb, args.subcommand),
         )
         deleted = cur.rowcount or 0
+        if deleted > 0 and session_id is None:
+            try:
+                if project_id is None:
+                    sync_global(conn)
+                else:
+                    sync_project(conn, project_id)
+            except MirrorHashMismatch as exc:
+                path = str(exc).split(":")[0]
+                print(
+                    f"The settings file at {path} was edited externally — "
+                    f"run '/nephoscope:permissions reconcile' and retry.",
+                    file=sys.stderr,
+                )
+                return 1
     finally:
         conn.close()
 
     rule_word = "rule" if deleted == 1 else "rules"
     if deleted == 0:
-        print(f"Removed 0 more-specific {rule_word} (nothing to clean up).")
+        print("Removed 0 more-specific rules (nothing to clean up).")
     else:
         print(
             f"Removed {deleted} more-specific {rule_word} that the wildcard rule now covers."

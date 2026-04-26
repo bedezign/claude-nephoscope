@@ -118,14 +118,13 @@ The JSON mirror is the primary gate: once a rule is in `settings.json`, the nati
 
 ## Review CLI
 
-Candidates accumulate as tool calls are observed. The primary entry is `/nephoscope:permissions review` from a Claude Code session (Claude Code expands `${CLAUDE_PLUGIN_ROOT}` for the hook-hosted shell). To invoke the script directly from a terminal, resolve the plugin cache path first:
+Candidates accumulate as tool calls are observed. The primary entry is `/nephoscope:permissions review` from a Claude Code session. To invoke directly from a terminal:
 
 ```bash
-PLUGIN_ROOT=$(ls -d ~/.claude/plugins/cache/bedezign/nephoscope/*/ | sort -V | tail -n1)
-bash "${PLUGIN_ROOT}src/nephoscope/learners/permission/scripts/review.sh"
+nephoscope-review
 ```
 
-Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). The script shells out to `nephoscope-learn promote --sync`; on `MirrorHashMismatch` it stops and instructs the user to run `/nephoscope:permissions reconcile`.
+Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). Calls into `lib.db` and `learner` directly; on `MirrorHashMismatch` it stops and instructs the user to run `/nephoscope:permissions reconcile`.
 
 ## Fixture round-trip
 
@@ -153,8 +152,10 @@ Runs as a 5-minute daemon loop that writes compact text summaries over recent to
 It's a manual daemon, not a plugin hook — launch it from your own shell:
 
 ```bash
-PLUGIN_ROOT=$(ls -d ~/.claude/plugins/cache/bedezign/nephoscope/*/ | sort -V | tail -n1)
-bash "${PLUGIN_ROOT}src/nephoscope/learners/instinct/scripts/start-observer.sh" start|status|stop
+nephoscope-observer start     # start in background
+nephoscope-observer status    # check status
+nephoscope-observer stop      # stop daemon
+nephoscope-observer foreground  # run in foreground (for debugging)
 ```
 
 State (log + PID file) lives under `${CLAUDE_PLUGIN_DATA}` — for a `nephoscope@bedezign` install that resolves to `~/.claude/plugins/data/nephoscope-bedezign/`.
