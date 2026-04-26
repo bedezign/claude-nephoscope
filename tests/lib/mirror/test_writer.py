@@ -103,6 +103,13 @@ def test_sync_global_creates_mirror_with_empty_db(tmp_path, db_conn):
     assert stored_hash is not None, "hash was not stamped"
     assert stored_hash == settings_permissions_hash(target.read_bytes())
 
+    # Cache columns must be populated after sync.
+    row = db_conn.execute(
+        "SELECT settings_json_mtime, additional_dirs FROM global_mirror WHERE id = 1;"
+    ).fetchone()
+    assert row[0] == target.stat().st_mtime, "settings_json_mtime must match file mtime"
+    assert row[1] == "[]", "additional_dirs must be an empty JSON array when no dirs"
+
 
 # ---------------------------------------------------------------------------
 # First-touch: stored hash IS NULL → sync succeeds, stamps hash
@@ -418,6 +425,18 @@ def test_sync_project_writes_mirror_for_project(tmp_path, db_conn):
         (project_id,),
     ).fetchone()[0]
     assert stored == settings_permissions_hash(local_json.read_bytes())
+
+    # Cache columns must be populated after project sync.
+    cache_row = db_conn.execute(
+        "SELECT settings_json_mtime, additional_dirs FROM projects WHERE id = ?;",
+        (project_id,),
+    ).fetchone()
+    assert cache_row[0] == local_json.stat().st_mtime, (
+        "settings_json_mtime must match file mtime after project sync"
+    )
+    assert cache_row[1] == "[]", (
+        "additional_dirs must be an empty JSON array when no dirs present"
+    )
 
 
 def test_sync_project_raises_for_unknown_project(tmp_path, db_conn):
@@ -862,6 +881,63 @@ def test_sync_preserves_permissions_default_mode(tmp_path, db_conn):
     data = json.loads(target.read_bytes())
     assert data["permissions"].get("defaultMode") == "auto", (
         "permissions.defaultMode must survive a sync"
+    )
+
+
+def test_sync_preserves_and_caches_additional_directories(tmp_path, db_conn):
+    """additionalDirectories in the existing file survive read-merge-write and
+    are stored in the DB cache (settings_json_mtime + additional_dirs).
+
+    Flow:
+    1. Pre-write a settings.json with permissions.additionalDirectories set.
+    2. Stamp the hash so the mismatch check passes.
+    3. sync_global → the writer reads, merges DB rows, writes back.
+    4. The output file must still contain the additionalDirectories entries.
+    5. The DB cache columns must reflect the mtime and the dirs array.
+    """
+    from nephoscope.lib.mirror.writer import sync_global
+
+    target = Path(
+        db_conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+    )
+    extra_dirs = ["/opt/company/shared", "/mnt/data"]
+    existing = {
+        "permissions": {
+            "allow": [],
+            "deny": [],
+            "ask": [],
+            "additionalDirectories": extra_dirs,
+        },
+    }
+    target.write_text(json.dumps(existing, indent=2))
+    current_hash = settings_permissions_hash(target.read_bytes())
+    db_conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
+        (current_hash,),
+    )
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        sync_global(db_conn)
+
+    # The written file must still carry additionalDirectories.
+    data = json.loads(target.read_bytes())
+    assert data["permissions"].get("additionalDirectories") == extra_dirs, (
+        "additionalDirectories must survive read-merge-write"
+    )
+
+    # DB cache must be populated with the file mtime and dirs.
+    row = db_conn.execute(
+        "SELECT settings_json_mtime, additional_dirs FROM global_mirror WHERE id = 1;"
+    ).fetchone()
+    assert row[0] == target.stat().st_mtime, (
+        "settings_json_mtime must match the written file's mtime"
+    )
+    assert json.loads(row[1]) == extra_dirs, (
+        "additional_dirs cache must contain the written additionalDirectories"
     )
 
 

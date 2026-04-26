@@ -120,6 +120,30 @@ def _stamp_hash(
         )
 
 
+def _stamp_cache(
+    conn: sqlite3.Connection,
+    project_id: int | None,
+    mtime: float,
+    dirs: list[str],
+) -> None:
+    """Persist settings_json_mtime and additional_dirs to the DB cache."""
+    dirs_json = json.dumps(dirs)
+    if project_id is None:
+        conn.execute(
+            "UPDATE global_mirror"
+            " SET settings_json_mtime = ?, additional_dirs = ?"
+            " WHERE id = 1;",
+            (mtime, dirs_json),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects"
+            " SET settings_json_mtime = ?, additional_dirs = ?"
+            " WHERE id = ?;",
+            (mtime, dirs_json, project_id),
+        )
+
+
 def _build_content(
     conn: sqlite3.Connection,
     project_id: int | None,
@@ -288,6 +312,17 @@ def _atomic_write(
             # Re-hash the written content and persist to DB.
             new_hash = settings_permissions_hash(content)
             _stamp_hash(conn, project_id, new_hash, _now())
+
+            # Populate the mtime + additionalDirectories cache from the just-written
+            # content (already in memory — no second file read needed).
+            mtime = target.stat().st_mtime
+            parsed = json.loads(content)
+            raw_dirs = (parsed.get("permissions") or {}).get(
+                "additionalDirectories"
+            ) or []
+            dirs = [str(d) for d in raw_dirs]
+            _stamp_cache(conn, project_id, mtime, dirs)
+
             return  # success — release flock in finally
 
         # Unreachable: the loop always either returns or raises inside.

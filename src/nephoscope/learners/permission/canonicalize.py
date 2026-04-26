@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 import bashlex
@@ -267,11 +268,24 @@ def parse_command(raw: str) -> list[CanonicalLeaf]:
     return leaves
 
 
-def to_pattern_form(leaf: CanonicalLeaf, ctx: dict[str, str]) -> list[PatternVariant]:
+def to_pattern_form(
+    leaf: CanonicalLeaf,
+    ctx: dict[str, str],
+    additional_dirs: list[str] | None = None,
+) -> list[PatternVariant]:
     """Return pattern variants for ``leaf`` given path context.
 
     ``ctx`` accepts any subset of ``{"cwd", "project_root", "home"}`` mapping
     to absolute directory paths for the current session.
+
+    ``additional_dirs`` is an optional list of absolute directory paths from
+    ``permissions.additionalDirectories`` (global + project merged).  Positional
+    paths that fall under one of these directories and do not match any ctx-var
+    prefix are emitted as **inline absolute** path-specs (e.g.
+    ``"/opt/company/shared/**"`` and ``"/opt/company/shared/build/output"``).
+    No ``$VAR`` placeholder is introduced — the matcher's existing
+    ``"$" in path_spec`` branch already bypasses placeholder resolution for
+    literal absolute specs, so they round-trip cleanly through the DB.
 
     Returns a list of :class:`PatternVariant` objects covering:
 
@@ -282,7 +296,8 @@ def to_pattern_form(leaf: CanonicalLeaf, ctx: dict[str, str]) -> list[PatternVar
        prefix wins; PROJECT_ROOT beats CWD beats HOME on equal length.
     3. **Path-spec variants** — one ``$VAR/**`` and one ``$VAR/<tail>`` variant
        per distinct positional path that lies under a ctx var.  Both use the
-       verb-patterned form when available.
+       verb-patterned form when available.  For paths that fall under an
+       additional_dir instead, inline absolute path-specs are emitted.
     4. **Flags-wildcard** — a single variant with ``flags="*"`` and the best
        available verb form.
 
@@ -290,6 +305,7 @@ def to_pattern_form(leaf: CanonicalLeaf, ctx: dict[str, str]) -> list[PatternVar
     so the most specific variants come first.
     """
     ordered = _ctx_pairs_ordered(ctx)
+    norm_extra = _normalise_dirs(additional_dirs)
     flags_literal = _flags_json(leaf.flags)
 
     verb_patterned = _substitute_prefix(leaf.verb, ordered)
@@ -300,7 +316,11 @@ def to_pattern_form(leaf: CanonicalLeaf, ctx: dict[str, str]) -> list[PatternVar
     base_path_spec: str | None = "" if not leaf.positional_paths else None
 
     # Collect distinct path_spec strings derived from positional_paths.
-    path_specs: list[str] = _path_specs_from_positionals(leaf.positional_paths, ordered)
+    # Pass norm_extra (already normalised) so _path_specs_from_positionals
+    # does not re-run _normalise_dirs a second time.
+    path_specs: list[str] = _path_specs_from_positionals(
+        leaf.positional_paths, ordered, norm_extra
+    )
 
     seen: set[PatternVariant] = set()
     variants: list[PatternVariant] = []
@@ -396,9 +416,23 @@ def _substitute_prefix(s: str, ordered: list[tuple[str, str]]) -> str | None:
     return None
 
 
+def _normalise_dirs(dirs: list[str] | None) -> list[str]:
+    """Expand ``~``, strip trailing slashes, skip blank entries.
+
+    Returns an empty list when ``dirs`` is None or empty so callers can
+    iterate unconditionally.  Non-existent directories are kept as-is — the
+    match is purely lexicographic, not filesystem-based, so a directory that
+    doesn't exist on disk is tolerated without error.
+    """
+    if not dirs:
+        return []
+    return [str(Path(d).expanduser()).rstrip("/") for d in dirs if d and d.strip()]
+
+
 def _path_specs_from_positionals(
     positional_paths: tuple[str, ...],
     ordered: list[tuple[str, str]],
+    additional_dirs: list[str] | None = None,
 ) -> list[str]:
     """Derive ``path_spec`` strings from positional path arguments.
 
@@ -406,17 +440,58 @@ def _path_specs_from_positionals(
       - ``"$VAR/**"``        — any path under that variable
       - ``"$VAR/<tail>"``    — the specific subpath
 
-    Deduplicates while preserving insertion order (``$VAR/**`` before
-    ``$VAR/<tail>`` for the same base, ordered by specificity of path).
+    For each positional path that lies under an additional_dir (and did NOT
+    match any ctx variable), emit the inline absolute equivalents:
+      - ``"<dir>/**"``       — any path under the additional directory
+      - ``"<dir>/<tail>"``   — the specific subpath
+
+    Ctx-var matches take priority over additional_dir matches — a path under
+    both ``$PROJECT_ROOT`` and an additional_dir will be emitted with the
+    ``$PROJECT_ROOT`` placeholder, not the inline form.
+
+    Deduplicates while preserving insertion order (``**`` glob before specific
+    path for the same base, ordered by the position of the matched directory).
+
+    ``additional_dirs`` may be pre-normalised (from ``to_pattern_form``) or raw.
+    ``_normalise_dirs`` is idempotent on already-absolute paths, so calling it
+    here is safe either way and ensures direct callers also get expansion.
     """
+    norm_extra = _normalise_dirs(additional_dirs)
     seen: set[str] = set()
     result: list[str] = []
 
     for path in positional_paths:
         if not path.startswith("/"):
             continue
+
+        # --- ctx-var prefix check (placeholder wins over inline-absolute) ---
+        matched_ctx = False
         for var_name, base in ordered:
             glob = var_name + "/**"
+            if path == base:
+                if glob not in seen:
+                    seen.add(glob)
+                    result.append(glob)
+                matched_ctx = True
+                break
+            if path.startswith(base + "/"):
+                tail = path[len(base) + 1 :]
+                specific = var_name + "/" + tail
+                if glob not in seen:
+                    seen.add(glob)
+                    result.append(glob)
+                if specific not in seen:
+                    seen.add(specific)
+                    result.append(specific)
+                matched_ctx = True
+                break
+
+        if matched_ctx:
+            continue
+
+        # --- additional_dirs fallback (inline absolute, no $VAR prefix) ---
+        for base in norm_extra:
+            glob = base + "/**"
             if path == base:
                 if glob not in seen:
                     seen.add(glob)
@@ -424,7 +499,7 @@ def _path_specs_from_positionals(
                 break
             if path.startswith(base + "/"):
                 tail = path[len(base) + 1 :]
-                specific = var_name + "/" + tail
+                specific = base + "/" + tail
                 if glob not in seen:
                     seen.add(glob)
                     result.append(glob)

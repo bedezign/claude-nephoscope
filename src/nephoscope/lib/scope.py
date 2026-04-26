@@ -1,22 +1,93 @@
 """Project-scope utilities for observed tool calls.
 
-Two main functions:
+Three main exports:
 
-1. resolve_project_root(cwd): Apply a three-rule resolution to find the
+1. Scope: lightweight dataclass naming the table and row id for mtime-cached reads.
+
+2. resolve_project_root(cwd): Apply a three-rule resolution to find the
    project root from the session's working directory.
    - Rule 1: If cwd basename is "repository", return parent (three-dir workspace).
    - Rule 2: If in a git repo, return git toplevel.
    - Rule 3: Fall back to cwd.
 
-2. paths_for_tool_call(tool, tool_input): Extract path-like values from a
+3. paths_for_tool_call(tool, tool_input): Extract path-like values from a
    tool_input payload for use in permission checks and logging.
+
+4. get_additional_dirs(conn, scope): Return additionalDirectories for the given
+   scope via an mtime-gated DB cache.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_VALID_TABLES: frozenset[str] = frozenset({"global_mirror", "projects"})
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Names the mirror-bearing table and row id for mtime-cached DB reads.
+
+    ``table`` is either ``'global_mirror'`` (singleton, id=1) or ``'projects'``
+    (project rows identified by their integer pk). The two tables share the same
+    column names for the settings-json cache columns.
+    """
+
+    table: str
+    id: int
+
+    def __post_init__(self) -> None:
+        if self.table not in _VALID_TABLES:
+            raise ValueError(
+                f"Scope.table must be one of {sorted(_VALID_TABLES)},"
+                f" got {self.table!r}"
+            )
+
+
+def get_additional_dirs(conn: sqlite3.Connection, scope: Scope) -> list[str]:
+    """Return additionalDirectories for the given scope.
+
+    Fast path: settings.json mtime matches cached mtime — return cached array.
+    Slow path: mtime differs (or no cache yet) — re-read, re-parse, restamp.
+
+    Malformed / missing / non-UTF-8 settings file: return [] (consistent with
+    the malformed-file handling in mirror-hash + hash-status). On a malformed
+    slow-path read, the cache is left unchanged — a previous good cache must
+    not be overwritten with empty due to a transient file corruption.
+    """
+    row = conn.execute(
+        f"SELECT settings_json_path, settings_json_mtime, additional_dirs"
+        f" FROM {scope.table} WHERE id = ?;",
+        (scope.id,),
+    ).fetchone()
+    if row is None or not row[0]:
+        return []
+    path_str, cached_mtime, cached_json = row
+    p = Path(path_str).expanduser()
+    try:
+        on_disk_mtime = p.stat().st_mtime
+    except OSError:
+        return []
+    if cached_mtime is not None and cached_mtime == on_disk_mtime and cached_json:
+        return json.loads(cached_json)
+    # Slow path — re-parse the file.
+    try:
+        data = json.loads(p.read_bytes())
+    except (OSError, ValueError, TypeError):
+        return []
+    dirs = (data.get("permissions") or {}).get("additionalDirectories") or []
+    dirs = [str(d) for d in dirs]
+    conn.execute(
+        f"UPDATE {scope.table} SET settings_json_mtime = ?, additional_dirs = ?"
+        f" WHERE id = ?;",
+        (on_disk_mtime, json.dumps(dirs), scope.id),
+    )
+    return dirs
 
 
 # Path-bearing tool inputs. For each tool, the key(s) whose values are

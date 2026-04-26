@@ -57,6 +57,7 @@ from nephoscope.lib.paths import (  # noqa: E402
     is_disabled,
     observations_db_path,
 )
+from nephoscope.lib.scope import Scope, get_additional_dirs
 
 PAYLOAD_MAX = 4096
 RESPONSE_MAX = 2048
@@ -257,6 +258,11 @@ def _handle_session_start(data: dict[str, Any]) -> None:
     Upserts the session + project rows. No ``tool_calls`` write — the
     SessionStart phase is metadata-only. Missing ``session_id`` is a
     no-op (fails open; next pre/post will repair state).
+
+    Also refreshes the additionalDirectories cache for the global mirror and
+    the active project (if one exists). The mtime check makes each call cheap
+    when the cache is already fresh. Errors are swallowed — a cache-refresh
+    failure must never crash the session.
     """
     session_uuid = data.get("session_id") or data.get("session") or ""
     if not session_uuid:
@@ -269,6 +275,19 @@ def _handle_session_start(data: dict[str, Any]) -> None:
         if cwd:
             project_id = upsert_project(conn, cwd, now)
         upsert_session(conn, session_uuid, project_id, now)
+
+        # Warm the additionalDirectories cache for the global mirror.
+        try:
+            get_additional_dirs(conn, Scope("global_mirror", 1))
+        except Exception:  # noqa: BLE001 — cache refresh must not crash.
+            pass
+
+        # Warm the additionalDirectories cache for the active project.
+        if project_id is not None:
+            try:
+                get_additional_dirs(conn, Scope("projects", project_id))
+            except Exception:  # noqa: BLE001
+                pass
     finally:
         conn.close()
 

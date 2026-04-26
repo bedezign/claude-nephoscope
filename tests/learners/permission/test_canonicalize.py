@@ -755,3 +755,287 @@ def test_mixed_positionals_in_and_outside_ctx():
     assert "$PROJECT_ROOT/src/main.py" in path_specs
     # /usr/lib path should not produce any $VAR path_spec.
     assert not any(ps and "$" in ps and "lib" in ps for ps in path_specs)
+
+
+# ===========================================================================
+# to_pattern_form — additional_dirs (Batch 4)
+# ===========================================================================
+
+EXTRA_DIR = "/opt/company/shared"
+EXTRA_DIR_2 = "/mnt/datasets"
+
+# Full ctx identical to CTX_FULL defined above (repeated here for locality).
+_CTX_B4 = {"home": HOME, "project_root": PROJECT, "cwd": CWD}
+
+
+def test_path_under_additional_dir_emits_inline_glob_and_specific():
+    """A positional under an additional_dir → <dir>/** + <dir>/<tail>, no $VAR."""
+    path = EXTRA_DIR + "/build/output.bin"
+    leaf = _leaf("rm", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR])
+    path_specs = {v.path_spec for v in variants}
+    assert EXTRA_DIR + "/**" in path_specs
+    assert EXTRA_DIR + "/build/output.bin" in path_specs
+    # No $VAR placeholder in any of the extra-dir specs.
+    extra_specs = {ps for ps in path_specs if ps and EXTRA_DIR in ps}
+    assert not any("$" in ps for ps in extra_specs)
+
+
+def test_path_not_under_any_additional_dir_falls_back_to_current_behaviour():
+    """A path outside both ctx and additional_dirs → no extra path_spec emitted."""
+    path = "/usr/local/lib/libfoo.so"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR])
+    path_specs = {v.path_spec for v in variants if v.path_spec}
+    # No entry containing a path_spec for the /usr/local path.
+    assert not any("lib" in (ps or "") for ps in path_specs)
+
+
+def test_ctx_var_prefix_beats_additional_dir_when_path_under_both():
+    """$PROJECT_ROOT takes priority over an additional_dir that overlaps it."""
+    # Make extra dir a parent of project, so the path is under both.
+    shared_parent = "/home/alice"  # same as HOME — overlaps with ctx home key
+    path = PROJECT + "/src/main.py"
+    leaf = _leaf("cat", positional_paths=(path,))
+    # additional_dirs includes HOME prefix, but ctx-var match must win.
+    variants = to_pattern_form(leaf, _CTX_B4, [shared_parent])
+    path_specs = {v.path_spec for v in variants}
+    # $PROJECT_ROOT variant must be present.
+    assert "$PROJECT_ROOT/**" in path_specs
+    assert "$PROJECT_ROOT/src/main.py" in path_specs
+    # No inline absolute path_spec for the shared_parent — ctx wins.
+    assert not any(
+        ps and ps.startswith(shared_parent) and "$" not in ps for ps in path_specs
+    )
+
+
+def test_additional_dirs_empty_list_no_change_from_pre_batch4_behaviour():
+    """Passing an empty additional_dirs list behaves identically to omitting it."""
+    path = f"{PROJECT}/target"
+    leaf = _leaf("rm", positional_paths=(path,))
+    without = to_pattern_form(leaf, _CTX_B4)
+    with_empty = to_pattern_form(leaf, _CTX_B4, [])
+    assert without == with_empty
+
+
+def test_additional_dirs_none_no_change_from_pre_batch4_behaviour():
+    """Passing additional_dirs=None behaves identically to the default."""
+    leaf = _leaf("git", subcommand="status")
+    without = to_pattern_form(leaf, _CTX_B4)
+    with_none = to_pattern_form(leaf, _CTX_B4, None)
+    assert without == with_none
+
+
+def test_additional_dir_with_trailing_slash_still_matches():
+    """Trailing slashes on additional_dir entries are stripped before matching."""
+    path = EXTRA_DIR + "/data/x.csv"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR + "/"])
+    path_specs = {v.path_spec for v in variants}
+    assert EXTRA_DIR + "/**" in path_specs
+    assert EXTRA_DIR + "/data/x.csv" in path_specs
+
+
+def test_additional_dir_without_trailing_slash_still_matches():
+    """Entries without trailing slashes also match correctly (no double-slash)."""
+    path = EXTRA_DIR + "/data/x.csv"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR])
+    path_specs = {v.path_spec for v in variants}
+    # Must not produce double-slash artifacts.
+    assert not any("//" in (ps or "") for ps in path_specs)
+    assert EXTRA_DIR + "/data/x.csv" in path_specs
+
+
+def test_additional_dir_that_does_not_exist_on_disk_is_tolerated():
+    """Non-existent additional_dirs are accepted — matching is purely lexicographic."""
+    nonexistent = "/nonexistent/vanished/dir"
+    path = nonexistent + "/file.txt"
+    leaf = _leaf("rm", positional_paths=(path,))
+    # Must not raise; matching works normally.
+    variants = to_pattern_form(leaf, _CTX_B4, [nonexistent])
+    path_specs = {v.path_spec for v in variants}
+    assert nonexistent + "/**" in path_specs
+    assert nonexistent + "/file.txt" in path_specs
+
+
+def test_multiple_additional_dirs_first_match_wins():
+    """When multiple additional_dirs match, only the first matching one emits specs."""
+    path = EXTRA_DIR + "/subdir/file.bin"
+    leaf = _leaf("cat", positional_paths=(path,))
+    # EXTRA_DIR matches; EXTRA_DIR_2 does not.
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR, EXTRA_DIR_2])
+    path_specs = {v.path_spec for v in variants}
+    assert EXTRA_DIR + "/**" in path_specs
+    # EXTRA_DIR_2 specs must not appear.
+    assert not any((ps or "").startswith(EXTRA_DIR_2) for ps in path_specs)
+
+
+def test_path_exactly_equal_to_additional_dir_emits_glob_only():
+    """A path that equals an additional_dir exactly → only <dir>/** (no specific)."""
+    path = EXTRA_DIR  # exact match
+    leaf = _leaf("ls", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR])
+    path_specs = {v.path_spec for v in variants}
+    assert EXTRA_DIR + "/**" in path_specs
+    # The specific form is just the dir itself, not <dir>/<tail> — not emitted.
+    assert EXTRA_DIR not in path_specs  # exact dir is not a "tail" entry
+
+
+def test_no_duplicate_variants_with_additional_dirs():
+    """Deduplication holds when additional_dirs are in play."""
+    path = EXTRA_DIR + "/file.py"
+    leaf = _leaf("rm", positional_paths=(path, path))  # same path twice
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR])
+    assert len(variants) == len(set(variants))
+
+
+def test_additional_dirs_produces_no_dollar_in_path_spec():
+    """Inline absolute path-specs never contain a $ prefix."""
+    path = EXTRA_DIR + "/build/out"
+    leaf = _leaf("ls", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B4, [EXTRA_DIR])
+    extra_specs = [
+        v.path_spec
+        for v in variants
+        if v.path_spec and EXTRA_DIR in (v.path_spec or "")
+    ]
+    assert extra_specs, "Expected at least one additional-dir path_spec"
+    for ps in extra_specs:
+        assert "$" not in ps, f"Unexpected $ in inline absolute path_spec: {ps}"
+
+
+# ===========================================================================
+# Integration boundary: additional_dirs flows from parse_command → to_pattern_form
+# → rule_shape lookup → Verdict
+#
+# This exercises the full path:
+#   parse_command produces a leaf with positional_paths under an additional_dir
+#   to_pattern_form with additional_dirs produces an inline absolute path_spec
+#   a rule_shape keyed on that path_spec produces an approved verdict via bash_match
+# ===========================================================================
+
+
+def test_tilde_in_additional_dirs_expands_to_absolute_and_matches():
+    """A ``~/Downloads``-style entry is expanded to an absolute path before matching.
+
+    Without ``expanduser``, the stored string is ``~/Downloads`` (literal tilde),
+    and ``path.startswith("~/Downloads/")`` always fails because the canonicalized
+    positional path is absolute (``/home/<user>/Downloads/...``).
+    """
+    import os
+
+    downloads_abs = os.path.expanduser("~/Downloads")
+    positional = os.path.join(downloads_abs, "foo.tar.gz")
+
+    leaf = _leaf("cat", positional_paths=(positional,))
+    # Pass the tilde form as the additional_dir — must still match.
+    variants = to_pattern_form(leaf, {}, ["~/Downloads"])
+    path_specs = {v.path_spec for v in variants}
+    assert downloads_abs + "/**" in path_specs, (
+        f"Expected {downloads_abs + '/**'!r} in {path_specs!r}"
+    )
+    assert downloads_abs + "/foo.tar.gz" in path_specs
+
+
+def test_additional_dirs_inline_path_spec_round_trips_through_bash_match():
+    """Full integration: additional_dir path → inline path_spec → bash_match Allow.
+
+    1. ``parse_command`` extracts the positional path.
+    2. ``to_pattern_form(leaf, ctx, [extra_dir])`` produces the inline glob.
+    3. The inline glob is stored as a rule_shape path_spec.
+    4. ``bash_match`` resolves the leaf against the DB and returns Allow.
+    """
+    import sqlite3 as _sqlite3
+
+    from nephoscope.learners.permission.match.bash import match as _bash_match
+
+    extra_dir = "/opt/shared/tools"
+    cmd = f"ls {extra_dir}/scripts"
+
+    # Parse the command.
+    leaves = parse_command(cmd)
+    assert leaves, "parse_command must return at least one leaf"
+    ls_leaf = next(lf for lf in leaves if lf.verb == "ls")
+
+    # Build variants with the additional_dir.
+    ctx: dict[str, str] = {}  # no $HOME/$PROJECT_ROOT/$CWD on purpose
+    variants = to_pattern_form(ls_leaf, ctx, [extra_dir])
+    path_specs = {v.path_spec for v in variants}
+    expected_glob = extra_dir + "/**"
+    assert expected_glob in path_specs, (
+        f"Expected {expected_glob!r} in path_specs, got: {path_specs}"
+    )
+
+    # Build an in-memory DB with the minimal schema needed.
+    conn = _sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE rule_shapes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            verb TEXT NOT NULL,
+            subcommand TEXT,
+            flags TEXT NOT NULL DEFAULT '[]',
+            path_spec TEXT,
+            created_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_shape_id INTEGER NOT NULL,
+            session_id INTEGER,
+            project_id INTEGER,
+            decision TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'test',
+            created_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE call_statuses (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE tools (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE permission_modes (id INTEGER PRIMARY KEY, name TEXT);
+    """)
+
+    # Insert a rule_shape for (ls, None, [], <extra_dir>/**) → approved.
+    cur = conn.execute(
+        "INSERT INTO rule_shapes (verb, subcommand, flags, path_spec, created_at)"
+        " VALUES ('ls', NULL, '[]', ?, '2025-01-01Z');",
+        (expected_glob,),
+    )
+    shape_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO permissions (rule_shape_id, session_id, project_id, decision)"
+        " VALUES (?, NULL, NULL, 'approved');",
+        (shape_id,),
+    )
+    conn.commit()
+
+    # Patch lookup_permissions so it works without the full schema.
+    import nephoscope.lib.db as _db
+
+    _orig = _db.lookup_permissions
+
+    def _lookup(c, sid, sess, proj):
+        rows = c.execute(
+            "SELECT decision FROM permissions"
+            " WHERE rule_shape_id = ?"
+            "   AND session_id IS ?"
+            "   AND project_id IS ?;",
+            (sid, sess, proj),
+        ).fetchall()
+        return [{"decision": r[0]} for r in rows]
+
+    _db.lookup_permissions = _lookup
+    try:
+        verdict = _bash_match(
+            "Bash",
+            {"command": cmd},
+            conn,
+            None,
+            None,
+            ctx,
+            [extra_dir],
+        )
+    finally:
+        _db.lookup_permissions = _orig
+        conn.close()
+
+    from nephoscope.learners.permission.match._types import Verdict
+
+    assert verdict == Verdict.Allow, f"Expected Allow, got {verdict}"

@@ -65,6 +65,7 @@ def match(
     session_id: int | None,
     project_id: int | None,
     ctx: dict[str, str],
+    additional_dirs: list[str] | None = None,  # noqa: ARG001 — unused; Bash-only feature
 ) -> Verdict:
     """Match a file-tool invocation against path-glob permission rows."""
     from nephoscope.lib.db import lookup_permissions  # type: ignore[import-untyped]

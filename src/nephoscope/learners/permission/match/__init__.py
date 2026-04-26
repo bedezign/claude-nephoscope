@@ -93,6 +93,33 @@ def _build_ctx(
     return ctx
 
 
+def _get_additional_dirs(
+    conn: sqlite3.Connection,
+    project_id: int | None,
+) -> list[str]:
+    """Return merged global + project additionalDirectories from the mtime cache.
+
+    Global entries come first; project entries are appended (deduped).
+    Returns an empty list on any error so the matcher degrades gracefully.
+    """
+    from nephoscope.lib.scope import Scope, get_additional_dirs  # type: ignore[import-untyped]
+
+    try:
+        global_dirs = get_additional_dirs(conn, Scope("global_mirror", 1))
+    except Exception:  # noqa: BLE001
+        global_dirs = []
+
+    project_dirs: list[str] = []
+    if project_id is not None:
+        try:
+            project_dirs = get_additional_dirs(conn, Scope("projects", project_id))
+        except Exception:  # noqa: BLE001
+            project_dirs = []
+
+    # Deduplicate while preserving order (global first, project appended).
+    return list(dict.fromkeys(global_dirs + project_dirs))
+
+
 def _full_match_enabled() -> bool:
     val = os.environ.get("HOOK_FULL_MATCH", "").lower()
     return val in ("1", "true", "on", "yes")
@@ -125,8 +152,16 @@ def dispatch(
     if tool_cls == "bash":
         from nephoscope.learners.permission.match.bash import match as _match  # type: ignore[import-untyped]
 
+        additional_dirs = _get_additional_dirs(conn, project_id)
         return _run_tiers(
-            _match, tool_name, tool_input, conn, session_id, project_id, ctx
+            _match,
+            tool_name,
+            tool_input,
+            conn,
+            session_id,
+            project_id,
+            ctx,
+            additional_dirs,
         )
 
     # For all other tool classes: short-circuit when HOOK_FULL_MATCH is OFF.
@@ -142,6 +177,9 @@ def dispatch(
     if tool_cls == "file":
         from nephoscope.learners.permission.match.file import match as _match  # type: ignore[import-untyped]
 
+        # additional_dirs is only threaded into the Bash matcher today.
+        # If file/mcp grow path-aware matching under HOOK_FULL_MATCH, thread
+        # additional_dirs through here too.
         return _run_tiers(
             _match, tool_name, tool_input, conn, session_id, project_id, ctx
         )
@@ -171,11 +209,15 @@ def _run_tiers(
     session_id: int | None,
     project_id: int | None,
     ctx: dict[str, str],
+    additional_dirs: list[str] | None = None,
 ) -> Verdict:
     """Iterate session → project → global tiers; return first non-NoOpinion.
 
     Each tier passes a scoped (session_id, project_id) pair so that
     ``lookup_permissions`` only considers rows for that tier.
+
+    ``additional_dirs`` is forwarded to the matcher unchanged — only the Bash
+    matcher uses it; other matchers accept but ignore the extra kwarg.
     """
     tiers: list[tuple[int | None, int | None]] = [
         (session_id, project_id),  # session tier (session_id may be None)
@@ -190,7 +232,9 @@ def _run_tiers(
             continue
         seen.add(key)
 
-        verdict = matcher(tool_name, tool_input, conn, t_session, t_project, ctx)
+        verdict = matcher(
+            tool_name, tool_input, conn, t_session, t_project, ctx, additional_dirs
+        )
         if verdict != Verdict.NoOpinion:
             return verdict
 

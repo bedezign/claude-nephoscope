@@ -51,6 +51,7 @@ After any DB mutations, writer.sync_* regenerates the JSON mirror and stamps has
 from __future__ import annotations
 
 import enum
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -377,7 +378,9 @@ def _sync(conn: sqlite3.Connection, project_id: int | None) -> None:
 
     Delegates to writer.sync_global or writer.sync_project.
     """
-    from nephoscope.lib.mirror import writer  # late import: avoids circular at module load
+    from nephoscope.lib.mirror import (
+        writer,
+    )  # late import: avoids circular at module load
 
     if project_id is None:
         writer.sync_global(conn)
@@ -639,6 +642,53 @@ def _apply_per_entry_actions(
 # Public: reconcile
 # ---------------------------------------------------------------------------
 
+
+def _stamp_additional_dirs_cache(
+    conn: sqlite3.Connection,
+    project_id: int | None,
+    target_path: Path,
+    raw_data: dict[str, Any],
+    mtime: float,
+) -> None:
+    """Persist settings_json_mtime + additional_dirs into the cache row.
+
+    ``raw_data`` is the already-parsed settings.json dict.  ``mtime`` must
+    have been captured *before* any write that would advance the file mtime
+    (i.e. before the reconcile sync call).
+
+    This function runs in every reconcile mode, including ``plan``.  The cache
+    tracks denormalized file metadata (mtime + directory list) derived from the
+    file on disk — it is independent of reconcile's permission-resolution
+    decisions.  Updating it in plan mode is intentional: plan mode reads the
+    file to compute the diff, so stamping the mtime and dirs at that point is
+    correct and lets callers of ``get_additional_dirs`` benefit from the warm
+    cache without triggering a second file read.
+
+    Harmless when the row doesn't exist yet (UPDATE touches zero rows).
+    """
+    dirs: list[str] = [
+        str(d)
+        for d in (
+            (raw_data.get("permissions") or {}).get("additionalDirectories") or []
+        )
+    ]
+    dirs_json = json.dumps(dirs)
+    if project_id is None:
+        conn.execute(
+            "UPDATE global_mirror"
+            " SET settings_json_mtime = ?, additional_dirs = ?"
+            " WHERE id = 1;",
+            (mtime, dirs_json),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects"
+            " SET settings_json_mtime = ?, additional_dirs = ?"
+            " WHERE id = ?;",
+            (mtime, dirs_json, project_id),
+        )
+
+
 _VALID_MODES = frozenset(
     {"interactive", "plan", "auto-db-wins", "auto-json-wins", "adopt"}
 )
@@ -688,18 +738,37 @@ def reconcile(
     project_id, _ = _detect_scope(conn, target_path)
 
     # --- Read JSON rows (absent file → empty list) ---
+    # Capture mtime *before* any write so it stays consistent with the content
+    # we're about to read.  raw_data is kept for the additional_dirs cache stamp.
     json_rows: list[dict[str, Any]] = []
+    _raw_data: dict[str, Any] = {}
+    _file_mtime: float | None = None
     if target_path.exists():
+        _file_mtime = target_path.stat().st_mtime
         try:
+            _raw_bytes = target_path.read_bytes()
+            _raw_data = json.loads(_raw_bytes)
             json_rows = parse_permissions_json(target_path)
         except IngesterError as exc:
             raise ReconcileError(f"Cannot parse {target_path}: {exc}") from exc
+        except (ValueError, TypeError):
+            # Malformed JSON — treat as empty permissions, don't stamp cache.
+            _raw_data = {}
 
     # --- Read DB rows ---
     db_rows = _read_db_rows(conn, project_id)
 
     # --- Compute diff ---
     d = diff(db_rows, json_rows)
+
+    # --- Stamp additional_dirs cache ---
+    # Done unconditionally at this point so that plan mode also populates the
+    # cache (it reads the file but writes no permission rows).  mtime was
+    # captured before any write so it is consistent with the parsed content.
+    if _file_mtime is not None and _raw_data:
+        _stamp_additional_dirs_cache(
+            conn, project_id, target_path, _raw_data, _file_mtime
+        )
 
     # --- First-touch detection ---
     first_touch = _is_first_touch(conn, project_id)

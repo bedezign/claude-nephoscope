@@ -73,6 +73,8 @@ Paths change between sessions and projects, so nephoscope lets you write rules u
 
 You can use these inside a path. For example, `$PROJECT_ROOT/**` means "anywhere inside the current project" — the `**` covers any depth. `$HOME/Downloads/**` means "anywhere in your Downloads folder."
 
+If a path falls under a directory you have added via Claude Code's `claude --add-dir` flag (or the `/permissions` UI), nephoscope writes the rule using the real absolute path instead of a placeholder — for example, `/opt/company/shared/**`. Those inline specs work as written and are not session- or project-specific.
+
 ## The flow
 
 ![A flow diagram titled "How nephoscope turns asks into rules" with five boxes left-to-right: Tool call, Ask, Candidate, Rule, Auto-allow.](images/permission-flow.png)

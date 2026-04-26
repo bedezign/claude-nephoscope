@@ -72,6 +72,7 @@ def match(
     session_id: int | None,
     project_id: int | None,
     ctx: dict[str, str],
+    additional_dirs: list[str] | None = None,  # noqa: ARG001 — unused; Bash-only feature
 ) -> Verdict:
     """Match an MCP tool invocation against literal + wildcard permission rows."""
     # 1. Literal match.

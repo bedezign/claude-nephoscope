@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -1210,3 +1211,223 @@ class TestInsertFailureHandling:
         # Since the exception bubbles out without a report, the key invariant is:
         # we cannot observe a report that claims more inserts than actually exist.
         assert actual_rows <= 2  # at most the allow entries that precede ask
+
+
+# ---------------------------------------------------------------------------
+# reconcile() — additional_dirs cache ingest
+# ---------------------------------------------------------------------------
+
+
+def _write_settings_with_extra_dirs(
+    path: Path,
+    *,
+    allow=None,
+    deny=None,
+    ask=None,
+    additional_dirs: list[str] | None = None,
+) -> None:
+    """Write settings.json including permissions.additionalDirectories."""
+    data: dict[str, Any] = {
+        "permissions": {
+            "allow": allow or [],
+            "deny": deny or [],
+            "ask": ask or [],
+        }
+    }
+    if additional_dirs is not None:
+        data["permissions"]["additionalDirectories"] = additional_dirs
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _read_cache_row(
+    conn: sqlite3.Connection, *, project_id: int | None
+) -> tuple[float | None, str | None]:
+    """Return (settings_json_mtime, additional_dirs) from the relevant cache row."""
+    if project_id is None:
+        row = conn.execute(
+            "SELECT settings_json_mtime, additional_dirs FROM global_mirror WHERE id = 1;"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT settings_json_mtime, additional_dirs FROM projects WHERE id = ?;",
+            (project_id,),
+        ).fetchone()
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
+class TestAdditionalDirsCache:
+    """Integration tests: reconcile() populates additional_dirs cache."""
+
+    def test_cache_stamped_after_auto_json_wins(self, tmp_path):
+        """Cache columns are populated after a non-plan reconcile."""
+        settings = tmp_path / "settings.json"
+        _write_settings_with_extra_dirs(
+            settings,
+            allow=["Bash(git *)"],
+            additional_dirs=["/extra/one", "/extra/two"],
+        )
+        conn = _make_conn(tmp_path, settings)
+
+        reconcile(conn, settings, mode="auto-json-wins")
+
+        mtime, dirs_json = _read_cache_row(conn, project_id=None)
+        # mtime must be close to the file's on-disk mtime (reconcile captures it
+        # before any write; abs=0.01 tolerates float repr differences between
+        # consecutive stat() calls on the same unmodified file).
+        assert mtime == pytest.approx(settings.stat().st_mtime, abs=0.01)
+        assert dirs_json is not None
+        dirs = json.loads(dirs_json)
+        assert dirs == ["/extra/one", "/extra/two"]
+
+    def test_cache_stamped_in_plan_mode(self, tmp_path):
+        """Cache is populated even when mode=plan (read-only, no permission writes)."""
+        settings = tmp_path / "settings.json"
+        _write_settings_with_extra_dirs(
+            settings,
+            additional_dirs=["/plan/mode/dir"],
+        )
+        conn = _make_conn(tmp_path, settings)
+
+        report = reconcile(conn, settings, mode="plan")
+
+        assert report.applied is False  # no permission mutations
+        mtime, dirs_json = _read_cache_row(conn, project_id=None)
+        assert mtime is not None
+        assert dirs_json is not None
+        dirs = json.loads(dirs_json)
+        assert dirs == ["/plan/mode/dir"]
+
+    def test_cache_mtime_matches_file_stat(self, tmp_path):
+        """Cached mtime equals the file's actual st_mtime at reconcile time."""
+        settings = tmp_path / "settings.json"
+        _write_settings_with_extra_dirs(settings, additional_dirs=["/some/path"])
+        conn = _make_conn(tmp_path, settings)
+
+        reconcile(conn, settings, mode="auto-json-wins")
+
+        # Read mtime from both the DB cache and the file; they must agree.
+        # abs=0.01 accommodates float representation differences between
+        # consecutive stat() calls on the same unmodified file.
+        mtime, _ = _read_cache_row(conn, project_id=None)
+        on_disk_mtime = settings.stat().st_mtime
+        assert mtime == pytest.approx(on_disk_mtime, abs=0.01)
+
+    def test_cache_empty_when_no_additional_dirs_key(self, tmp_path):
+        """settings.json with no additionalDirectories → cache stores empty array."""
+        settings = tmp_path / "settings.json"
+        _write_settings(settings, allow=["Bash(git *)"])  # no additionalDirectories
+        conn = _make_conn(tmp_path, settings)
+
+        reconcile(conn, settings, mode="auto-json-wins")
+
+        _, dirs_json = _read_cache_row(conn, project_id=None)
+        assert dirs_json == "[]"
+
+    def test_cache_not_stamped_when_file_absent(self, tmp_path):
+        """Absent settings.json → cache columns stay NULL."""
+        settings = tmp_path / "settings.json"
+        conn = _make_conn(tmp_path, settings)
+        # File does not exist
+
+        reconcile(conn, settings, mode="plan")
+
+        mtime, dirs_json = _read_cache_row(conn, project_id=None)
+        assert mtime is None
+        assert dirs_json is None
+
+    def test_cache_stamped_for_project_scope(self, tmp_path):
+        """Cache stamp lands in the projects row, not global_mirror."""
+        proj_dir = tmp_path / "myproject"
+        proj_dir.mkdir()
+        proj_settings = proj_dir / "settings.local.json"
+        _write_settings_with_extra_dirs(
+            proj_settings,
+            allow=["Bash(git *)"],
+            additional_dirs=["/proj/extra"],
+        )
+        conn = _make_conn(tmp_path, tmp_path / "global_settings.json")
+
+        ts = "2025-01-01T00:00:00.000Z"
+        conn.execute(
+            "INSERT INTO projects(cwd, name, root, first_seen, last_seen, settings_json_path)"
+            " VALUES(?,?,?,?,?,?);",
+            (str(proj_dir), "myproject", str(proj_dir), ts, ts, str(proj_settings)),
+        )
+        proj_id = conn.execute(
+            "SELECT id FROM projects WHERE cwd=?;", (str(proj_dir),)
+        ).fetchone()[0]
+
+        reconcile(conn, proj_settings, mode="auto-json-wins")
+
+        mtime, dirs_json = _read_cache_row(conn, project_id=proj_id)
+        assert mtime is not None
+        assert dirs_json is not None
+        dirs = json.loads(dirs_json)
+        assert dirs == ["/proj/extra"]
+
+        # global_mirror cache must NOT have been touched
+        global_mtime, global_dirs = _read_cache_row(conn, project_id=None)
+        assert global_mtime is None
+        assert global_dirs is None
+
+    def test_cache_non_string_entries_coerced(self, tmp_path):
+        """Non-string entries in additionalDirectories are coerced via str()."""
+        settings = tmp_path / "settings.json"
+        # Write raw JSON with a numeric entry alongside a string entry
+        data = {
+            "permissions": {
+                "allow": [],
+                "deny": [],
+                "ask": [],
+                "additionalDirectories": ["/valid/path", 42],
+            }
+        }
+        settings.write_text(json.dumps(data), encoding="utf-8")
+        conn = _make_conn(tmp_path, settings)
+
+        reconcile(conn, settings, mode="auto-json-wins")
+
+        _, dirs_json = _read_cache_row(conn, project_id=None)
+        assert dirs_json is not None
+        dirs = json.loads(dirs_json)
+        assert dirs == ["/valid/path", "42"]
+
+
+# ---------------------------------------------------------------------------
+# plan mode stamps additional_dirs cache (Fix 2 companion test)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_mode_stamps_cache(tmp_path):
+    """reconcile(mode='plan') populates settings_json_mtime and additional_dirs.
+
+    Plan mode is documented as read-only with respect to permission resolution,
+    but the additional_dirs cache tracks file metadata and is intentionally
+    updated in every mode.  This test asserts that the cache is populated even
+    when no file write or rule resolution occurs.
+    """
+    settings = tmp_path / "settings.json"
+    data: dict[str, Any] = {
+        "permissions": {
+            "allow": [],
+            "deny": [],
+            "ask": [],
+            "additionalDirectories": ["/plan/extra"],
+        }
+    }
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    conn = _make_conn(tmp_path, settings)
+
+    report = reconcile(conn, settings, mode="plan")
+
+    # No permission mutations must have occurred.
+    assert report.applied is False
+    assert _count_global_permissions(conn) == 0
+
+    # Cache must be populated despite plan mode.
+    mtime, dirs_json = _read_cache_row(conn, project_id=None)
+    assert mtime is not None, "settings_json_mtime must be stamped in plan mode"
+    assert dirs_json is not None, "additional_dirs must be stamped in plan mode"
+    assert json.loads(dirs_json) == ["/plan/extra"]

@@ -31,6 +31,10 @@ Use them inside `--path-spec` values. Examples:
 
 `**` means "any depth" inside the directory. A single `*` matches one path segment.
 
+## Inline absolute path-specs
+
+When a tool call's path falls under a directory listed in `permissions.additionalDirectories` (managed via Claude Code's `claude --add-dir` flag or the `/permissions` UI), nephoscope writes the rule using the real path rather than a placeholder. For example, if `/opt/company/shared` is an additional directory, a rule covering files there will appear as `/opt/company/shared/**` — not `$EXTRA/...` or any other shorthand. These specs are written verbatim into the settings file, so the rule works regardless of which project or session is active.
+
 ## Slash subcommands
 
 Short summary. Every one of these is invoked as `/nephoscope:permissions <sub>`. For full options and examples, see [`../commands/permissions.md`](../commands/permissions.md).

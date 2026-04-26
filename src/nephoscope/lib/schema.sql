@@ -8,7 +8,9 @@ CREATE TABLE projects (
   last_seen                 TEXT    NOT NULL,
   settings_json_path        TEXT,
   settings_json_sha256      TEXT,
-  settings_json_last_synced TEXT
+  settings_json_last_synced TEXT,
+  settings_json_mtime       REAL,
+  additional_dirs           TEXT
 );
 
 CREATE TABLE sessions (
@@ -25,7 +27,9 @@ CREATE TABLE global_mirror (
   id                        INTEGER PRIMARY KEY CHECK (id = 1),
   settings_json_path        TEXT NOT NULL,
   settings_json_sha256      TEXT,
-  settings_json_last_synced TEXT
+  settings_json_last_synced TEXT,
+  settings_json_mtime       REAL,
+  additional_dirs           TEXT
 );
 
 -- Lookup tables (seed rows inserted at setup time).

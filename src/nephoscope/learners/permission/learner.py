@@ -911,7 +911,12 @@ _path_spec_help = (
     "Examples:\n"
     '  --path-spec "$PROJECT_ROOT/**"     allow anywhere in the current project\n'
     '  --path-spec "$HOME/Downloads/**"   allow anywhere under your Downloads folder\n'
-    '  --path-spec "$CWD/build/**"        allow only the build folder of this session'
+    '  --path-spec "$CWD/build/**"        allow only the build folder of this session\n'
+    "\n"
+    "Nephoscope also emits inline absolute path-specs (e.g. /opt/shared/**) for\n"
+    "paths under directories added via Claude Code's --add-dir flag or the\n"
+    "/permissions UI (permissions.additionalDirectories). Those specs are written\n"
+    "verbatim and work the same way as placeholder-based ones."
 )
 _reason_help = (
     "A short free-text note saved with the rule — a reminder of why you\n"
