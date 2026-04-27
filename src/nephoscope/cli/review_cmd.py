@@ -278,6 +278,137 @@ def _subsume_siblings(
 # ---------------------------------------------------------------------------
 
 
+def _build_path_opts(
+    path_specs: list[str],
+    project_root: str,
+    cwd: str,
+    home: str,
+) -> list[str]:
+    """Build the ordered, deduplicated path option menu for Axis 2."""
+    seen_ps: set[str] = set()
+    path_opts: list[str] = []
+
+    def _add_ps(opt: str) -> None:
+        if opt not in seen_ps:
+            seen_ps.add(opt)
+            path_opts.append(opt)
+
+    for ps in path_specs:
+        if ps:
+            _add_ps(ps)
+    for candidate_ps, guard in [
+        ("$PROJECT_ROOT/**", project_root),
+        ("$CWD/**", cwd),
+        ("$HOME/**", home),
+    ]:
+        if guard:
+            _add_ps(candidate_ps)
+    return path_opts
+
+
+def _prompt_axis_verb(candidate: Candidate, verb_pattern: str | None) -> str | None:
+    """Prompt Axis 1 (verb). Returns chosen verb, or None to signal 'skipped'."""
+    if not verb_pattern or verb_pattern == candidate.verb:
+        return candidate.verb
+    reply = _prompt(
+        f"  Verb:  literal={candidate.verb:<40}  pattern={verb_pattern}\n"
+        f"         [l=literal / g=generalize / s=skip]: "
+    )
+    if reply in ("s", "S"):
+        return None  # skip
+    if reply in ("g", "G"):
+        return verb_pattern
+    return candidate.verb
+
+
+def _prompt_axis_paths(path_opts: list[str]) -> tuple[str | None, bool]:
+    """Prompt Axis 2 (paths). Returns (chosen_path_spec, skipped)."""
+    menu_parts = ["a=any"]
+    for i, opt in enumerate(path_opts, start=1):
+        menu_parts.append(f"{i}={opt}")
+    menu_parts.append("s=skip")
+    reply = _prompt(f"  Paths: [{' / '.join(menu_parts)}]: ")
+
+    if reply in ("s", "S"):
+        return None, True
+    if reply in ("a", "A", ""):
+        return None, False
+    if reply.isdigit():
+        idx = int(reply) - 1
+        if 0 <= idx < len(path_opts):
+            return path_opts[idx], False
+    return None, False
+
+
+def _prompt_axis_flags(flags_repr: str) -> tuple[str, bool]:
+    """Prompt Axis 3 (flags). Returns (chosen_flags, skipped)."""
+    reply = _prompt(f"  Flags: {flags_repr}  [l=literal / w=wildcard(*) / s=skip]: ")
+    if reply in ("s", "S"):
+        return flags_repr, True
+    if reply in ("w", "W"):
+        return "*", False
+    return flags_repr, False
+
+
+def _prompt_axis_tier(
+    cwd: str,
+    project_id: int | None,
+    session_id: int | None,
+) -> tuple[str, int | None, int | None, str]:
+    """Prompt Axis 4 (tier). Returns (tier, tier_session_id, tier_project_id, outcome).
+
+    outcome is 'ok' | 'skipped' | 'quit'.
+    """
+    reply = _prompt("  Tier:  [g=global / p=project / s=session / skip / q=quit]: ")
+
+    if reply in ("q", "Q"):
+        print("quitting")
+        return "global", None, None, "quit"
+    if reply == "skip":
+        return "global", None, None, "skipped"
+    if reply in ("p", "P"):
+        if project_id is None:
+            print(f"  (no project record for cwd={cwd} — skipping)")
+            return "global", None, None, "skipped"
+        return "project", None, project_id, "ok"
+    if reply in ("s", "S"):
+        if session_id is None:
+            print(f"  (no session record for cwd={cwd} — skipping)")
+            return "global", None, None, "skipped"
+        return "session", session_id, None, "ok"
+    return "global", None, None, "ok"
+
+
+def _offer_subsume(
+    candidate: Candidate,
+    chosen_tier: str,
+    tier_session_id: int | None,
+    tier_project_id: int | None,
+) -> None:
+    """After promoting a wildcard-flags rule, offer to remove concrete siblings."""
+    sibling_count = _count_concrete_siblings(
+        candidate.verb,
+        candidate.subcommand,
+        chosen_tier,
+        tier_session_id,
+        tier_project_id,
+    )
+    if sibling_count == 0:
+        return
+    reply = _prompt(f"  Subsume {sibling_count} concrete sibling rule(s)? [Y/n]: ")
+    if reply not in ("n", "N"):
+        deleted = _subsume_siblings(
+            candidate.verb,
+            candidate.subcommand,
+            chosen_tier,
+            tier_session_id,
+            tier_project_id,
+        )
+        print(f"  (subsumed {deleted} rule(s))")
+    else:
+        print("  (kept sibling rules)")
+
+
 def _review_candidate(
     candidate: Candidate,
     home: str,
@@ -301,93 +432,29 @@ def _review_candidate(
     variants = _pattern_variants(candidate, home, cwd, project_root)
     verb_pattern = variants["verb_pattern"]
     path_specs: list[str] = variants["path_specs"]
+    path_opts = _build_path_opts(path_specs, project_root, cwd, home)
 
-    # Build full path option menu (dedup, consistent ordering).
-    path_opts: list[str] = []
-    seen_ps: set[str] = set()
-
-    def _add_ps(opt: str) -> None:
-        if opt not in seen_ps:
-            seen_ps.add(opt)
-            path_opts.append(opt)
-
-    for ps in path_specs:
-        if ps:
-            _add_ps(ps)
-    # Append context-derived fallbacks only when not already present.
-    for candidate_ps, guard in [
-        ("$PROJECT_ROOT/**", project_root),
-        ("$CWD/**", cwd),
-        ("$HOME/**", home),
-    ]:
-        if guard:
-            _add_ps(candidate_ps)
-
-    # Axis 1: Verb (only when a $VAR pattern exists).
-    chosen_verb = candidate.verb
-    if verb_pattern and verb_pattern != candidate.verb:
-        reply = _prompt(
-            f"  Verb:  literal={candidate.verb:<40}  pattern={verb_pattern}\n"
-            f"         [l=literal / g=generalize / s=skip]: "
-        )
-        if reply in ("s", "S"):
-            return "skipped"
-        if reply in ("g", "G"):
-            chosen_verb = verb_pattern
+    # Axis 1: Verb.
+    chosen_verb = _prompt_axis_verb(candidate, verb_pattern)
+    if chosen_verb is None:
+        return "skipped"
 
     # Axis 2: Paths.
-    menu_parts = ["a=any"]
-    for i, opt in enumerate(path_opts, start=1):
-        menu_parts.append(f"{i}={opt}")
-    menu_parts.append("s=skip")
-    reply = _prompt(f"  Paths: [{' / '.join(menu_parts)}]: ")
-
-    chosen_path_spec: str | None = None
-    if reply in ("s", "S"):
+    chosen_path_spec, skipped = _prompt_axis_paths(path_opts)
+    if skipped:
         return "skipped"
-    elif reply in ("a", "A", ""):
-        chosen_path_spec = None
-    elif reply.isdigit():
-        idx = int(reply) - 1
-        if 0 <= idx < len(path_opts):
-            chosen_path_spec = path_opts[idx]
-        # else: treat as any
 
     # Axis 3: Flags.
-    chosen_flags = flags_repr
-    reply = _prompt(f"  Flags: {flags_repr}  [l=literal / w=wildcard(*) / s=skip]: ")
-    if reply in ("s", "S"):
+    chosen_flags, skipped = _prompt_axis_flags(flags_repr)
+    if skipped:
         return "skipped"
-    if reply in ("w", "W"):
-        chosen_flags = "*"
 
     # Axis 4: Tier.
-    reply = _prompt("  Tier:  [g=global / p=project / s=session / skip / q=quit]: ")
-
-    chosen_tier = "global"
-    chosen_tier_session_id: int | None = None
-    chosen_tier_project_id: int | None = None
-
-    if reply in ("q", "Q"):
-        print("quitting")
-        return "quit"
-    if reply == "skip":
-        return "skipped"
-    if reply in ("p", "P"):
-        if project_id is None:
-            print(f"  (no project record for cwd={cwd} — skipping)")
-            return "skipped"
-        chosen_tier = "project"
-        chosen_tier_project_id = project_id
-    elif reply in ("s", "S"):
-        if session_id is None:
-            print(f"  (no session record for cwd={cwd} — skipping)")
-            return "skipped"
-        chosen_tier = "session"
-        chosen_tier_session_id = session_id
-    else:
-        # Default (g, G, empty, or unrecognised): global.
-        chosen_tier = "global"
+    chosen_tier, tier_session_id, tier_project_id, outcome = _prompt_axis_tier(
+        cwd, project_id, session_id
+    )
+    if outcome != "ok":
+        return outcome
 
     # Promote.
     _do_promote(
@@ -396,34 +463,13 @@ def _review_candidate(
         chosen_flags,
         chosen_path_spec,
         chosen_tier,
-        chosen_tier_session_id,
-        chosen_tier_project_id,
+        tier_session_id,
+        tier_project_id,
     )
 
     # Post-promote: offer to subsume concrete siblings when flags=*.
     if chosen_flags == "*":
-        sibling_count = _count_concrete_siblings(
-            candidate.verb,
-            candidate.subcommand,
-            chosen_tier,
-            chosen_tier_session_id,
-            chosen_tier_project_id,
-        )
-        if sibling_count > 0:
-            reply = _prompt(
-                f"  Subsume {sibling_count} concrete sibling rule(s)? [Y/n]: "
-            )
-            if reply not in ("n", "N"):
-                deleted = _subsume_siblings(
-                    candidate.verb,
-                    candidate.subcommand,
-                    chosen_tier,
-                    chosen_tier_session_id,
-                    chosen_tier_project_id,
-                )
-                print(f"  (subsumed {deleted} rule(s))")
-            else:
-                print("  (kept sibling rules)")
+        _offer_subsume(candidate, chosen_tier, tier_session_id, tier_project_id)
 
     return "promoted"
 

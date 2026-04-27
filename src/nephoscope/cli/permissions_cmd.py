@@ -13,6 +13,7 @@ subprocess.  The CLI wrappers in commands/permissions.md delegate here via
 
 from __future__ import annotations
 
+import argparse
 import sqlite3
 import sys
 from pathlib import Path
@@ -259,9 +260,13 @@ def reload_hint_cmd(settings_path: str | Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    import argparse
+def _build_parser() -> argparse.ArgumentParser:
     import os
+
+    _db_help = (
+        "Path to the nephoscope observations database file.\n"
+        "Defaults to the OBSERVABILITY_DB environment variable."
+    )
 
     parser = argparse.ArgumentParser(
         prog="nephoscope.cli.permissions_cmd",
@@ -276,17 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    _db_help = (
-        "Path to the nephoscope observations database file.\n"
-        "Defaults to the OBSERVABILITY_DB environment variable."
-    )
-
     r = sub.add_parser(
         "reconcile",
-        help=(
-            "Compare the rules database with the settings.json file and make\n"
-            "them match."
-        ),
+        help="Compare the rules database with the settings.json file and make them match.",
         description=(
             "Compare the rules stored in the database with what is in the\n"
             "settings.json file, and apply a resolution — either by updating\n"
@@ -360,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rh = sub.add_parser(
         "reload-hint",
-        help=("Refresh a settings file's timestamp so Claude Code re-reads it."),
+        help="Refresh a settings file's timestamp so Claude Code re-reads it.",
         description=(
             "Update the modification time of a settings.json file so that\n"
             "Claude Code notices the change and re-reads the file. Useful\n"
@@ -379,34 +376,42 @@ def main(argv: list[str] | None = None) -> int:
         help="Path of the settings.json file whose timestamp should be refreshed.",
     )
 
-    args = parser.parse_args(argv)
+    return parser
 
-    if args.cmd == "reconcile":
-        if not args.db:
+
+def _dispatch_reconcile(args: argparse.Namespace) -> int:
+    if not args.db:
+        print(
+            "reconcile: please give a database path with --db, or set the"
+            " OBSERVABILITY_DB environment variable.",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.target_path:
+        conn = _connect(args.db)
+        row = conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()
+        conn.close()
+        if not row or not row[0]:
             print(
-                "reconcile: please give a database path with --db, or set the"
-                " OBSERVABILITY_DB environment variable.",
+                "reconcile: the global settings file path has not been"
+                " set up yet in the database.",
                 file=sys.stderr,
             )
             return 1
-        if not args.target_path:
-            # Resolve global mirror path from DB.
-            conn = _connect(args.db)
-            row = conn.execute(
-                "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
-            ).fetchone()
-            conn.close()
-            if not row or not row[0]:
-                print(
-                    "reconcile: the global settings file path has not been"
-                    " set up yet in the database.",
-                    file=sys.stderr,
-                )
-                return 1
-            args.target_path = row[0]
-        return reconcile_cmd(args.db, args.target_path, mode=args.mode)
+        args.target_path = row[0]
+    return reconcile_cmd(args.db, args.target_path, mode=args.mode)
 
-    elif args.cmd == "mirror-status":
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.cmd == "reconcile":
+        return _dispatch_reconcile(args)
+
+    if args.cmd == "mirror-status":
         if not args.db:
             print(
                 "mirror-status: please give a database path with --db, or set"
@@ -416,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return mirror_status_cmd(args.db)
 
-    elif args.cmd == "mirror-dry-run":
+    if args.cmd == "mirror-dry-run":
         if not args.db:
             print(
                 "mirror-dry-run: please give a database path with --db, or set"
@@ -426,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return mirror_dry_run_cmd(args.db, args.target_path)
 
-    elif args.cmd == "reload-hint":
+    if args.cmd == "reload-hint":
         return reload_hint_cmd(args.settings_path)
 
     return 0  # pragma: no cover

@@ -166,6 +166,84 @@ def _summarize(leaves: list[CanonicalLeaf]) -> str:
     return "; ".join(pieces)
 
 
+def _register_ask_pending(
+    conn: sqlite3.Connection,
+    tool_use_id_str: str,
+    session_id: int,
+    leaves: list[CanonicalLeaf],
+) -> None:
+    """Insert a permission_ask_pending row for the first ask-tier leaf."""
+    first_ask_leaf = _first_ask_leaf(leaves)
+    if first_ask_leaf is None:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO permission_ask_pending"
+        " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
+        " VALUES (?, ?, ?, ?, ?, ?);",
+        (
+            tool_use_id_str,
+            session_id,
+            first_ask_leaf.verb,
+            first_ask_leaf.subcommand,
+            json.dumps(sorted(first_ask_leaf.flags), separators=(",", ":")),
+            _now_iso(),
+        ),
+    )
+
+
+def _ask_reason_from_leaves(leaves: list[CanonicalLeaf]) -> str | None:
+    """Return the first ask-tier reason from deny.py for a pre-parsed leaf list."""
+    for leaf in leaves:
+        outcome, reason = evaluate(leaf)
+        if outcome == "ask":
+            return reason
+    return None
+
+
+def _emit_allow(tool_input: dict[str, Any]) -> None:
+    """Emit allow with an optional matched-shape reason for Bash commands."""
+    reason = ""
+    if isinstance(tool_input, dict):
+        cmd = tool_input.get("command", "")
+        if cmd:
+            leaves = parse_command(cmd)
+            reason = f"matched: {_summarize(leaves)}" if leaves else ""
+    _emit("allow", reason)
+
+
+def _emit_deny(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    tool_use_id_str: str | None,
+    conn: sqlite3.Connection | None,
+) -> None:
+    """Mark the call as denied (if trackable) and emit a deny response."""
+    if tool_use_id_str:
+        _mark_denied(tool_use_id_str, conn=conn)
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+        leaves = parse_command(cmd) if cmd else []
+        verb = leaves[0].verb if leaves else tool_name
+        reason = f"shape '{verb}' was user-rejected"
+    else:
+        reason = f"{tool_name} denied"
+    _emit("deny", reason)
+
+
+def _emit_ask_bash(
+    tool_input: dict[str, Any],
+    tool_use_id_str: str | None,
+    conn: sqlite3.Connection | None,
+    session_id: int | None,
+) -> None:
+    """Register ask-pending bookkeeping and emit an ask response for Bash."""
+    cmd = tool_input.get("command", "")
+    leaves = parse_command(cmd) if cmd else []
+    if leaves and session_id is not None and tool_use_id_str is not None and conn is not None:
+        _register_ask_pending(conn, tool_use_id_str, session_id, leaves)
+    _emit("ask", _ask_reason_from_leaves(leaves))
+
+
 def _emit_verdict(
     verdict: Verdict,
     tool_name: str,
@@ -176,63 +254,14 @@ def _emit_verdict(
 ) -> None:
     """Translate a Verdict to hook output, with side-effects for Deny/Ask."""
     if verdict == Verdict.Allow:
-        # Build a summary reason for Bash allow.
-        reason = ""
-        if isinstance(tool_input, dict):
-            cmd = tool_input.get("command", "")
-            if cmd:
-                leaves = parse_command(cmd)
-                reason = f"matched: {_summarize(leaves)}" if leaves else ""
-        _emit("allow", reason)
-
+        _emit_allow(tool_input)
     elif verdict == Verdict.Deny:
-        if tool_use_id_str:
-            _mark_denied(tool_use_id_str, conn=conn)
-        reason = (
-            "shape was user-rejected" if tool_name == "Bash" else f"{tool_name} denied"
-        )
-        _emit("deny", reason)
-
+        _emit_deny(tool_name, tool_input, tool_use_id_str, conn)
     elif verdict == Verdict.Ask:
-        # Register ask-pending row for Bash invocations.
         if tool_name == "Bash" and isinstance(tool_input, dict):
-            cmd = tool_input.get("command", "")
-            if (
-                cmd
-                and session_id is not None
-                and tool_use_id_str is not None
-                and conn is not None
-            ):
-                leaves = parse_command(cmd)
-                if leaves:
-                    first_ask_leaf = _first_ask_leaf(leaves)
-                    if first_ask_leaf is not None:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO permission_ask_pending"
-                            " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
-                            " VALUES (?, ?, ?, ?, ?, ?);",
-                            (
-                                tool_use_id_str,
-                                session_id,
-                                first_ask_leaf.verb,
-                                first_ask_leaf.subcommand,
-                                json.dumps(
-                                    sorted(first_ask_leaf.flags), separators=(",", ":")
-                                ),
-                                _now_iso(),
-                            ),
-                        )
-        # Find reason from deny.py.
-        ask_reason: str | None = None
-        if tool_name == "Bash" and isinstance(tool_input, dict):
-            cmd = tool_input.get("command", "")
-            if cmd:
-                for leaf in parse_command(cmd):
-                    outcome, reason = evaluate(leaf)
-                    if outcome == "ask" and ask_reason is None:
-                        ask_reason = reason
-        _emit("ask", ask_reason)
-
+            _emit_ask_bash(tool_input, tool_use_id_str, conn, session_id)
+        else:
+            _emit("ask")
     else:  # NoOpinion
         _emit(None)
 
@@ -251,7 +280,94 @@ def _first_ask_leaf(leaves: list[CanonicalLeaf]) -> CanonicalLeaf | None:
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def _procedural_deny_bash(
+    tool_input: dict[str, Any], tool_use_id_str: str | None
+) -> bool:
+    """Check deny-tier rules for Bash before DB access. Returns True if denied (and emitted)."""
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command.strip():
+        _emit(None)
+        return True
+
+    leaves = parse_command(command)
+    if not leaves:
+        _emit(None)
+        return True
+
+    for leaf in leaves:
+        outcome, reason = evaluate(leaf)
+        if outcome == "deny":
+            if tool_use_id_str:
+                _mark_denied(tool_use_id_str)
+            _emit("deny", reason or "matched deny list")
+            return True
+    return False
+
+
+def _no_db_bash_ask(tool_input: dict[str, Any]) -> bool:
+    """Emit ask if any leaf triggers the ask tier when there is no DB. Returns True if emitted."""
+    command = tool_input.get("command", "")
+    if not command:
+        return False
+    for leaf in parse_command(command):
+        outcome, reason = evaluate(leaf)
+        if outcome == "ask":
+            _emit("ask", reason)
+            return True
+    return False
+
+
+def _with_db_verdict(
+    conn: sqlite3.Connection,
+    tool: str,
+    tool_input: dict[str, Any],
+    tool_use_id_str: str | None,
+    payload_cwd: str,
+) -> None:
+    """Dispatch to the per-tool-class matcher and emit the verdict."""
+    session_id_int: int | None = None
+    project_id_int: int | None = None
+    if tool_use_id_str:
+        session_id_int, project_id_int = _lookup_call_context(conn, tool_use_id_str)
+
+    verdict = dispatch(
+        tool,
+        tool_input,
+        conn,
+        session_id_int,
+        project_id_int,
+        cwd=payload_cwd or None,
+    )
+    _emit_verdict(verdict, tool, tool_input, tool_use_id_str, conn, session_id_int)
+
+
+def _parse_tool_fields(
+    data: dict[str, Any],
+) -> tuple[str | None, dict[str, Any], str | None, str]:
+    """Extract (tool, tool_input, tool_use_id_str, payload_cwd) from a payload dict.
+
+    Returns tool=None when the payload has no valid tool name.
+    """
+    tool = data.get("tool_name") or data.get("tool")
+    if not isinstance(tool, str) or not tool:
+        return None, {}, None, ""
+
+    tool_input = data.get("tool_input") or data.get("input") or {}
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    tool_use_id = data.get("tool_use_id")
+    tool_use_id_str = (
+        tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None
+    )
+
+    payload_cwd: str = data.get("cwd") or ""
+    return tool, tool_input, tool_use_id_str, payload_cwd
+
+
+def main() -> (
+    int
+):  # NOSONAR S3516 - hook entry points must always exit 0 (domain rule)
     # Opt-out marker short-circuits the entire gate; fall-through keeps
     # Claude Code's native prompt behaviour intact while the plugin is
     # muted.
@@ -264,144 +380,30 @@ def main() -> int:
         _emit(None)
         return 0
 
-    tool = data.get("tool_name") or data.get("tool")
-    if not isinstance(tool, str) or not tool:
+    tool, tool_input, tool_use_id_str, payload_cwd = _parse_tool_fields(data)
+    if tool is None:
         _emit(None)
         return 0
 
-    tool_input = data.get("tool_input") or data.get("input") or {}
-    if not isinstance(tool_input, dict):
-        tool_input = {}
-
-    tool_use_id = data.get("tool_use_id")
-    tool_use_id_str = (
-        tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None
-    )
-
-    payload_cwd: str = data.get("cwd") or ""
-
-    # -----------------------------------------------------------------------
     # Step 1: procedural deny — Bash only; fires before any DB access.
-    # -----------------------------------------------------------------------
-    if tool == "Bash":
-        command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if not isinstance(command, str) or not command.strip():
-            _emit(None)
-            return 0
+    if tool == "Bash" and _procedural_deny_bash(tool_input, tool_use_id_str):
+        return 0
 
-        leaves = parse_command(command)
-        if not leaves:
-            _emit(None)
-            return 0
-
-        for leaf in leaves:
-            outcome, reason = evaluate(leaf)
-            if outcome == "deny":
-                if tool_use_id_str:
-                    _mark_denied(tool_use_id_str)
-                _emit("deny", reason or "matched deny list")
-                return 0
-
-    # -----------------------------------------------------------------------
     # No-DB fast path (Bash only): ask tier from deny.py.
-    # -----------------------------------------------------------------------
     db = _db_path()
     if not db.is_file():
-        if tool == "Bash":
-            command = tool_input.get("command", "")
-            leaves = parse_command(command) if command else []
-            ask_reason: str | None = None
-            for leaf in leaves:
-                outcome, reason = evaluate(leaf)
-                if outcome == "ask" and ask_reason is None:
-                    ask_reason = reason
-            if ask_reason is not None:
-                _emit("ask", ask_reason)
-                return 0
+        if tool == "Bash" and _no_db_bash_ask(tool_input):
+            return 0
         _emit(None)
         return 0
 
-    # -----------------------------------------------------------------------
     # With DB: dispatch to per-tool-class matcher.
-    # -----------------------------------------------------------------------
     conn = _connect(db)
     try:
-        session_id_int: int | None = None
-        project_id_int: int | None = None
-        if tool_use_id_str:
-            session_id_int, project_id_int = _lookup_call_context(conn, tool_use_id_str)
-
-        verdict = dispatch(
-            tool,
-            tool_input,
-            conn,
-            session_id_int,
-            project_id_int,
-            cwd=payload_cwd or None,
-        )
-
-        # Build reason for Allow verdict (Bash summary).
-        if verdict == Verdict.Allow and tool == "Bash":
-            command = tool_input.get("command", "")
-            leaves = parse_command(command) if command else []
-            reason_str = f"matched: {_summarize(leaves)}" if leaves else ""
-            _emit("allow", reason_str)
-            return 0
-
-        if verdict == Verdict.Deny:
-            if tool_use_id_str:
-                _mark_denied(tool_use_id_str, conn=conn)
-            if tool == "Bash":
-                command = tool_input.get("command", "")
-                leaves = parse_command(command) if command else []
-                verb = leaves[0].verb if leaves else tool
-                reason_str = f"shape '{verb}' was user-rejected"
-            else:
-                reason_str = f"{tool} denied"
-            _emit("deny", reason_str)
-            return 0
-
-        if verdict == Verdict.Ask:
-            # Register ask-pending for Bash invocations.
-            if tool == "Bash":
-                command = tool_input.get("command", "")
-                leaves = parse_command(command) if command else []
-                first_ask = _first_ask_leaf(leaves)
-                if (
-                    first_ask is not None
-                    and session_id_int is not None
-                    and tool_use_id_str is not None
-                ):
-                    conn.execute(
-                        "INSERT OR IGNORE INTO permission_ask_pending"
-                        " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?);",
-                        (
-                            tool_use_id_str,
-                            session_id_int,
-                            first_ask.verb,
-                            first_ask.subcommand,
-                            json.dumps(sorted(first_ask.flags), separators=(",", ":")),
-                            _now_iso(),
-                        ),
-                    )
-                # Get reason from deny.py.
-                ask_reason_str: str | None = None
-                for leaf in leaves:
-                    outcome, reason = evaluate(leaf)
-                    if outcome == "ask" and ask_reason_str is None:
-                        ask_reason_str = reason
-                _emit("ask", ask_reason_str)
-                return 0
-            _emit("ask")
-            return 0
-
-        # NoOpinion — fall through.
-        _emit(None)
-        return 0
-
+        _with_db_verdict(conn, tool, tool_input, tool_use_id_str, payload_cwd)
     finally:
         conn.close()
+    return 0
 
 
 if __name__ == "__main__":

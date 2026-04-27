@@ -171,30 +171,11 @@ def _write_log(log_file: Path, msg: str) -> None:
         pass  # heartbeat loss is acceptable; daemon cannot emit observability signal here
 
 
-def _analyze_once(log_file: Path) -> None:
-    """Run one summarize+claude cycle.
-
-    On summarize rc=2 (nothing new): silent no-op.
-    On summarize failure: log and return (cursor not advanced).
-    On claude unavailable: log and return.
-    On success: advance cursor.
-    """
-    import datetime as _dt
+def _run_summarizer(log_file: Path, summary_file: Path) -> tuple[int, int] | None:
+    """Run the summarize subcommand and return (rows, max_id) or None on skip/error."""
     import json as _json
-    import shutil
     import subprocess
 
-    state_dir = _state_dir()
-    analysis_dir = _analysis_dir()
-    instinct_dir = _default_instinct_dir()
-
-    analysis_dir.mkdir(parents=True, exist_ok=True)
-    instinct_dir.mkdir(parents=True, exist_ok=True)
-
-    ts_stamp = _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    summary_file = analysis_dir / f"summary-{ts_stamp}-{os.getpid()}.txt"
-
-    # Run summarizer.
     result = subprocess.run(
         [
             sys.executable,
@@ -211,89 +192,142 @@ def _analyze_once(log_file: Path) -> None:
     )
 
     if result.returncode == 2:
-        return  # nothing new
+        return None  # nothing new, no log
 
     if result.returncode != 0:
         _write_log(log_file, f"summarize failed (rc={result.returncode})")
-        return
+        return None
 
     try:
         meta = _json.loads(result.stdout)
-        max_id = int(meta["max_id"])
-        rows = int(meta["rows"])
+        return int(meta["rows"]), int(meta["max_id"])
     except (KeyError, ValueError, _json.JSONDecodeError):
         _write_log(log_file, f"summarize metadata parse failed: {result.stdout!r}")
-        return
+        return None
 
-    _write_log(log_file, f"Analyzing {rows} new tool calls (cursor → {max_id})...")
 
-    analysis_ok = False
-    if shutil.which("claude"):
-        prompt = (
-            f"Read the observation summary at {summary_file}. It aggregates recent "
-            f"tool-call activity (tool frequency, repeated sequences, subagent usage, "
-            f"recent errors, per-project breakdown). If the summary shows 3+ occurrences "
-            f"of the same pattern (same tool sequence, same subagent, same recurring error), "
-            f"create an instinct file in {instinct_dir}/personal/ following the observer "
-            f"agent spec. Be conservative — only create instincts for clear patterns. "
-            f"You may use {analysis_dir}/ for intermediate working files (notes, scripts). "
-            f"Only final instinct .md files go in {instinct_dir}/personal/."
-        )
-        claude_result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                "haiku",
-                "--max-turns",
-                "6",
-                "--print",
-                "--add-dir",
-                str(state_dir),
-                "--add-dir",
-                str(analysis_dir),
-                "--add-dir",
-                str(instinct_dir),
-            ],
-            input=prompt,
-            capture_output=True,
-            text=True,
-        )
-        if claude_result.returncode == 0:
-            analysis_ok = True
-        else:
-            _write_log(log_file, "claude invocation failed")
+def _run_claude_analysis(
+    log_file: Path,
+    summary_file: Path,
+    state_dir: Path,
+    analysis_dir: Path,
+    instinct_dir: Path,
+) -> bool:
+    """Invoke claude to analyse the summary. Returns True on success."""
+    import shutil
+    import subprocess
 
-    if analysis_ok:
-        adv = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                _summarize_module(),
-                "commit",
-                "--max-id",
-                str(max_id),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if adv.returncode == 0:
-            _write_log(log_file, f"Cursor advanced to {max_id}")
-        else:
-            _write_log(log_file, f"commit cursor failed (rc={adv.returncode})")
+    if not shutil.which("claude"):
+        return False
+
+    prompt = (
+        f"Read the observation summary at {summary_file}. It aggregates recent "
+        f"tool-call activity (tool frequency, repeated sequences, subagent usage, "
+        f"recent errors, per-project breakdown). If the summary shows 3+ occurrences "
+        f"of the same pattern (same tool sequence, same subagent, same recurring error), "
+        f"create an instinct file in {instinct_dir}/personal/ following the observer "
+        f"agent spec. Be conservative — only create instincts for clear patterns. "
+        f"You may use {analysis_dir}/ for intermediate working files (notes, scripts). "
+        f"Only final instinct .md files go in {instinct_dir}/personal/."
+    )
+    claude_result = subprocess.run(
+        [
+            "claude",
+            "--model",
+            "haiku",
+            "--max-turns",
+            "6",
+            "--print",
+            "--add-dir",
+            str(state_dir),
+            "--add-dir",
+            str(analysis_dir),
+            "--add-dir",
+            str(instinct_dir),
+        ],
+        input=prompt,
+        capture_output=True,
+        text=True,
+    )
+    if claude_result.returncode != 0:
+        _write_log(log_file, "claude invocation failed")
+        return False
+    return True
+
+
+def _advance_cursor(log_file: Path, max_id: int) -> None:
+    """Advance the summarizer cursor to max_id via the commit subcommand."""
+    import subprocess
+
+    adv = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            _summarize_module(),
+            "commit",
+            "--max-id",
+            str(max_id),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if adv.returncode == 0:
+        _write_log(log_file, f"Cursor advanced to {max_id}")
     else:
-        _write_log(log_file, "Analysis failed; cursor held, will retry next cycle.")
+        _write_log(log_file, f"commit cursor failed (rc={adv.returncode})")
 
-    # Clean up stale analysis files (keep ANALYSIS_DIR small).
+
+def _cleanup_analysis_dir(log_file: Path, analysis_dir: Path) -> None:
+    """Remove analysis files older than one hour; log any OSErrors."""
     cutoff = time.time() - 3600
-    cleanup_failures = 0
+    failures = 0
     for f in analysis_dir.iterdir():
         try:
             if f.is_file() and f.stat().st_mtime < cutoff:
                 f.unlink(missing_ok=True)
         except OSError:
-            cleanup_failures += 1
-    if cleanup_failures:
-        _write_log(log_file, f"analysis-dir cleanup: {cleanup_failures} OSError(s)")
+            failures += 1
+    if failures:
+        _write_log(log_file, f"analysis-dir cleanup: {failures} OSError(s)")
+
+
+def _analyze_once(log_file: Path) -> None:
+    """Run one summarize+claude cycle.
+
+    On summarize rc=2 (nothing new): silent no-op.
+    On summarize failure: log and return (cursor not advanced).
+    On claude unavailable: log and return.
+    On success: advance cursor.
+    """
+    import datetime as _dt
+
+    state_dir = _state_dir()
+    analysis_dir = _analysis_dir()
+    instinct_dir = _default_instinct_dir()
+
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    instinct_dir.mkdir(parents=True, exist_ok=True)
+
+    ts_stamp = _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    summary_file = analysis_dir / f"summary-{ts_stamp}-{os.getpid()}.txt"
+
+    result = _run_summarizer(log_file, summary_file)
+    if result is None:
+        return  # nothing new or error already logged
+
+    rows, max_id = result
+    _write_log(log_file, f"Analyzing {rows} new tool calls (cursor → {max_id})...")
+
+    analysis_ok = _run_claude_analysis(
+        log_file, summary_file, state_dir, analysis_dir, instinct_dir
+    )
+
+    if analysis_ok:
+        _advance_cursor(log_file, max_id)
+    else:
+        _write_log(log_file, "Analysis failed; cursor held, will retry next cycle.")
+
+    _cleanup_analysis_dir(log_file, analysis_dir)
 
 
 def _observer_loop(pid_file: Path, log_file: Path) -> None:
@@ -366,6 +400,9 @@ def _cmd_stop(pid_file: Path) -> int:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    except OSError as exc:
+        print(f"Failed to stop observer: {exc}", file=sys.stderr)
+        return 1
     pid_file.unlink(missing_ok=True)
     print("Observer stopped.")
     return 0

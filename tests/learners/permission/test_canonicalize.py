@@ -312,6 +312,17 @@ def test_task_runner_wins_over_content_verb_lookup():
     assert leaves[0].subcommand == "pytest"
 
 
+def test_task_runner_pair_without_target_falls_through_to_default_subcommand():
+    # "npm run" — the pair ("npm", "run") is in TASK_RUNNERS but there is no
+    # third word.  The previous HEAD fell through to the default branch which
+    # returns subcommand="run"; the SonarQube refactor early-returned (None, 2)
+    # instead, producing subcommand=None.  Regression guard.
+    leaves = parse_command("npm run")
+    assert len(leaves) == 1
+    assert leaves[0].verb == "npm"
+    assert leaves[0].subcommand == "run"
+
+
 def test_sed_script_argument_is_content():
     a = parse_command("sed 's/a/b/' file.txt")
     b = parse_command("sed 's/x/y/' file.txt")

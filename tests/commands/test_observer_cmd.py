@@ -164,6 +164,27 @@ def test_stop_sends_sigterm(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# stop — OSError from os.kill → returns 1, PID file NOT removed
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_stop_oserror_keeps_pid_file(tmp_path, capsys):
+    pid_file = tmp_path / "observer.pid"
+    pid_file.write_text(f"{os.getpid()}\n")
+
+    # First call: os.kill(pid, 0) — liveness check inside _pid_alive → succeeds.
+    # Second call: os.kill(pid, SIGTERM) — the actual stop → raises OSError (EPERM).
+    with mock.patch("os.kill") as mock_kill:
+        mock_kill.side_effect = [None, PermissionError("Operation not permitted")]
+        rc = main(_args(tmp_path, "stop"))
+
+    assert rc == 1
+    assert pid_file.exists(), "PID file must remain when os.kill raises OSError"
+    err = capsys.readouterr().err
+    assert "failed to stop observer" in err.lower()
+
+
+# ---------------------------------------------------------------------------
 # start — second start when PID file already live → refusal
 # ---------------------------------------------------------------------------
 

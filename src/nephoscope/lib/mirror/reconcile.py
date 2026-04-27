@@ -527,19 +527,10 @@ def _fmt_key(key: LogicalKey) -> str:
     return " ".join(parts)
 
 
-def _prompt_per_entry(
-    d: Diff,
-) -> tuple[
-    list[dict[str, Any]],  # only_in_json to insert
-    list[dict[str, Any]],  # only_in_db to delete
-    list[tuple[dict[str, Any], str]],  # (conflicting.db_row, winning_db_decision)
-]:
-    """Prompt user for each diff item; return lists of actions to apply."""
+def _prompt_json_only(json_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prompt the user to add or skip each JSON-only row. Returns rows to insert."""
     to_insert: list[dict[str, Any]] = []
-    to_delete: list[dict[str, Any]] = []
-    conflict_updates: list[tuple[dict[str, Any], str]] = []
-
-    for json_row in d.only_in_json:
+    for json_row in json_rows:
         key = _key_from_json_row(json_row)
         print(f"\n  Only in JSON: {_fmt_key(key)}  decision={json_row['decision']}")
         while True:
@@ -550,8 +541,13 @@ def _prompt_per_entry(
             if c in ("s", "skip"):
                 break
             print("  Enter a or s.")
+    return to_insert
 
-    for db_row in d.only_in_db:
+
+def _prompt_db_only(db_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prompt the user to keep or remove each DB-only row. Returns rows to delete."""
+    to_delete: list[dict[str, Any]] = []
+    for db_row in db_rows:
         key = _key_from_db_row(db_row)
         db_dec = _DB_TO_JSON.get(db_row["decision"], db_row["decision"])
         print(f"\n  Only in DB: {_fmt_key(key)}  decision={db_dec}")
@@ -563,8 +559,15 @@ def _prompt_per_entry(
                 to_delete.append(db_row)
                 break
             print("  Enter k or r.")
+    return to_delete
 
-    for entry in d.conflicting:
+
+def _prompt_conflicts(
+    conflicting: list[ConflictEntry],
+) -> list[tuple[dict[str, Any], str]]:
+    """Prompt the user to resolve each conflict. Returns (db_row, new_db_decision) pairs."""
+    updates: list[tuple[dict[str, Any], str]] = []
+    for entry in conflicting:
         print(
             f"\n  Conflict: {_fmt_key(entry.key)}"
             f"  DB={entry.db_decision} vs JSON={entry.json_decision}"
@@ -578,15 +581,25 @@ def _prompt_per_entry(
                 .lower()
             )
             if c in ("d", "db"):
-                # DB wins: keep DB decision (no update needed)
-                break
+                break  # DB wins: no update needed
             if c in ("j", "json"):
-                conflict_updates.append(
-                    (entry.db_row, _JSON_TO_DB[entry.json_decision])
-                )
+                updates.append((entry.db_row, _JSON_TO_DB[entry.json_decision]))
                 break
             print("  Enter d or j.")
+    return updates
 
+
+def _prompt_per_entry(
+    d: Diff,
+) -> tuple[
+    list[dict[str, Any]],  # only_in_json to insert
+    list[dict[str, Any]],  # only_in_db to delete
+    list[tuple[dict[str, Any], str]],  # (conflicting.db_row, winning_db_decision)
+]:
+    """Prompt user for each diff item; return lists of actions to apply."""
+    to_insert = _prompt_json_only(d.only_in_json)
+    to_delete = _prompt_db_only(d.only_in_db)
+    conflict_updates = _prompt_conflicts(d.conflicting)
     return to_insert, to_delete, conflict_updates
 
 
@@ -806,27 +819,41 @@ def reconcile(
         applied=True,
         first_touch=first_touch,
     )
+    _apply_resolution(conn, effective_mode, d, project_id, report)
 
+    # Regenerate JSON mirror + stamp hash.
+    _sync(conn, project_id)
+
+    return report
+
+
+def _apply_resolution(
+    conn: sqlite3.Connection,
+    effective_mode: str,
+    d: Diff,
+    project_id: int | None,
+    report: ReconcileReport,
+) -> None:
+    """Apply the resolution strategy to the diff, mutating report in place."""
     if effective_mode in ("adopt", "auto-json-wins"):
         ins, dels, upds = _apply_json_wins(conn, d, project_id)
         report.db_inserts = ins
         report.db_deletes = dels
         report.db_updates = upds
+        return
 
-    elif effective_mode == "auto-db-wins":
+    if effective_mode == "auto-db-wins":
         # DB rows are authoritative: no DB mutations needed.
         # Regenerate JSON from DB (drops only_in_json, keeps only_in_db).
-        pass  # mutations = 0; sync below regenerates the mirror
+        return
 
-    elif effective_mode == "interactive":
+    if effective_mode == "interactive":
         bulk = _prompt_bulk(d)
         if bulk == Resolution.JSON_WINS:
             ins, dels, upds = _apply_json_wins(conn, d, project_id)
             report.db_inserts = ins
             report.db_deletes = dels
             report.db_updates = upds
-        elif bulk == Resolution.DB_WINS:
-            pass  # no DB mutations; sync regenerates JSON
         elif bulk == Resolution.PER_ENTRY:
             to_insert, to_delete, conflict_updates = _prompt_per_entry(d)
             ins, dels, upds = _apply_per_entry_actions(
@@ -835,8 +862,4 @@ def reconcile(
             report.db_inserts = ins
             report.db_deletes = dels
             report.db_updates = upds
-
-    # Regenerate JSON mirror + stamp hash.
-    _sync(conn, project_id)
-
-    return report
+        # DB_WINS: no DB mutations; sync regenerates JSON

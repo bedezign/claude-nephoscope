@@ -88,6 +88,48 @@ def _default_cmdline_path() -> Path:
     return Path(f"/proc/{os.getppid()}/cmdline")
 
 
+def _consume_variadic_values(parts: list[str], start: int) -> tuple[list[str], int]:
+    """Consume positional values after a bare ``--add-dir`` flag.
+
+    Reads from ``parts[start]`` forward, stopping at the next ``-`` flag,
+    ``--``, or end of list.  Returns ``(collected_values, next_index)``.
+    """
+    values: list[str] = []
+    i = start
+    while i < len(parts):
+        value = parts[i]
+        if value == "--" or value.startswith("-"):
+            break
+        if value:
+            values.append(value)
+        i += 1
+    return values, i
+
+
+def _collect_add_dir_values(parts: list[str]) -> list[str]:
+    """Walk a decoded argv list and return all ``--add-dir`` values.
+
+    Handles both ``--add-dir <val> [val ...]`` (variadic) and
+    ``--add-dir=<val>`` (inline) forms.  Stops scanning at ``--``.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if token == "--":
+            break
+        if token == "--add-dir":
+            values, i = _consume_variadic_values(parts, i + 1)
+            out.extend(values)
+            continue
+        if token.startswith("--add-dir="):
+            value = token[len("--add-dir=") :]
+            if value:
+                out.append(value)
+        i += 1
+    return out
+
+
 def extract_add_dir_args(cmdline_path: Path | str | None = None) -> list[str]:
     """Parse the parent process's argv for ``--add-dir`` values.
 
@@ -124,33 +166,8 @@ def extract_add_dir_args(cmdline_path: Path | str | None = None) -> list[str]:
         return []
     # /proc/<pid>/cmdline is NUL-separated; trailing NUL leaves an empty tail.
     parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\x00") if p]
-
-    out: list[str] = []
-    i = 0
-    while i < len(parts):
-        token = parts[i]
-        if token == "--":
-            break
-        if token == "--add-dir":
-            # Variadic: consume until next flag, ``--``, or end-of-argv.
-            i += 1
-            while i < len(parts):
-                value = parts[i]
-                if value == "--" or value.startswith("-"):
-                    break
-                if value:
-                    out.append(value)
-                i += 1
-            continue
-        if token.startswith("--add-dir="):
-            value = token[len("--add-dir=") :]
-            if value:
-                out.append(value)
-            i += 1
-            continue
-        i += 1
-
-    return [c for c in (canonicalize(p) for p in out) if c]
+    raw_values = _collect_add_dir_values(parts)
+    return [c for c in (canonicalize(p) for p in raw_values) if c]
 
 
 def canonicalize(p: str | Path | None) -> str:

@@ -404,7 +404,11 @@ def _resolve_tier_ids(
 
 
 def _cmd_scan(_args: argparse.Namespace) -> int:
-    conn = _connect()
+    try:
+        conn = _connect()
+    except Exception as exc:  # noqa: BLE001
+        print(f"scan: cannot open database: {exc}", file=sys.stderr)
+        return 1
     try:
         processed = scan_candidates(conn)
         proposals = propose_promotions(conn)
@@ -433,7 +437,11 @@ def _cmd_scan(_args: argparse.Namespace) -> int:
 
 
 def _cmd_candidates(_args: argparse.Namespace) -> int:
-    conn = _connect()
+    try:
+        conn = _connect()
+    except Exception as exc:  # noqa: BLE001
+        print(f"candidates: cannot open database: {exc}", file=sys.stderr)
+        return 1
     try:
         rows = conn.execute(
             """
@@ -820,7 +828,11 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
 
 def _cmd_permissions(_args: argparse.Namespace) -> int:
     """Dump all permission rows via the v_permissions view."""
-    conn = _connect()
+    try:
+        conn = _connect()
+    except Exception as exc:  # noqa: BLE001
+        print(f"permissions: cannot open database: {exc}", file=sys.stderr)
+        return 1
     try:
         rows = conn.execute(
             """

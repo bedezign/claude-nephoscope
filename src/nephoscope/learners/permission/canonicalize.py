@@ -429,6 +429,60 @@ def _normalise_dirs(dirs: list[str] | None) -> list[str]:
     return [str(Path(d).expanduser()).rstrip("/") for d in dirs if d and d.strip()]
 
 
+def _emit_path_spec(
+    glob: str,
+    specific: str | None,
+    seen: set[str],
+    result: list[str],
+) -> None:
+    """Append glob (and optionally specific) to result if not already seen."""
+    if glob not in seen:
+        seen.add(glob)
+        result.append(glob)
+    if specific is not None and specific not in seen:
+        seen.add(specific)
+        result.append(specific)
+
+
+def _match_ctx_prefix(
+    path: str,
+    ordered: list[tuple[str, str]],
+    seen: set[str],
+    result: list[str],
+) -> bool:
+    """Try matching path against ctx-var prefixes. Returns True when matched."""
+    for var_name, base in ordered:
+        glob = var_name + "/**"
+        if path == base:
+            _emit_path_spec(glob, None, seen, result)
+            return True
+        if path.startswith(base + "/"):
+            tail = path[len(base) + 1 :]
+            specific = var_name + "/" + tail
+            _emit_path_spec(glob, specific, seen, result)
+            return True
+    return False
+
+
+def _match_additional_dir(
+    path: str,
+    norm_extra: list[str],
+    seen: set[str],
+    result: list[str],
+) -> None:
+    """Try matching path against additional_dirs; emit inline absolute specs."""
+    for base in norm_extra:
+        glob = base + "/**"
+        if path == base:
+            _emit_path_spec(glob, None, seen, result)
+            break
+        if path.startswith(base + "/"):
+            tail = path[len(base) + 1 :]
+            specific = base + "/" + tail
+            _emit_path_spec(glob, specific, seen, result)
+            break
+
+
 def _path_specs_from_positionals(
     positional_paths: tuple[str, ...],
     ordered: list[tuple[str, str]],
@@ -463,50 +517,9 @@ def _path_specs_from_positionals(
     for path in positional_paths:
         if not path.startswith("/"):
             continue
-
-        # --- ctx-var prefix check (placeholder wins over inline-absolute) ---
-        matched_ctx = False
-        for var_name, base in ordered:
-            glob = var_name + "/**"
-            if path == base:
-                if glob not in seen:
-                    seen.add(glob)
-                    result.append(glob)
-                matched_ctx = True
-                break
-            if path.startswith(base + "/"):
-                tail = path[len(base) + 1 :]
-                specific = var_name + "/" + tail
-                if glob not in seen:
-                    seen.add(glob)
-                    result.append(glob)
-                if specific not in seen:
-                    seen.add(specific)
-                    result.append(specific)
-                matched_ctx = True
-                break
-
-        if matched_ctx:
+        if _match_ctx_prefix(path, ordered, seen, result):
             continue
-
-        # --- additional_dirs fallback (inline absolute, no $VAR prefix) ---
-        for base in norm_extra:
-            glob = base + "/**"
-            if path == base:
-                if glob not in seen:
-                    seen.add(glob)
-                    result.append(glob)
-                break
-            if path.startswith(base + "/"):
-                tail = path[len(base) + 1 :]
-                specific = base + "/" + tail
-                if glob not in seen:
-                    seen.add(glob)
-                    result.append(glob)
-                if specific not in seen:
-                    seen.add(specific)
-                    result.append(specific)
-                break
+        _match_additional_dir(path, norm_extra, seen, result)
 
     return result
 
@@ -532,10 +545,35 @@ def _walk(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
         _walk(child, out)
 
 
-def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
-    """Extract a CanonicalLeaf from a ``CommandNode`` and recurse into any
-    command/process substitutions reachable from its words."""
-    parts = list(getattr(node, "parts", ()) or ())
+def _handle_word_part(
+    part: bashlex.ast.node,
+    words: list[bashlex.ast.node],
+    out: list[CanonicalLeaf],
+) -> None:
+    """Append word to accumulator and recurse into any command substitutions."""
+    words.append(part)
+    for sub in _substitutions_in(part):
+        _walk(sub, out)
+
+
+def _handle_redirect_part(
+    part: bashlex.ast.node,
+    redirects: list[bashlex.ast.node],
+    out: list[CanonicalLeaf],
+) -> None:
+    """Append redirect to accumulator and recurse into substitutions in its target."""
+    redirects.append(part)
+    target = getattr(part, "output", None)
+    if target is not None and getattr(target, "kind", None) == "word":
+        for sub in _substitutions_in(target):
+            _walk(sub, out)
+
+
+def _partition_command_parts(
+    parts: list[bashlex.ast.node],
+    out: list[CanonicalLeaf],
+) -> tuple[list[bashlex.ast.node], list[bashlex.ast.node]]:
+    """Split command parts into (words, redirects), recursing into substitutions."""
     words: list[bashlex.ast.node] = []
     redirects: list[bashlex.ast.node] = []
     seen_non_assignment = False
@@ -547,20 +585,19 @@ def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
             continue
         if pkind == "word":
             seen_non_assignment = True
-            words.append(part)
-            # Recurse into command/process substitutions nested in the word.
-            for sub in _substitutions_in(part):
-                _walk(sub, out)
-            continue
-        if pkind == "redirect":
-            redirects.append(part)
-            # Redirection targets can contain substitutions too.
-            target = getattr(part, "output", None)
-            if target is not None and getattr(target, "kind", None) == "word":
-                for sub in _substitutions_in(target):
-                    _walk(sub, out)
-            continue
-        # Anything else (operators etc.) we ignore at this level.
+            _handle_word_part(part, words, out)
+        elif pkind == "redirect":
+            _handle_redirect_part(part, redirects, out)
+        # Anything else (operators etc.) ignored at this level.
+
+    return words, redirects
+
+
+def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
+    """Extract a CanonicalLeaf from a ``CommandNode`` and recurse into any
+    command/process substitutions reachable from its words."""
+    parts: list[bashlex.ast.node] = list(getattr(node, "parts", ()) or ())
+    words, redirects = _partition_command_parts(parts, out)
 
     if not words:
         return
@@ -603,6 +640,34 @@ def _word_literal(word_node: bashlex.ast.node) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _is_positional_subcommand(token: str) -> bool:
+    """Return True when *token* is a valid positional subcommand name (not a flag or substitution)."""
+    return (
+        bool(token)
+        and not token.startswith("-")
+        and not token.startswith(_SUBSTITUTION_PREFIXES)
+    )
+
+
+def _resolve_task_runner_subcommand(
+    verb: str, words: list[bashlex.ast.node]
+) -> tuple[str | None, int] | None:
+    """Return (subcommand, positional_start) for task-runner verbs, or None if not a runner."""
+    if len(words) >= 2:
+        second = _word_literal(words[1])
+        if (verb, second) in TASK_RUNNERS and len(words) >= 3:
+            target = _word_literal(words[2])
+            if _is_positional_subcommand(target):
+                return target, 3
+            return None, 2
+    if (verb,) in TASK_RUNNERS and len(words) >= 2:
+        target = _word_literal(words[1])
+        if _is_positional_subcommand(target):
+            return target, 2
+        return None, 1
+    return None  # not a task runner
+
+
 def _resolve_subcommand(
     verb: str, words: list[bashlex.ast.node]
 ) -> tuple[str | None, int]:
@@ -614,26 +679,9 @@ def _resolve_subcommand(
     prefix / subcommand slot).
     """
     # Task-runner check: ("verb", "second_word") or ("verb",) in TASK_RUNNERS.
-    if len(words) >= 2:
-        second = _word_literal(words[1])
-        if (verb, second) in TASK_RUNNERS and len(words) >= 3:
-            target = _word_literal(words[2])
-            if (
-                target
-                and not target.startswith("-")
-                and not target.startswith(_SUBSTITUTION_PREFIXES)
-            ):
-                return target, 3
-            return None, 2
-    if (verb,) in TASK_RUNNERS and len(words) >= 2:
-        target = _word_literal(words[1])
-        if (
-            target
-            and not target.startswith("-")
-            and not target.startswith(_SUBSTITUTION_PREFIXES)
-        ):
-            return target, 2
-        return None, 1
+    runner_result = _resolve_task_runner_subcommand(verb, words)
+    if runner_result is not None:
+        return runner_result
 
     # Content verbs: first positional is content (path/pattern/message/script),
     # not a subcommand. Collapse all invocations into one shape by discarding
@@ -645,9 +693,9 @@ def _resolve_subcommand(
     if len(words) >= 2:
         candidate = _word_literal(words[1])
         if candidate and not candidate.startswith("-"):
-            # Process/command substitutions (``<(...)``, ``>(...)``, ``$(...)``)
-            # are not meaningful subcommand names — drop the slot. Recursion
-            # into the inner command still happens via _substitutions_in.
+            # Process/command substitutions are not meaningful subcommand names
+            # — drop the slot. Recursion into the inner command still happens
+            # via _substitutions_in.
             if candidate.startswith(_SUBSTITUTION_PREFIXES):
                 return None, 2
             return candidate, 2

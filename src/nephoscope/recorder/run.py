@@ -67,25 +67,54 @@ PAYLOAD_MAX = 4096
 RESPONSE_MAX = 2048
 
 
+def _flatten_agent_fields(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Extract flat columns for Task/Agent tools."""
+    row: dict[str, Any] = {}
+    if (v := tool_input.get("subagent_type")) is not None:
+        row["subagent_type"] = _truncate(v)
+    if (v := tool_input.get("description")) is not None:
+        row["description"] = _truncate(v)
+    return row
+
+
+def _flatten_bash_fields(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Extract flat columns for Bash tools."""
+    row: dict[str, Any] = {}
+    if (v := tool_input.get("command")) is not None:
+        row["command"] = _truncate(v)
+    if (v := tool_input.get("description")) is not None:
+        row["description"] = _truncate(v)
+    return row
+
+
+def _flatten_file_fields(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Extract flat columns for file tools (Read, Edit, Write, etc.)."""
+    row: dict[str, Any] = {}
+    if (v := tool_input.get("file_path")) is not None:
+        row["file_path"] = _truncate(v)
+    return row
+
+
+def _flatten_search_fields(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Extract flat columns for search tools (Grep, Glob)."""
+    row: dict[str, Any] = {}
+    if (v := tool_input.get("pattern")) is not None:
+        row["pattern"] = _truncate(v)
+    return row
+
+
 def _flatten(tool: str, tool_input: dict[str, Any]) -> dict[str, Any]:
     """Project a tool-input dict into the flat columns stored on tool_calls."""
-    row: dict[str, Any] = {}
     if tool in ("Task", "Agent"):
-        if (v := tool_input.get("subagent_type")) is not None:
-            row["subagent_type"] = _truncate(v)
-        if (v := tool_input.get("description")) is not None:
-            row["description"] = _truncate(v)
+        row = _flatten_agent_fields(tool_input)
     elif tool == "Bash":
-        if (v := tool_input.get("command")) is not None:
-            row["command"] = _truncate(v)
-        if (v := tool_input.get("description")) is not None:
-            row["description"] = _truncate(v)
+        row = _flatten_bash_fields(tool_input)
     elif tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
-        if (v := tool_input.get("file_path")) is not None:
-            row["file_path"] = _truncate(v)
+        row = _flatten_file_fields(tool_input)
     elif tool in ("Grep", "Glob"):
-        if (v := tool_input.get("pattern")) is not None:
-            row["pattern"] = _truncate(v)
+        row = _flatten_search_fields(tool_input)
+    else:
+        row = {}
     try:
         raw = minify_json(tool_input)
     except (TypeError, ValueError):
@@ -123,6 +152,132 @@ def _safe_minify(value: Any) -> str:
         return str(value)
 
 
+def _handle_pre(
+    conn: sqlite3.Connection,
+    data: dict[str, Any],
+    flat: dict[str, Any],
+    session_id_int: int | None,
+    project_id: int | None,
+    tool_use_id: str,
+    tool_id: int,
+    subagent_type_id: int | None,
+    file_path_id: int | None,
+    now: str,
+) -> None:
+    """Write a pending tool_calls row for the pre phase."""
+    permission_mode_id = lookup_permission_mode_id(conn, data.get("permission_mode"))
+    pending_id = lookup_status_id(conn, "pending")
+
+    cur = conn.execute(
+        """
+        INSERT INTO tool_calls
+          (ts, session_id, project_id, ok,
+           command, pattern, description,
+           args_json, tool_use_id, completed_ts,
+           permission_mode_id, status_id,
+           tool_id, subagent_type_id, file_path_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?);
+        """,
+        (
+            now,
+            session_id_int,
+            project_id,
+            None,
+            flat.get("command"),
+            flat.get("pattern"),
+            flat.get("description"),
+            flat.get("args_json"),
+            tool_use_id,
+            permission_mode_id,
+            pending_id,
+            tool_id,
+            subagent_type_id,
+            file_path_id,
+        ),
+    )
+    tool_call_id = int(cur.lastrowid or 0)
+
+    if tool_call_id > 0:
+        payload_blob = _safe_minify(data)[:PAYLOAD_MAX]
+        write_extra(conn, tool_call_id, "payload", payload_blob)
+
+    transcript_path = canonicalize(data.get("transcript_path") or "")
+    if transcript_path and session_id_int is not None:
+        conn.execute(
+            "UPDATE sessions SET transcript_path = ? "
+            "WHERE id = ? AND transcript_path IS NULL;",
+            (transcript_path, session_id_int),
+        )
+
+
+def _handle_post(
+    conn: sqlite3.Connection,
+    data: dict[str, Any],
+    flat: dict[str, Any],
+    session_id_int: int | None,
+    project_id: int | None,
+    tool_use_id: str,
+    tool_id: int,
+    subagent_type_id: int | None,
+    file_path_id: int | None,
+    now: str,
+) -> None:
+    """Update or orphan-insert a tool_calls row for the post phase."""
+    ok = _ok(data.get("tool_response"))
+    status_id = lookup_status_id(conn, _status_name_from_ok(ok))
+
+    existing = conn.execute(
+        "SELECT id FROM tool_calls WHERE tool_use_id = ? ORDER BY id DESC LIMIT 1;",
+        (tool_use_id,),
+    ).fetchone()
+
+    if existing is not None:
+        tool_call_id = int(existing[0])
+        conn.execute(
+            """
+            UPDATE tool_calls
+               SET completed_ts = ?,
+                   status_id = ?,
+                   ok = ?
+             WHERE id = ?;
+            """,
+            (now, status_id, ok, tool_call_id),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO tool_calls
+              (ts, session_id, project_id, ok,
+               command, pattern, description,
+               args_json, tool_use_id, completed_ts, status_id,
+               tool_id, subagent_type_id, file_path_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                now,
+                session_id_int,
+                project_id,
+                ok,
+                flat.get("command"),
+                flat.get("pattern"),
+                flat.get("description"),
+                flat.get("args_json"),
+                tool_use_id,
+                now,
+                status_id,
+                tool_id,
+                subagent_type_id,
+                file_path_id,
+            ),
+        )
+        tool_call_id = int(cur.lastrowid or 0)
+
+    tool_response = data.get("tool_response")
+    if tool_response and tool_call_id > 0:
+        response_blob = _safe_minify(tool_response)[:RESPONSE_MAX]
+        write_extra(conn, tool_call_id, "response", response_blob)
+
+
 def _handle(phase: str, data: dict[str, Any]) -> None:
     tool = data.get("tool_name") or data.get("tool") or "unknown"
     tool_input = data.get("tool_input") or data.get("input") or {}
@@ -150,108 +305,22 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         )
         file_path_id = lookup_or_insert_file_path_id(conn, flat.get("file_path"), now)
 
+        common = (
+            conn,
+            data,
+            flat,
+            session_id_int,
+            project_id,
+            tool_use_id,
+            tool_id,
+            subagent_type_id,
+            file_path_id,
+            now,
+        )
         if phase == "pre":
-            permission_mode_id = lookup_permission_mode_id(
-                conn, data.get("permission_mode")
-            )
-            pending_id = lookup_status_id(conn, "pending")
-
-            cur = conn.execute(
-                """
-                INSERT INTO tool_calls
-                  (ts, session_id, project_id, ok,
-                   command, pattern, description,
-                   args_json, tool_use_id, completed_ts,
-                   permission_mode_id, status_id,
-                   tool_id, subagent_type_id, file_path_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?);
-                """,
-                (
-                    now,
-                    session_id_int,
-                    project_id,
-                    None,
-                    flat.get("command"),
-                    flat.get("pattern"),
-                    flat.get("description"),
-                    flat.get("args_json"),
-                    tool_use_id,
-                    permission_mode_id,
-                    pending_id,
-                    tool_id,
-                    subagent_type_id,
-                    file_path_id,
-                ),
-            )
-            tool_call_id = int(cur.lastrowid or 0)
-
-            if tool_call_id > 0:
-                payload_blob = _safe_minify(data)[:PAYLOAD_MAX]
-                write_extra(conn, tool_call_id, "payload", payload_blob)
-
-            transcript_path = canonicalize(data.get("transcript_path") or "")
-            if transcript_path and session_id_int is not None:
-                conn.execute(
-                    "UPDATE sessions SET transcript_path = ? "
-                    "WHERE id = ? AND transcript_path IS NULL;",
-                    (transcript_path, session_id_int),
-                )
-            return
-
-        # -- post phase --------------------------------------------------
-        ok = _ok(data.get("tool_response"))
-        status_id = lookup_status_id(conn, _status_name_from_ok(ok))
-
-        existing = conn.execute(
-            "SELECT id FROM tool_calls WHERE tool_use_id = ? ORDER BY id DESC LIMIT 1;",
-            (tool_use_id,),
-        ).fetchone()
-
-        if existing is not None:
-            tool_call_id = int(existing[0])
-            conn.execute(
-                """
-                UPDATE tool_calls
-                   SET completed_ts = ?,
-                       status_id = ?,
-                       ok = ?
-                 WHERE id = ?;
-                """,
-                (now, status_id, ok, tool_call_id),
-            )
+            _handle_pre(*common)
         else:
-            cur = conn.execute(
-                """
-                INSERT INTO tool_calls
-                  (ts, session_id, project_id, ok,
-                   command, pattern, description,
-                   args_json, tool_use_id, completed_ts, status_id,
-                   tool_id, subagent_type_id, file_path_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """,
-                (
-                    now,
-                    session_id_int,
-                    project_id,
-                    ok,
-                    flat.get("command"),
-                    flat.get("pattern"),
-                    flat.get("description"),
-                    flat.get("args_json"),
-                    tool_use_id,
-                    now,
-                    status_id,
-                    tool_id,
-                    subagent_type_id,
-                    file_path_id,
-                ),
-            )
-            tool_call_id = int(cur.lastrowid or 0)
-
-        tool_response = data.get("tool_response")
-        if tool_response and tool_call_id > 0:
-            response_blob = _safe_minify(tool_response)[:RESPONSE_MAX]
-            write_extra(conn, tool_call_id, "response", response_blob)
+            _handle_post(*common)
     finally:
         conn.close()
 

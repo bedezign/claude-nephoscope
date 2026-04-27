@@ -58,6 +58,21 @@ def _glob_match(pattern: str, path: str) -> bool:
     return fnmatch.fnmatch(path, fallback)
 
 
+def _path_spec_matches(
+    path_spec: str | None, file_path: str, ctx: dict[str, str]
+) -> bool:
+    """Return True when path_spec allows the given file_path."""
+    if path_spec is None:
+        return True  # NULL → any path
+    if path_spec == "":
+        return not file_path  # empty string → no-path constraint
+    # Glob pattern (possibly with $VAR tokens).
+    if not file_path:
+        return False
+    resolved = _resolve_path_spec(path_spec, ctx)
+    return _glob_match(resolved, file_path)
+
+
 def match(
     tool_name: str,
     tool_input: dict[str, Any],
@@ -76,32 +91,16 @@ def match(
         if not isinstance(file_path, str):
             file_path = ""
 
-    # Fetch all rule_shapes rows for this verb.
     rows = conn.execute(
         "SELECT id, path_spec FROM rule_shapes WHERE verb = ?;",
         (tool_name,),
     ).fetchall()
 
     for shape_id_raw, path_spec in rows:
-        shape_id = int(shape_id_raw)
+        if not _path_spec_matches(path_spec, file_path, ctx):
+            continue
 
-        # path_spec matching.
-        if path_spec is None:
-            # NULL → any path: always candidate.
-            pass
-        elif path_spec == "":
-            # Empty string → no-path constraint: only matches when no file path.
-            if file_path:
-                continue
-        else:
-            # Glob pattern (possibly with $VAR tokens).
-            if not file_path:
-                continue
-            resolved = _resolve_path_spec(path_spec, ctx)
-            if not _glob_match(resolved, file_path):
-                continue
-
-        perms = lookup_permissions(conn, shape_id, session_id, project_id)
+        perms = lookup_permissions(conn, int(shape_id_raw), session_id, project_id)
         if not perms:
             continue
         decision = perms[0]["decision"]

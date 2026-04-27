@@ -107,6 +107,67 @@ def _parse_bash_args(args: str) -> tuple[str, str | None, str]:
     return verb, subcommand, flags
 
 
+def _validate_entry_chars(entry: str, err_fn: Any) -> None:
+    """Raise IngesterError on structurally invalid characters."""
+    if not entry or not entry.strip():
+        raise err_fn("entry is empty or whitespace-only")
+    if "\n" in entry or "\r" in entry:
+        raise err_fn("entry contains an internal newline")
+    if entry.count('"') % 2 != 0 or entry.count("'") % 2 != 0:
+        raise err_fn("entry contains unbalanced quote characters")
+
+
+def _parse_paren_entry(entry: str, err_fn: Any) -> dict[str, Any]:
+    """Parse a ``Verb(args)`` form entry. Caller has confirmed ``(`` in entry."""
+    if not entry.endswith(")"):
+        raise err_fn("missing closing parenthesis")
+
+    paren_pos = entry.index("(")
+    outer_verb = entry[:paren_pos]
+    args = entry[paren_pos + 1 : -1]
+
+    if not outer_verb:
+        raise err_fn("tool name is empty before parenthesis")
+
+    tc = classify(outer_verb)
+
+    if outer_verb == _BASH_PREFIX:
+        stripped = args.strip()
+        if not stripped:
+            raise err_fn("Bash entry has an empty argument list")
+        shell_verb, subcommand, flags = _parse_bash_args(stripped)
+        return {
+            "tool": _BASH_PREFIX,
+            "verb": shell_verb,
+            "path_spec": None,
+            "subcommand": subcommand,
+            "flags": flags,
+            "tool_class": "bash",
+        }
+
+    if tc == "file":
+        if not args.startswith("//"):
+            raise err_fn(f"file tool path spec must start with '//' (got {args!r})")
+        return {
+            "tool": outer_verb,
+            "verb": outer_verb,
+            "path_spec": args,
+            "subcommand": None,
+            "flags": None,
+            "tool_class": tc,
+        }
+
+    # Unknown verb with parens — forward-compatibility.
+    return {
+        "tool": outer_verb,
+        "verb": outer_verb,
+        "path_spec": None,
+        "subcommand": args if args else None,
+        "flags": None,
+        "tool_class": tc,
+    }
+
+
 def parse_entry(entry: str, *, source: str) -> dict[str, Any]:
     """Parse one permissions entry string into a structured row dict.
 
@@ -139,23 +200,9 @@ def parse_entry(entry: str, *, source: str) -> dict[str, Any]:
             f"Malformed permission entry {entry!r} in {source}: {detail}"
         )
 
-    # --- Reject empty / whitespace-only --------------------------------
-    if not entry or not entry.strip():
-        raise _err("entry is empty or whitespace-only")
+    _validate_entry_chars(entry, _err)
 
-    # --- Reject entries with internal newlines -------------------------
-    if "\n" in entry or "\r" in entry:
-        raise _err("entry contains an internal newline")
-
-    # --- Reject unbalanced quotes -------------------------------------
-    # Canonical forms never use quote characters.  An odd count signals
-    # a truncated or malformed string (e.g. Bash(echo "hello)).
-    if entry.count('"') % 2 != 0 or entry.count("'") % 2 != 0:
-        raise _err("entry contains unbalanced quote characters")
-
-    # --- MCP: mcp__namespace__tool[name|*] ----------------------------
-    # MCP entries are bare names (no parens).  A paren inside an MCP name
-    # is a structural error.
+    # MCP entries are bare names (no parens).
     if entry.startswith("mcp__"):
         if "(" in entry or ")" in entry:
             raise _err("MCP tool names must not contain parentheses")
@@ -168,68 +215,11 @@ def parse_entry(entry: str, *, source: str) -> dict[str, Any]:
             "tool_class": "mcp",
         }
 
-    # --- Verb(args) form ----------------------------------------------
+    # Verb(args) form.
     if "(" in entry:
-        if not entry.endswith(")"):
-            raise _err("missing closing parenthesis")
+        return _parse_paren_entry(entry, _err)
 
-        paren_pos = entry.index("(")
-        outer_verb = entry[:paren_pos]
-        # Strip the outermost ( … ) — inner parens are part of the args.
-        args = entry[paren_pos + 1 : -1]
-
-        if not outer_verb:
-            raise _err("tool name is empty before parenthesis")
-
-        tc = classify(outer_verb)
-
-        # --- Bash: only when the outer verb is literally "Bash" ------------
-        # Unknown verbs that happen to classify as "bash" (the default class
-        # for unrecognised verbs) go to the forward-compatibility branch below.
-        if outer_verb == _BASH_PREFIX:
-            stripped = args.strip()
-            if not stripped:
-                raise _err("Bash entry has an empty argument list")
-            shell_verb, subcommand, flags = _parse_bash_args(stripped)
-            return {
-                "tool": _BASH_PREFIX,  # always "Bash" for Bash entries
-                "verb": shell_verb,  # shell command (e.g. "git")
-                "path_spec": None,
-                "subcommand": subcommand,
-                "flags": flags,
-                "tool_class": "bash",
-            }
-
-        if tc == "file":
-            # File tools (Read, Edit, Write, MultiEdit, NotebookEdit) require
-            # a // path prefix inside the parens.
-            if not args.startswith("//"):
-                raise _err(f"file tool path spec must start with '//' (got {args!r})")
-            return {
-                "tool": outer_verb,
-                "verb": outer_verb,
-                # path_spec includes the // prefix as stored in the entry.
-                # Serializer should use f"{verb}({path_spec})" not f"{verb}(//{path_spec})".
-                "path_spec": args,
-                "subcommand": None,
-                "flags": None,
-                "tool_class": tc,
-            }
-
-        # Unknown verb with parens — accept for forward-compatibility.
-        # Store outer_verb as both tool and verb; treat args as subcommand.
-        return {
-            "tool": outer_verb,
-            "verb": outer_verb,
-            "path_spec": None,
-            "subcommand": args if args else None,
-            "flags": None,
-            "tool_class": tc,
-        }
-
-    # --- Bare tool name (no parens) -----------------------------------
-    # Covers flat tools (WebSearch, Grep, Glob, …) and any unknown future
-    # tool that doesn't carry arguments.
+    # Bare tool name (no parens) — flat tools, unknown future tools.
     tc = classify(entry)
     return {
         "tool": entry,

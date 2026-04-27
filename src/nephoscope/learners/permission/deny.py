@@ -60,6 +60,7 @@ def _guarded_write_prefixes() -> tuple[str, ...]:
     home_expanded = tuple(f"{home}/{rel}" for rel in _HOME_GUARDED_RELATIVE)
     return home_expanded + _SYSTEM_GUARDED_PREFIXES
 
+
 _cached_config: dict[str, Any] | None = None
 
 
@@ -85,6 +86,113 @@ def _reset_cache() -> None:
     _cached_config = None
 
 
+def _check_deny_verb(leaf: CanonicalLeaf, config: dict) -> tuple[str, str] | None:
+    """Check verb-level deny rules. Returns (tier, reason) or None."""
+    if leaf.verb == "sudo":
+        return "deny", "verb 'sudo' is never auto-allowed"
+    denied_verbs = config.get("denied_verbs") or []
+    if isinstance(denied_verbs, list) and leaf.verb in denied_verbs:
+        return "deny", f"verb '{leaf.verb}' is in deny list"
+    return None
+
+
+def _check_deny_subcommand(leaf: CanonicalLeaf, config: dict) -> tuple[str, str] | None:
+    """Check subcommand-level deny rules. Returns (tier, reason) or None."""
+    denied_subcommands = config.get("denied_subcommands") or {}
+    if not isinstance(denied_subcommands, dict):
+        return None
+    subs = denied_subcommands.get(leaf.verb) or []
+    if (
+        isinstance(subs, list)
+        and leaf.subcommand is not None
+        and leaf.subcommand in subs
+    ):
+        return "deny", f"subcommand '{leaf.verb} {leaf.subcommand}' is in deny list"
+    return None
+
+
+def _check_deny_flags(leaf: CanonicalLeaf, config: dict) -> tuple[str, str] | None:
+    """Check flag-level deny rules. Returns (tier, reason) or None."""
+    denied_flag_patterns = config.get("denied_flag_patterns") or {}
+    if not isinstance(denied_flag_patterns, dict):
+        return None
+    patterns = denied_flag_patterns.get(leaf.verb) or []
+    if not isinstance(patterns, list):
+        return None
+    for pattern in patterns:
+        if pattern in leaf.flags:
+            return "deny", f"flag '{pattern}' on '{leaf.verb}' is in deny list"
+    return None
+
+
+def _check_deny_redirections(leaf: CanonicalLeaf) -> tuple[str, str] | None:
+    """Check redirection-level deny rules (guarded paths). Returns (tier, reason) or None."""
+    guarded_prefixes = _guarded_write_prefixes()
+    for redir in leaf.redirections:
+        if redir.op not in (">", ">>"):
+            continue
+        for prefix in guarded_prefixes:
+            if redir.target.startswith(prefix):
+                return (
+                    "deny",
+                    f"redirection '{redir.op} {redir.target}' targets guarded path",
+                )
+    return None
+
+
+def _check_ask_verb(leaf: CanonicalLeaf, config: dict) -> tuple[str, str] | None:
+    """Check verb-level ask rules. Returns (tier, reason) or None."""
+    ask_verbs = config.get("ask_verbs") or []
+    if isinstance(ask_verbs, list) and leaf.verb in ask_verbs:
+        return "ask", f"verb '{leaf.verb}' needs confirmation"
+    return None
+
+
+def _check_ask_subcommand(leaf: CanonicalLeaf, config: dict) -> tuple[str, str] | None:
+    """Check subcommand-level ask rules. Returns (tier, reason) or None."""
+    ask_subcommands = config.get("ask_subcommands") or {}
+    if not isinstance(ask_subcommands, dict):
+        return None
+    subs = ask_subcommands.get(leaf.verb) or []
+    if (
+        isinstance(subs, list)
+        and leaf.subcommand is not None
+        and leaf.subcommand in subs
+    ):
+        return "ask", f"subcommand '{leaf.verb} {leaf.subcommand}' needs confirmation"
+    return None
+
+
+def _check_ask_flags(leaf: CanonicalLeaf, config: dict) -> tuple[str, str] | None:
+    """Check flag-level ask rules. Returns (tier, reason) or None."""
+    ask_flag_patterns = config.get("ask_flag_patterns") or {}
+    if not isinstance(ask_flag_patterns, dict):
+        return None
+    patterns = ask_flag_patterns.get(leaf.verb) or []
+    if not isinstance(patterns, list):
+        return None
+    for pattern in patterns:
+        if pattern in leaf.flags:
+            return "ask", f"flag '{pattern}' on '{leaf.verb}' needs confirmation"
+    return None
+
+
+def _check_ask_redirections(leaf: CanonicalLeaf) -> tuple[str, str] | None:
+    """Check redirection-level ask rules (truncate over existing file)."""
+    for redir in leaf.redirections:
+        if redir.op != ">":
+            continue
+        try:
+            if os.path.isfile(redir.target):
+                return (
+                    "ask",
+                    f"redirection '> {redir.target}' would overwrite existing file",
+                )
+        except OSError:
+            return "ask", f"redirection '> {redir.target}' could not be stat'd"
+    return None
+
+
 def evaluate(leaf: CanonicalLeaf) -> tuple[str | None, str | None]:
     """Evaluate a leaf against the deny + ask tiers.
 
@@ -95,95 +203,33 @@ def evaluate(leaf: CanonicalLeaf) -> tuple[str | None, str | None]:
     """
     config = _load_config()
 
-    # --- Hard deny tier ---
+    # Hard deny tier — checked in priority order.
+    for checker in (
+        _check_deny_verb,
+        _check_deny_subcommand,
+        _check_deny_flags,
+    ):
+        result = checker(leaf, config)
+        if result is not None:
+            return result
 
-    # Procedural: sudo is never allowed.
-    if leaf.verb == "sudo":
-        return "deny", "verb 'sudo' is never auto-allowed"
+    result = _check_deny_redirections(leaf)
+    if result is not None:
+        return result
 
-    denied_verbs = config.get("denied_verbs") or []
-    if isinstance(denied_verbs, list) and leaf.verb in denied_verbs:
-        return "deny", f"verb '{leaf.verb}' is in deny list"
+    # Ask tier.
+    for checker in (
+        _check_ask_verb,
+        _check_ask_subcommand,
+        _check_ask_flags,
+    ):
+        result = checker(leaf, config)
+        if result is not None:
+            return result
 
-    denied_subcommands = config.get("denied_subcommands") or {}
-    if isinstance(denied_subcommands, dict):
-        subs = denied_subcommands.get(leaf.verb) or []
-        if (
-            isinstance(subs, list)
-            and leaf.subcommand is not None
-            and leaf.subcommand in subs
-        ):
-            return (
-                "deny",
-                f"subcommand '{leaf.verb} {leaf.subcommand}' is in deny list",
-            )
-
-    denied_flag_patterns = config.get("denied_flag_patterns") or {}
-    if isinstance(denied_flag_patterns, dict):
-        patterns = denied_flag_patterns.get(leaf.verb) or []
-        if isinstance(patterns, list):
-            for pattern in patterns:
-                if pattern in leaf.flags:
-                    return (
-                        "deny",
-                        f"flag '{pattern}' on '{leaf.verb}' is in deny list",
-                    )
-
-    # Procedural: redirections into guarded system paths are hard-denied.
-    guarded_prefixes = _guarded_write_prefixes()
-    for redir in leaf.redirections:
-        if redir.op in (">", ">>"):
-            for prefix in guarded_prefixes:
-                if redir.target.startswith(prefix):
-                    return (
-                        "deny",
-                        f"redirection '{redir.op} {redir.target}' targets guarded path",
-                    )
-
-    # --- Ask tier ---
-
-    ask_verbs = config.get("ask_verbs") or []
-    if isinstance(ask_verbs, list) and leaf.verb in ask_verbs:
-        return "ask", f"verb '{leaf.verb}' needs confirmation"
-
-    ask_subcommands = config.get("ask_subcommands") or {}
-    if isinstance(ask_subcommands, dict):
-        subs = ask_subcommands.get(leaf.verb) or []
-        if (
-            isinstance(subs, list)
-            and leaf.subcommand is not None
-            and leaf.subcommand in subs
-        ):
-            return (
-                "ask",
-                f"subcommand '{leaf.verb} {leaf.subcommand}' needs confirmation",
-            )
-
-    ask_flag_patterns = config.get("ask_flag_patterns") or {}
-    if isinstance(ask_flag_patterns, dict):
-        patterns = ask_flag_patterns.get(leaf.verb) or []
-        if isinstance(patterns, list):
-            for pattern in patterns:
-                if pattern in leaf.flags:
-                    return (
-                        "ask",
-                        f"flag '{pattern}' on '{leaf.verb}' needs confirmation",
-                    )
-
-    # Procedural: truncate over an existing file — user can confirm.
-    for redir in leaf.redirections:
-        if redir.op == ">":
-            try:
-                if os.path.isfile(redir.target):
-                    return (
-                        "ask",
-                        f"redirection '> {redir.target}' would overwrite existing file",
-                    )
-            except OSError:
-                return (
-                    "ask",
-                    f"redirection '> {redir.target}' could not be stat'd",
-                )
+    result = _check_ask_redirections(leaf)
+    if result is not None:
+        return result
 
     return None, None
 

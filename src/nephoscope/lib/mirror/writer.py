@@ -257,6 +257,70 @@ def _build_content(
     return json.dumps(existing, indent=2).encode("utf-8")
 
 
+def _check_hash_and_retry(
+    conn: sqlite3.Connection,
+    target: Path,
+    project_id: int | None,
+    attempt: int,
+    max_retries: int,
+) -> bool:
+    """Check the on-disk hash against the stored DB hash.
+
+    Returns True when the hash is consistent (caller may proceed to write).
+    Returns False when a mismatch was found but there are retries remaining
+    (caller should loop).
+    Raises MirrorHashMismatch when retries are exhausted.
+    """
+    stored_hash = _read_stored_hash(conn, project_id)
+    if stored_hash is None or not target.exists():
+        return True  # first-touch or file absent — skip check
+
+    try:
+        on_disk_hash = settings_permissions_hash(target.read_bytes())
+    except (ValueError, TypeError) as exc:
+        raise MirrorHashMismatch(
+            f"{target}: settings.json is malformed"
+            f" (cannot compute permissions hash) — {exc}"
+        ) from exc
+
+    if on_disk_hash == stored_hash:
+        return True
+
+    if attempt < max_retries - 1:
+        time.sleep(0.005 * (attempt + 1))
+        return False
+
+    raise MirrorHashMismatch(
+        f"{target}: on-disk hash {on_disk_hash[:8]!r} ≠ stored hash {stored_hash[:8]!r}"
+    )
+
+
+def _write_and_stamp(
+    conn: sqlite3.Connection,
+    target: Path,
+    tmp_path: Path,
+    project_id: int | None,
+) -> None:
+    """Build content, write atomically, and stamp hash + cache."""
+    content = _build_content(conn, project_id, target)
+
+    with open(tmp_path, "wb") as fh:
+        fh.write(content)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    os.rename(tmp_path, target)
+
+    new_hash = settings_permissions_hash(content)
+    _stamp_hash(conn, project_id, new_hash, _now())
+
+    mtime = target.stat().st_mtime
+    parsed = json.loads(content)
+    raw_dirs = (parsed.get("permissions") or {}).get("additionalDirectories") or []
+    dirs = [str(d) for d in raw_dirs]
+    _stamp_cache(conn, project_id, mtime, dirs)
+
+
 def _atomic_write(
     conn: sqlite3.Connection,
     target: Path,
@@ -290,54 +354,11 @@ def _atomic_write(
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
         for attempt in range(max_retries):
-            # Re-read stored hash on every attempt (picks up concurrent DB updates).
-            stored_hash = _read_stored_hash(conn, project_id)
-
-            # Hash check: skip when stored hash is NULL (first-touch) or file absent.
-            if stored_hash is not None and target.exists():
-                try:
-                    on_disk_hash = settings_permissions_hash(target.read_bytes())
-                except (ValueError, TypeError) as exc:
-                    raise MirrorHashMismatch(
-                        f"{target}: settings.json is malformed"
-                        f" (cannot compute permissions hash) — {exc}"
-                    ) from exc
-                if on_disk_hash != stored_hash:
-                    if attempt < max_retries - 1:
-                        # Brief pause before retry — another writer may have
-                        # updated both the file and the DB hash.
-                        time.sleep(0.005 * (attempt + 1))
-                        continue
-                    raise MirrorHashMismatch(
-                        f"{target}: on-disk hash {on_disk_hash[:8]!r}"
-                        f" ≠ stored hash {stored_hash[:8]!r}"
-                    )
-
-            # Build JSON content from DB (read-merge-write preserves foreign keys).
-            content = _build_content(conn, project_id, target)
-
-            # Write .tmp → fsync → rename (atomic on POSIX).
-            with open(tmp_path, "wb") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-
-            os.rename(tmp_path, target)
-
-            # Re-hash the written content and persist to DB.
-            new_hash = settings_permissions_hash(content)
-            _stamp_hash(conn, project_id, new_hash, _now())
-
-            # Populate the mtime + additionalDirectories cache from the just-written
-            # content (already in memory — no second file read needed).
-            mtime = target.stat().st_mtime
-            parsed = json.loads(content)
-            raw_dirs = (parsed.get("permissions") or {}).get(
-                "additionalDirectories"
-            ) or []
-            dirs = [str(d) for d in raw_dirs]
-            _stamp_cache(conn, project_id, mtime, dirs)
-
+            if not _check_hash_and_retry(
+                conn, target, project_id, attempt, max_retries
+            ):
+                continue
+            _write_and_stamp(conn, target, tmp_path, project_id)
             return  # success — release flock in finally
 
         # Unreachable: the loop always either returns or raises inside.
