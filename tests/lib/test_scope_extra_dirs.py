@@ -57,6 +57,17 @@ def db(tmp_path):
             additional_dirs           TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE sessions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_uuid    TEXT UNIQUE NOT NULL,
+            project_id      INTEGER REFERENCES projects(id),
+            started_at      TEXT NOT NULL,
+            last_activity   TEXT NOT NULL,
+            transcript_path TEXT,
+            extra_dirs      TEXT NOT NULL DEFAULT '[]'
+        )
+    """)
     conn.commit()
     yield conn
     conn.close()
@@ -486,15 +497,15 @@ def test_external_edit_invalidates_cache_on_next_read(db, settings_file):
 
 def test_permission_error_on_stat_returns_empty(db, settings_file, monkeypatch):
     """PermissionError from Path.stat() returns [] without crashing."""
-    _write_settings(settings_file, ['/some/dir'])
-    good_cache = json.dumps(['/cached/dir'])
+    _write_settings(settings_file, ["/some/dir"])
+    good_cache = json.dumps(["/cached/dir"])
     _seed_global(db, str(settings_file), 999.0, good_cache)
 
     monkeypatch.setattr(
-        Path, 'stat', lambda self: (_ for _ in ()).throw(PermissionError('denied'))
+        Path, "stat", lambda self: (_ for _ in ()).throw(PermissionError("denied"))
     )
 
-    assert get_additional_dirs(db, Scope('global_mirror', 1)) == []
+    assert get_additional_dirs(db, Scope("global_mirror", 1)) == []
     # Cache must remain untouched — stat failure is not a parse failure.
     _assert_global_cache_unchanged(db, 999.0, good_cache)
 
@@ -503,17 +514,19 @@ def test_permission_error_on_read_returns_empty_and_leaves_cache_unchanged(
     db, settings_file, monkeypatch
 ):
     """PermissionError from Path.read_bytes() on slow path returns [] and leaves cache intact."""
-    _write_settings(settings_file, ['/some/dir'])
+    _write_settings(settings_file, ["/some/dir"])
     on_disk_mtime = settings_file.stat().st_mtime
-    good_cache = json.dumps(['/previous/good'])
+    good_cache = json.dumps(["/previous/good"])
     # Seed with stale mtime so slow path fires.
     _seed_global(db, str(settings_file), on_disk_mtime - 1.0, good_cache)
 
     monkeypatch.setattr(
-        Path, 'read_bytes', lambda self: (_ for _ in ()).throw(PermissionError('denied'))
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
-    assert get_additional_dirs(db, Scope('global_mirror', 1)) == []
+    assert get_additional_dirs(db, Scope("global_mirror", 1)) == []
     _assert_global_cache_unchanged(db, on_disk_mtime - 1.0, good_cache)
 
 
@@ -526,3 +539,65 @@ def test_invalid_scope_table_raises():
     """Scope with an unrecognised table name must raise ValueError immediately."""
     with pytest.raises(ValueError, match="not_a_table"):
         Scope("not_a_table", 1)
+
+
+# ---------------------------------------------------------------------------
+# Sessions scope — per-session extra_dirs
+# ---------------------------------------------------------------------------
+
+
+def _seed_session(conn, uuid: str, extra_dirs_json: str = "[]") -> int:
+    """Insert a session row with the given extra_dirs JSON, return its id."""
+    cur = conn.execute(
+        "INSERT INTO sessions"
+        " (session_uuid, project_id, started_at, last_activity, extra_dirs)"
+        " VALUES (?, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?)",
+        (uuid, extra_dirs_json),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_sessions_scope_constructs_without_raising():
+    """Scope('sessions', N) is a valid construction (sessions reader extension)."""
+    s = Scope("sessions", 42)
+    assert s.table == "sessions"
+    assert s.id == 42
+
+
+def test_sessions_scope_absent_row_returns_empty(db):
+    """No row for the session id returns [], not raises."""
+    result = get_additional_dirs(db, Scope("sessions", 999))
+    assert result == []
+
+
+def test_sessions_scope_default_extra_dirs_returns_empty(db):
+    """A session row with the default '[]' extra_dirs returns []."""
+    sid = _seed_session(db, "test-uuid-default")
+    assert get_additional_dirs(db, Scope("sessions", sid)) == []
+
+
+def test_sessions_scope_populated_returns_list(db):
+    """A session row with populated extra_dirs returns the parsed list."""
+    sid = _seed_session(
+        db,
+        "test-uuid-populated",
+        json.dumps(["/tmp/a", "/var/tmp"]),
+    )
+    assert get_additional_dirs(db, Scope("sessions", sid)) == ["/tmp/a", "/var/tmp"]
+
+
+def test_sessions_scope_malformed_json_returns_empty(db):
+    """Malformed JSON in extra_dirs returns [] without crashing."""
+    sid = _seed_session(db, "test-uuid-malformed", "{not valid json")
+    assert get_additional_dirs(db, Scope("sessions", sid)) == []
+
+
+def test_sessions_scope_does_not_touch_settings_files(db, tmp_path):
+    """Sessions branch must NOT read any settings.json — pure column SELECT.
+
+    Sets up a session with extra_dirs but no settings.json reference; the
+    function must succeed regardless of whether any settings file exists.
+    """
+    sid = _seed_session(db, "test-uuid-no-settings", json.dumps(["/some/path"]))
+    assert get_additional_dirs(db, Scope("sessions", sid)) == ["/some/path"]

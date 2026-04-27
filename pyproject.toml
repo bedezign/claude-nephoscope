@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pytest-cov"]
 
 [project.urls]
 Homepage   = "https://github.com/bedezign/nephoscope"
@@ -45,3 +45,23 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/nephoscope"]
+branch = true
+relative_files = true
+omit = [
+    "src/nephoscope/learners/permission/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

@@ -19,7 +19,8 @@ CREATE TABLE sessions (
   project_id      INTEGER REFERENCES projects(id),
   started_at      TEXT    NOT NULL,
   last_activity   TEXT    NOT NULL,
-  transcript_path TEXT
+  transcript_path TEXT,
+  extra_dirs      TEXT    NOT NULL DEFAULT '[]'
 );
 
 -- Global settings mirror metadata — singleton table.

@@ -19,6 +19,7 @@ Tool classes tested
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from nephoscope.learners.permission.match.file import match as file_match
 from nephoscope.learners.permission.match.flat import match as flat_match
 from nephoscope.learners.permission.match.mcp import match as mcp_match
 from nephoscope.learners.permission.match.orchestration import match as orch_match
+from nephoscope.lib.db import set_session_extra_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +694,101 @@ class TestDispatchDoomPath:
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
+
+
+# ---------------------------------------------------------------------------
+# per-session extra_dirs merge in _get_additional_dirs
+# ---------------------------------------------------------------------------
+
+
+class TestGetAdditionalDirsSessionMerge:
+    """`_get_additional_dirs` merges global + project + session sources.
+
+    Sessions sit at the bottom of the merge so that mtime-cached entries
+    (global, project) come first; session-only `--add-dir` flags are
+    appended. The helper deduplicates while preserving order.
+    """
+
+    def _seed_session_extras(
+        self, conn: sqlite3.Connection, session_id: int, dirs: list[str]
+    ) -> None:
+        set_session_extra_dirs(conn, session_id, json.dumps(dirs))
+        conn.commit()
+
+    def test_session_dirs_appended_after_global_and_project(self, tmp_db):
+        """Session extra_dirs follow global + project in the merged list."""
+        from nephoscope.learners.permission.match import _get_additional_dirs
+
+        sid = _insert_session(tmp_db, "uuid-merge-1")
+        self._seed_session_extras(tmp_db, sid, ["/session/only"])
+
+        result = _get_additional_dirs(tmp_db, None, sid)
+        assert result == ["/session/only"], (
+            f"expected session entry to surface, got {result!r}"
+        )
+
+    def test_session_dirs_dedupe_against_global(self, tmp_db):
+        """Duplicates between session and global are dropped (first wins, order preserved)."""
+        from nephoscope.learners.permission.match import _get_additional_dirs
+
+        # Seed global mirror with a settings.json on disk so the
+        # mtime-cache reader returns the entry.
+        settings = (
+            Path(tmp_db.execute("PRAGMA database_list").fetchone()[2]).parent
+            / "settings.json"
+        )
+        settings.write_text(
+            json.dumps({"permissions": {"additionalDirectories": ["/shared/dir"]}})
+        )
+        tmp_db.execute(
+            "INSERT OR REPLACE INTO global_mirror"
+            " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+            " VALUES (1, ?, NULL, NULL);",
+            (str(settings),),
+        )
+        tmp_db.commit()
+
+        sid = _insert_session(tmp_db, "uuid-merge-dedupe")
+        self._seed_session_extras(tmp_db, sid, ["/shared/dir", "/session/extra"])
+
+        result = _get_additional_dirs(tmp_db, None, sid)
+        assert result == ["/shared/dir", "/session/extra"], (
+            f"expected dedup against global, got {result!r}"
+        )
+
+    def test_no_session_id_skips_session_lookup(self, tmp_db):
+        """Calling without a session_id (None) does not touch the sessions table."""
+        from nephoscope.learners.permission.match import _get_additional_dirs
+
+        # Insert a session with extras but pass None — they must not appear.
+        sid = _insert_session(tmp_db, "uuid-no-merge")
+        self._seed_session_extras(tmp_db, sid, ["/should/not/show"])
+
+        result = _get_additional_dirs(tmp_db, None, None)
+        assert result == [], f"expected empty without session_id, got {result!r}"
+
+    def test_session_lookup_failure_falls_back_to_empty(self, tmp_db, monkeypatch):
+        """If the session read raises, the matcher degrades gracefully."""
+        from nephoscope.learners.permission.match import _get_additional_dirs
+
+        sid = _insert_session(tmp_db, "uuid-raise")
+        self._seed_session_extras(tmp_db, sid, ["/should/not/show"])
+
+        # Simulate a Scope that breaks for sessions specifically.
+        from nephoscope.lib import scope as scope_module
+
+        original = scope_module.get_additional_dirs
+
+        def _raising(conn, scope):
+            if scope.table == "sessions":
+                raise RuntimeError("simulated session read failure")
+            return original(conn, scope)
+
+        monkeypatch.setattr("nephoscope.lib.scope.get_additional_dirs", _raising)
+
+        # Must not raise.
+        result = _get_additional_dirs(tmp_db, None, sid)
+        assert result == [], f"expected empty on session-read failure, got {result!r}"
 
 
 # ---------------------------------------------------------------------------

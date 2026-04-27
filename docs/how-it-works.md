@@ -73,7 +73,13 @@ Paths change between sessions and projects, so nephoscope lets you write rules u
 
 You can use these inside a path. For example, `$PROJECT_ROOT/**` means "anywhere inside the current project" — the `**` covers any depth. `$HOME/Downloads/**` means "anywhere in your Downloads folder."
 
-If a path falls under a directory you have added via Claude Code's `claude --add-dir` flag (or the `/permissions` UI), nephoscope writes the rule using the real absolute path instead of a placeholder — for example, `/opt/company/shared/**`. Those inline specs work as written and are not session- or project-specific.
+If a path falls under a directory you have added on top of your project, nephoscope writes the rule using the real absolute path instead of a placeholder — for example, `/opt/company/shared/**`. Those inline specs work as written and are not session- or project-specific.
+
+There are three places nephoscope looks for those extra directories:
+
+- The **persistent list** in `~/.claude/settings.json` and `<project>/.claude/settings.local.json` — anything you put under `permissions.additionalDirectories` lives here and is shared across all sessions.
+- **Launch-time flags** — `claude --add-dir /some/path` adds a directory for the lifetime of that one session. Nephoscope reads the launch arguments at session start and remembers what you added, so rules that mention those paths still match.
+- **Mid-session additions** typed via the `/permissions` UI (which prints "for this session") are kept in Claude Code's memory only. Nephoscope does not see them today; if you want a runtime-added directory to be tracked, add it to `settings.local.json` instead.
 
 ## The flow
 

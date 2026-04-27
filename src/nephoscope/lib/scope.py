@@ -2,7 +2,7 @@
 
 Three main exports:
 
-1. Scope: lightweight dataclass naming the table and row id for mtime-cached reads.
+1. Scope: lightweight dataclass naming the table and row id for cache-or-column reads.
 
 2. resolve_project_root(cwd): Apply a three-rule resolution to find the
    project root from the session's working directory.
@@ -14,7 +14,17 @@ Three main exports:
    tool_input payload for use in permission checks and logging.
 
 4. get_additional_dirs(conn, scope): Return additionalDirectories for the given
-   scope via an mtime-gated DB cache.
+   scope. Two semantics depending on scope.table:
+
+   - ``'global_mirror'`` / ``'projects'``: mtime-gated cache of
+     ``permissions.additionalDirectories`` from the scope's settings.json
+     file. Fast path returns the cached array; slow path re-parses the file
+     and restamps the cache.
+
+   - ``'sessions'``: plain SELECT on ``sessions.extra_dirs``. The column
+     stores ``--add-dir`` flags captured at SessionStart from the parent
+     process's argv (``/proc/{ppid}/cmdline``). No mtime, no settings file,
+     no slow path — just decode the stored JSON list.
 """
 
 from __future__ import annotations
@@ -26,16 +36,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_VALID_TABLES: frozenset[str] = frozenset({"global_mirror", "projects"})
+_VALID_TABLES: frozenset[str] = frozenset({"global_mirror", "projects", "sessions"})
 
 
 @dataclass(frozen=True)
 class Scope:
-    """Names the mirror-bearing table and row id for mtime-cached DB reads.
+    """Names the row source for ``get_additional_dirs``.
 
-    ``table`` is either ``'global_mirror'`` (singleton, id=1) or ``'projects'``
-    (project rows identified by their integer pk). The two tables share the same
-    column names for the settings-json cache columns.
+    Three valid tables, two read shapes:
+
+    - ``'global_mirror'`` (singleton, id=1) and ``'projects'`` (project rows
+      identified by their integer pk) share the mtime-cached
+      ``additionalDirectories`` columns.
+    - ``'sessions'`` (per-session rows) holds captured ``--add-dir`` flags
+      in ``extra_dirs``; the reader does a plain SELECT (no mtime gating).
     """
 
     table: str
@@ -52,14 +66,32 @@ class Scope:
 def get_additional_dirs(conn: sqlite3.Connection, scope: Scope) -> list[str]:
     """Return additionalDirectories for the given scope.
 
-    Fast path: settings.json mtime matches cached mtime — return cached array.
-    Slow path: mtime differs (or no cache yet) — re-read, re-parse, restamp.
+    Two semantics depending on ``scope.table``:
 
-    Malformed / missing / non-UTF-8 settings file: return [] (consistent with
-    the malformed-file handling in mirror-hash + hash-status). On a malformed
-    slow-path read, the cache is left unchanged — a previous good cache must
-    not be overwritten with empty due to a transient file corruption.
+    - ``'global_mirror'`` / ``'projects'``: mtime-gated cache of
+      ``permissions.additionalDirectories`` from the scope's settings.json.
+      Fast path: stored mtime matches the file → return cached array.
+      Slow path: mtime differs (or no cache yet) → re-read, re-parse, restamp.
+      Malformed / missing / non-UTF-8 settings file: return ``[]`` and leave
+      any previously-good cache unchanged.
+
+    - ``'sessions'``: plain SELECT on ``sessions.extra_dirs``. No mtime, no
+      settings file. Malformed JSON in the column returns ``[]`` without
+      crashing.
     """
+    if scope.table == "sessions":
+        row = conn.execute(
+            "SELECT extra_dirs FROM sessions WHERE id = ?;",
+            (scope.id,),
+        ).fetchone()
+        if row is None:
+            return []
+        try:
+            value = json.loads(row[0])
+        except (TypeError, ValueError):
+            return []
+        return value if isinstance(value, list) else []
+
     row = conn.execute(
         f"SELECT settings_json_path, settings_json_mtime, additional_dirs"
         f" FROM {scope.table} WHERE id = ?;",

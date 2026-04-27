@@ -49,12 +49,14 @@ from nephoscope.lib.db import (  # noqa: E402
     lookup_permission_mode_id,
     lookup_status_id,
     minify_json,
+    set_session_extra_dirs,
     upsert_project,
     upsert_session,
     write_extra,
 )
 from nephoscope.lib.paths import (  # noqa: E402
     canonicalize,
+    extract_add_dir_args,
     is_disabled,
     observations_db_path,
 )
@@ -276,7 +278,17 @@ def _handle_session_start(data: dict[str, Any]) -> None:
         project_id: int | None = None
         if cwd:
             project_id = upsert_project(conn, cwd, now)
-        upsert_session(conn, session_uuid, project_id, now)
+        session_id = upsert_session(conn, session_uuid, project_id, now)
+
+        try:
+            extras = extract_add_dir_args()
+            if extras:
+                set_session_extra_dirs(conn, session_id, json.dumps(extras))
+        except Exception as exc:  # noqa: BLE001 — capture failure must not crash the session.
+            print(
+                f"WARNING: _handle_session_start extra_dirs capture failed: {exc}",
+                file=sys.stderr,
+            )
 
         def _sweep(query: str, args: tuple = (), *, label: str) -> None:
             try:

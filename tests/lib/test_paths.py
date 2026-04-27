@@ -166,3 +166,185 @@ class TestCanonicalize:
         result = paths.canonicalize(deep)
         assert isinstance(result, str)
         assert paths.canonicalize(result) == result
+
+
+class TestExtractAddDirArgs:
+    """Tests for extract_add_dir_args() — parses parent process argv for --add-dir.
+
+    The cmdline file format mirrors Linux's /proc/<pid>/cmdline: NUL-separated
+    argv entries with a trailing NUL. Tests pass an explicit path to a fixture
+    file rather than touching /proc.
+    """
+
+    @staticmethod
+    def _write_cmdline(target: pathlib.Path, argv: list[str]) -> pathlib.Path:
+        """Write argv as a NUL-separated cmdline payload."""
+        target.write_bytes(b"\x00".join(a.encode("utf-8") for a in argv) + b"\x00")
+        return target
+
+    def test_empty_cmdline_returns_empty(self, tmp_path):
+        """An empty file (or file with no flags) yields []."""
+        cmdline = tmp_path / "cmdline"
+        cmdline.write_bytes(b"")
+        assert paths.extract_add_dir_args(cmdline) == []
+
+    def test_no_add_dir_flag_returns_empty(self, tmp_path):
+        """A normal claude invocation without --add-dir yields []."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline", ["claude", "--print", "hello"]
+        )
+        assert paths.extract_add_dir_args(cmdline) == []
+
+    def test_single_separated_form(self, tmp_path):
+        """`claude --add-dir /foo` returns ['/foo'] (canonicalized)."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline", ["claude", "--add-dir", "/tmp"]
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [paths.canonicalize("/tmp")], (
+            f"expected canonicalized /tmp, got {result!r}"
+        )
+
+    def test_single_joined_form(self, tmp_path):
+        """`claude --add-dir=/foo` returns ['/foo']."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline", ["claude", "--add-dir=/tmp"]
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [paths.canonicalize("/tmp")]
+
+    def test_multiple_separate_flags(self, tmp_path):
+        """Multiple `--add-dir` flags accumulate in argv order."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline",
+            ["claude", "--add-dir", "/tmp", "--add-dir", "/var/tmp"],
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [paths.canonicalize("/tmp"), paths.canonicalize("/var/tmp")]
+
+    def test_variadic_consumes_consecutive_values(self, tmp_path):
+        """`--add-dir <directories...>` is variadic; consecutive non-flag args belong to it.
+
+        Mirrors Claude Code's own argv semantics: this is exactly the parsing
+        rule that bit us during the empirical test (the prompt token got
+        consumed as a directory).
+        """
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline",
+            ["claude", "--add-dir", "/tmp", "/var/tmp", "/usr/local"],
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [
+            paths.canonicalize("/tmp"),
+            paths.canonicalize("/var/tmp"),
+            paths.canonicalize("/usr/local"),
+        ]
+
+    def test_variadic_stops_at_next_flag(self, tmp_path):
+        """Variadic consumption stops when the next `-` or `--` flag appears."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline",
+            ["claude", "--add-dir", "/tmp", "--print", "hello"],
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [paths.canonicalize("/tmp")]
+
+    def test_dashdash_terminates_parsing(self, tmp_path):
+        """`--` terminates flag parsing; later `--add-dir` is positional."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline",
+            ["claude", "--add-dir", "/tmp", "--", "--add-dir", "/never"],
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [paths.canonicalize("/tmp")], (
+            f"expected only /tmp before --, got {result!r}"
+        )
+
+    def test_missing_value_does_not_crash(self, tmp_path):
+        """Trailing `--add-dir` with no value yields [] and does not raise."""
+        cmdline = self._write_cmdline(tmp_path / "cmdline", ["claude", "--add-dir"])
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == []
+
+    def test_missing_proc_file_returns_empty(self, tmp_path):
+        """Non-existent cmdline path returns [] (non-Linux fallback shape)."""
+        nonexistent = tmp_path / "does-not-exist"
+        assert paths.extract_add_dir_args(nonexistent) == []
+
+    def test_default_reads_parent_cmdline(self, tmp_path, monkeypatch):
+        """Without an explicit path, reads /proc/<ppid>/cmdline.
+
+        Verified by monkeypatching ``os.getppid`` to point to a fake pid whose
+        cmdline file we control via a fake /proc layout.
+        """
+        fake_proc = tmp_path / "proc" / "9999"
+        fake_proc.mkdir(parents=True)
+        self._write_cmdline(fake_proc / "cmdline", ["claude", "--add-dir", "/tmp"])
+
+        # Monkeypatch the function that resolves the default cmdline path.
+        # This avoids touching os.getppid directly — the helper exposes the
+        # default-path resolver as overridable for exactly this reason.
+        monkeypatch.setattr(
+            paths, "_default_cmdline_path", lambda: fake_proc / "cmdline"
+        )
+        result = paths.extract_add_dir_args()
+        assert result == [paths.canonicalize("/tmp")]
+
+    def test_canonicalizes_tilde(self, tmp_path, monkeypatch):
+        """Captured values are canonicalized — tilde expansion in particular."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline", ["claude", "--add-dir", "~/proj"]
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [str(tmp_path / "proj")], (
+            f"expected tilde to expand, got {result!r}"
+        )
+
+    def test_empty_string_value_is_dropped(self, tmp_path):
+        """`--add-dir=` (joined form, empty value) yields [] for that flag."""
+        cmdline = self._write_cmdline(tmp_path / "cmdline", ["claude", "--add-dir="])
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == []
+
+    def test_extract_add_dir_args_duplicates_preserved(self, tmp_path):
+        """Duplicate --add-dir flags are returned verbatim; dedup is the merger's job."""
+        cmdline = self._write_cmdline(
+            tmp_path / "cmdline",
+            ["claude", "--add-dir", str(tmp_path), "--add-dir", str(tmp_path)],
+        )
+        result = paths.extract_add_dir_args(cmdline)
+        assert result == [
+            paths.canonicalize(str(tmp_path)),
+            paths.canonicalize(str(tmp_path)),
+        ], f"expected duplicate entries preserved, got {result!r}"
+
+    def test_permission_denied_returns_empty_and_emits_stderr(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """PermissionError on /proc read returns [] and emits a stderr signal.
+
+        The observability rule requires at least one signal on catch-and-swallow.
+        Verified here so a regression that silences the handler is caught before
+        it ships.
+        """
+        cmdline = tmp_path / "cmdline"
+        cmdline.write_bytes(b"irrelevant")
+
+        original_read_bytes = pathlib.Path.read_bytes
+
+        def _raise_permission_error(self):
+            if str(self) == str(cmdline):
+                raise PermissionError(13, "Permission denied")
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(pathlib.Path, "read_bytes", _raise_permission_error)
+
+        result = paths.extract_add_dir_args(cmdline)
+
+        assert result == [], f"expected [] on PermissionError, got {result!r}"
+        captured = capsys.readouterr()
+        assert "[nephoscope] extract_add_dir_args:" in captured.err, (
+            "expected a stderr observability signal on PermissionError, got none; "
+            f"stderr was: {captured.err!r}"
+        )

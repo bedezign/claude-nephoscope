@@ -561,3 +561,79 @@ class TestSessionStartSweep:
         assert (
             "WARNING" in err and "warm-up" in err and "simulated warm-up failure" in err
         ), f"expected WARNING naming warm-up + error on stderr; got: {err!r}"
+
+
+class TestSessionStartExtraDirs:
+    """SessionStart captures `--add-dir` flags from the parent process argv.
+
+    The launch-time `claude --add-dir` flag is process-only (verified
+    empirically 2026-04-26); nephoscope reads `/proc/{ppid}/cmdline` at
+    SessionStart and stores the parsed list in `sessions.extra_dirs`.
+    """
+
+    def _payload(self, cwd: str = "/home/steve/project") -> dict[str, Any]:
+        return {
+            "session_id": "019673a0-cccc-7000-8000-000000000077",
+            "hook_event_name": "SessionStart",
+            "cwd": cwd,
+        }
+
+    def test_extra_dirs_captured_when_argv_has_flags(
+        self, tmp_db, recorder, monkeypatch
+    ):
+        """When parent argv contains --add-dir, the captured list lands in sessions.extra_dirs."""
+        monkeypatch.setattr(
+            "nephoscope.recorder.run.extract_add_dir_args",
+            lambda: ["/tmp/foo", "/var/tmp"],
+        )
+        recorder._handle_session_start(self._payload())
+
+        row = tmp_db.execute(
+            "SELECT extra_dirs FROM sessions WHERE session_uuid = ?;",
+            ("019673a0-cccc-7000-8000-000000000077",),
+        ).fetchone()
+        assert row is not None, "session must be inserted"
+        stored = json.loads(row[0])
+        assert stored == ["/tmp/foo", "/var/tmp"], (
+            f"expected captured extra_dirs in column, got {stored!r}"
+        )
+
+    def test_no_argv_flags_leaves_default(self, tmp_db, recorder, monkeypatch):
+        """When parent argv has no --add-dir, sessions.extra_dirs stays at the default '[]'."""
+        monkeypatch.setattr("nephoscope.recorder.run.extract_add_dir_args", lambda: [])
+        recorder._handle_session_start(self._payload())
+
+        row = tmp_db.execute(
+            "SELECT extra_dirs FROM sessions WHERE session_uuid = ?;",
+            ("019673a0-cccc-7000-8000-000000000077",),
+        ).fetchone()
+        assert row is not None
+        assert json.loads(row[0]) == [], f"expected default empty list, got {row[0]!r}"
+
+    def test_extract_failure_does_not_crash_session_insert(
+        self, tmp_db, recorder, monkeypatch, capsys
+    ):
+        """A raised exception from extract_add_dir_args must not block session insert."""
+
+        def _boom():
+            raise RuntimeError("simulated cmdline parse failure")
+
+        monkeypatch.setattr("nephoscope.recorder.run.extract_add_dir_args", _boom)
+        # Must not raise.
+        recorder._handle_session_start(self._payload())
+
+        row = tmp_db.execute(
+            "SELECT session_uuid, extra_dirs FROM sessions WHERE session_uuid = ?;",
+            ("019673a0-cccc-7000-8000-000000000077",),
+        ).fetchone()
+        assert row is not None, "session row must exist even when capture raises"
+        assert json.loads(row[1]) == [], (
+            "extra_dirs stays at default '[]' on capture failure"
+        )
+
+        err = capsys.readouterr().err
+        assert (
+            "WARNING" in err
+            and "extra_dirs" in err
+            and "simulated cmdline parse failure" in err
+        ), f"expected WARNING naming extra_dirs + error on stderr; got: {err!r}"

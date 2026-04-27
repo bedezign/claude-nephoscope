@@ -96,11 +96,21 @@ def _build_ctx(
 def _get_additional_dirs(
     conn: sqlite3.Connection,
     project_id: int | None,
+    session_id: int | None = None,
 ) -> list[str]:
-    """Return merged global + project additionalDirectories from the mtime cache.
+    """Return merged global + project + session additionalDirectories.
 
-    Global entries come first; project entries are appended (deduped).
-    Returns an empty list on any error so the matcher degrades gracefully.
+    Three sources, in priority order for dedup (first wins, order preserved):
+
+    1. ``global_mirror`` — mtime-cached read from the global settings.json.
+    2. ``projects`` — mtime-cached read from the project's settings.local.json.
+    3. ``sessions`` — plain SELECT on ``sessions.extra_dirs``, populated from
+       ``--add-dir`` flags captured at SessionStart.
+
+    Each lookup is wrapped in a broad except so a failure in any one source
+    degrades to an empty list there rather than aborting the whole merge —
+    the matcher must keep returning a useful answer even when one cache is
+    poisoned or one row is missing.
     """
     from nephoscope.lib.scope import Scope, get_additional_dirs  # type: ignore[import-untyped]
 
@@ -116,8 +126,15 @@ def _get_additional_dirs(
         except Exception:  # noqa: BLE001
             project_dirs = []
 
-    # Deduplicate while preserving order (global first, project appended).
-    return list(dict.fromkeys(global_dirs + project_dirs))
+    session_dirs: list[str] = []
+    if session_id is not None:
+        try:
+            session_dirs = get_additional_dirs(conn, Scope("sessions", session_id))
+        except Exception:  # noqa: BLE001
+            session_dirs = []
+
+    # Deduplicate while preserving order (global first, project, session last).
+    return list(dict.fromkeys(global_dirs + project_dirs + session_dirs))
 
 
 def _full_match_enabled() -> bool:
@@ -152,7 +169,7 @@ def dispatch(
     if tool_cls == "bash":
         from nephoscope.learners.permission.match.bash import match as _match  # type: ignore[import-untyped]
 
-        additional_dirs = _get_additional_dirs(conn, project_id)
+        additional_dirs = _get_additional_dirs(conn, project_id, session_id)
         return _run_tiers(
             _match,
             tool_name,

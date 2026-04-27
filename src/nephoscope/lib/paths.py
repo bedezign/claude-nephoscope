@@ -16,6 +16,7 @@ Resolution order for each resource:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -76,6 +77,80 @@ def is_disabled() -> bool:
         return disable_marker_path().is_file()
     except OSError:
         return False
+
+
+def _default_cmdline_path() -> Path:
+    """Return the path to the parent process's cmdline file.
+
+    Default resolves on each call so tests can monkeypatch this function to
+    point at a fake /proc layout instead of touching os.getppid.
+    """
+    return Path(f"/proc/{os.getppid()}/cmdline")
+
+
+def extract_add_dir_args(cmdline_path: Path | str | None = None) -> list[str]:
+    """Parse the parent process's argv for ``--add-dir`` values.
+
+    Reads ``/proc/<ppid>/cmdline`` (NUL-separated argv) and returns the list
+    of values passed via ``--add-dir <value> [value ...]`` (variadic, mirrors
+    Claude Code's own arg parsing) and ``--add-dir=<value>``.
+
+    The variadic shape means a sequence like ``--add-dir /a /b -c`` captures
+    both ``/a`` and ``/b`` and stops at the next ``-`` flag. ``--`` terminates
+    flag parsing entirely.
+
+    ``cmdline_path`` is overridable for tests; the default resolves the path
+    lazily from ``os.getppid()`` (via ``_default_cmdline_path``) so each call
+    sees the current parent.
+
+    Returns canonicalized paths via ``canonicalize()`` so storage matches the
+    rest of the DB's path columns (tilde expansion, symlink resolution).
+
+    Returns ``[]`` on any failure: file missing, non-Linux, parse error,
+    permission denied, malformed UTF-8. Captures must never crash session
+    start; failure here just means the recorder records an empty extras list.
+    """
+    if cmdline_path is None:
+        cmdline_path = _default_cmdline_path()
+    try:
+        raw = Path(cmdline_path).read_bytes()
+    except OSError as exc:
+        print(
+            f"[nephoscope] extract_add_dir_args: {type(exc).__name__}: {exc.strerror}",
+            file=sys.stderr,
+        )
+        return []
+    if not raw:
+        return []
+    # /proc/<pid>/cmdline is NUL-separated; trailing NUL leaves an empty tail.
+    parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\x00") if p]
+
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if token == "--":
+            break
+        if token == "--add-dir":
+            # Variadic: consume until next flag, ``--``, or end-of-argv.
+            i += 1
+            while i < len(parts):
+                value = parts[i]
+                if value == "--" or value.startswith("-"):
+                    break
+                if value:
+                    out.append(value)
+                i += 1
+            continue
+        if token.startswith("--add-dir="):
+            value = token[len("--add-dir=") :]
+            if value:
+                out.append(value)
+            i += 1
+            continue
+        i += 1
+
+    return [c for c in (canonicalize(p) for p in out) if c]
 
 
 def canonicalize(p: str | Path | None) -> str:

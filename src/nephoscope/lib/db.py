@@ -148,6 +148,16 @@ def upsert_session(
     return int(cur.lastrowid or 0)
 
 
+def set_session_extra_dirs(
+    conn: sqlite3.Connection, session_id: int, dirs_json: str
+) -> None:
+    """Persist captured `--add-dir` argv values for a session row."""
+    conn.execute(
+        "UPDATE sessions SET extra_dirs = ? WHERE id = ?;",
+        (dirs_json, session_id),
+    )
+
+
 def upsert_candidate(
     conn: sqlite3.Connection,
     verb: str,

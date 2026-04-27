@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/logo-small.png" alt="nephoscope" width="180">
+</p>
+
 # nephoscope
 
 *Stop Claude Code asking about the same commands twice.*
