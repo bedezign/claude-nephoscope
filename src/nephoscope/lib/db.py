@@ -44,11 +44,51 @@ def _truncate(value: Any) -> Any:
     return value
 
 
+def _ensure_rule_shapes_context(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: add rule_shapes.context column and update the unique index.
+
+    Fresh DBs created from the current schema.sql already have the column and
+    the new index.  Existing DBs from pre-Phase-2 installs do not.  Running
+    this on either kind is safe:
+
+    - ``ALTER TABLE ... ADD COLUMN`` raises ``OperationalError`` when the
+      column already exists — caught and ignored.
+    - ``DROP INDEX IF EXISTS`` is a no-op when the index is absent.
+    - ``CREATE UNIQUE INDEX`` raises ``OperationalError`` when the index
+      already exists — caught and ignored.
+    """
+    try:
+        conn.execute(
+            "ALTER TABLE rule_shapes ADD COLUMN context TEXT NOT NULL DEFAULT 'any'"
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists — no-op
+
+    conn.execute("BEGIN EXCLUSIVE")
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_rule_shapes_unique")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_rule_shapes_unique"
+            " ON rule_shapes(verb, IFNULL(subcommand, ''), flags,"
+            " IFNULL(path_spec, ''), context)"
+        )
+        conn.execute("COMMIT")
+    except sqlite3.OperationalError as exc:
+        conn.execute("ROLLBACK")
+        if "already exists" not in str(exc):
+            raise
+
+
 def _open() -> sqlite3.Connection:
     """Open the observations DB with WAL mode enabled.
 
     If the DB file is empty, runs the schema.sql to bootstrap tables and views.
     Raises RuntimeError if schema.sql is missing when needed.
+
+    After loading or re-using the schema, runs :func:`_ensure_rule_shapes_context`
+    to add the ``context`` column and update the unique index on
+    ``rule_shapes`` when upgrading a pre-Phase-2 DB.  The call is
+    idempotent — sub-millisecond when the column already exists.
     """
     db_path = _db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +104,9 @@ def _open() -> sqlite3.Connection:
             raise RuntimeError(f"schema.sql not found: {schema_path}")
         sql = schema_path.read_text(encoding="utf-8")
         conn.executescript(sql)
+
+    # Idempotent Phase-2 migration: rule_shapes.context + updated unique index.
+    _ensure_rule_shapes_context(conn)
 
     return conn
 
@@ -251,6 +294,7 @@ def upsert_rule_shape(
     flags_json: str,
     path_spec: str | None,
     ts: str,
+    context: str = "any",
 ) -> int:
     """Insert-or-touch a rule shape; return its id.
 
@@ -258,14 +302,23 @@ def upsert_rule_shape(
     - verb may be "$VAR/..." prefix
     - flags may be "*" wildcard
     - path_spec may be "$VAR/**" glob, "" (no paths), or NULL (any paths)
+    - context constrains which invocation contexts match:
+      "any" (default) matches all; "toplevel" only matches top-level commands;
+      "substitution" only matches commands inside $(...) or <(...).
+
+    The (verb, subcommand, flags, path_spec, context) tuple is the unique key.
+    Two rules that differ only in context can coexist — e.g. a global allow for
+    context='substitution' (safe inline form) alongside a global deny for
+    context='toplevel' (standalone leaks the secret).
 
     Returns the rule_shapes.id.
     """
     row = conn.execute(
         "SELECT id FROM rule_shapes"
         " WHERE verb = ? AND IFNULL(subcommand, '') = IFNULL(?, '')"
-        " AND flags = ? AND IFNULL(path_spec, '') = IFNULL(?, '');",
-        (verb, subcommand, flags_json, path_spec),
+        " AND flags = ? AND IFNULL(path_spec, '') = IFNULL(?, '')"
+        " AND context = ?;",
+        (verb, subcommand, flags_json, path_spec, context),
     ).fetchone()
 
     if row is not None:
@@ -277,10 +330,10 @@ def upsert_rule_shape(
         return shape_id
 
     cur = conn.execute(
-        "INSERT INTO rule_shapes(verb, subcommand, flags, path_spec,"
+        "INSERT INTO rule_shapes(verb, subcommand, flags, path_spec, context,"
         "  first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?, ?);",
-        (verb, subcommand, flags_json, path_spec, ts, ts),
+        " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        (verb, subcommand, flags_json, path_spec, context, ts, ts),
     )
     return int(cur.lastrowid or 0)
 

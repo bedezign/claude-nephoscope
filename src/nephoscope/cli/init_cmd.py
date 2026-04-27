@@ -24,6 +24,21 @@ from pathlib import Path
 from nephoscope.lib.db import _open
 from nephoscope.lib.paths import observations_db_path
 
+_FIXTURES_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "learners"
+    / "permission"
+    / "config"
+    / "fixtures"
+)
+
+# Fixtures loaded automatically on first install, in application order.
+# Each path is relative to _FIXTURES_DIR.
+_AUTO_LOAD_FIXTURES: list[str] = [
+    "credential_leaks.yaml",
+    "secret_manager_standalones.yaml",
+]
+
 
 def _resolve_target(cli_path: str | None) -> Path:
     """Return the DB path honouring the CLI override first, then env/defaults."""
@@ -61,8 +76,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         conn = _open()
     except Exception as exc:  # noqa: BLE001 — surface init failures verbatim.
-        print(f"nephoscope-init: failed to initialise DB at {target}: {exc}", file=sys.stderr)
+        print(
+            f"nephoscope-init: failed to initialise DB at {target}: {exc}",
+            file=sys.stderr,
+        )
         return 1
+
+    if not already_existed:
+        from nephoscope.learners.permission.seed import apply_fixtures
+
+        for fixture_name in _AUTO_LOAD_FIXTURES:
+            fixture_path = _FIXTURES_DIR / fixture_name
+            try:
+                apply_fixtures(conn, fixture_path)
+            except Exception as exc:  # noqa: BLE001 — fixture load failure must not abort init.
+                print(
+                    f"nephoscope-init: warning — fixture load failed ({fixture_name}): {exc}",
+                    file=sys.stderr,
+                )
+
     conn.close()
 
     state = "already initialised" if already_existed else "initialised"

@@ -85,11 +85,12 @@ CREATE TABLE rule_shapes (
   subcommand TEXT,
   flags      TEXT    NOT NULL,        -- minified JSON array, OR literal "*"
   path_spec  TEXT,                    -- NULL=any, ""=no-paths, "$VAR/**"=glob
+  context    TEXT    NOT NULL DEFAULT 'any' CHECK (context IN ('any', 'toplevel', 'substitution')),  -- rule constraint
   first_seen TEXT    NOT NULL,
   last_seen  TEXT    NOT NULL
 );
 CREATE UNIQUE INDEX idx_rule_shapes_unique
-  ON rule_shapes(verb, IFNULL(subcommand, ''), flags, IFNULL(path_spec, ''));
+  ON rule_shapes(verb, IFNULL(subcommand, ''), flags, IFNULL(path_spec, ''), context);
 
 -- Consolidated permission decisions.
 CREATE TABLE permissions (
@@ -171,7 +172,7 @@ CREATE VIEW v_rule_shapes AS SELECT * FROM rule_shapes;
 
 CREATE VIEW v_permissions AS
   SELECT p.id, p.decision, p.source, p.reason, p.decided_at,
-         rs.verb, rs.subcommand, rs.flags, rs.path_spec,
+         rs.verb, rs.subcommand, rs.flags, rs.path_spec, rs.context,
          p.session_id, p.project_id,
          CASE WHEN p.session_id IS NOT NULL THEN 'session'
               WHEN p.project_id IS NOT NULL THEN 'project'

@@ -612,3 +612,148 @@ class TestRoundTrip:
             assert e1["verb"] == e2["verb"]
             assert e1["flags"] == e2["flags"]
             assert e1["decision"] == e2["decision"]
+
+
+# ===========================================================================
+# Phase 2 — context field in seed fixtures
+# ===========================================================================
+
+
+class TestContextField:
+    """Seed YAML context field: validate, apply, export, round-trip."""
+
+    def test_apply_fixture_with_context_toplevel(self, tmp_db, tmp_path):
+        """Fixture with context='toplevel' stores the value in rule_shapes."""
+        fixture_file = tmp_path / "ctx.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "op",
+                        "subcommand": "read",
+                        "flags": "*",
+                        "context": "toplevel",
+                        "decision": "rejected",
+                        "reason": "op read standalone leaks secret",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        row = tmp_db.execute(
+            "SELECT context FROM rule_shapes WHERE verb='op' AND subcommand='read';"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "toplevel"
+
+    def test_apply_fixture_without_context_defaults_to_any(self, tmp_db, tmp_path):
+        """Fixture without context field defaults to 'any'."""
+        fixture_file = tmp_path / "no_ctx.yaml"
+        fixture_file.write_text(
+            yaml.dump([{"verb": "git", "flags": "*", "decision": "approved"}])
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        row = tmp_db.execute(
+            "SELECT context FROM rule_shapes WHERE verb='git';"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "any"
+
+    def test_apply_fixture_invalid_context_raises(self, tmp_db, tmp_path):
+        """Fixture with invalid context value raises ValueError."""
+        fixture_file = tmp_path / "bad_ctx.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "op",
+                        "flags": "*",
+                        "decision": "rejected",
+                        "context": "outer",
+                    }
+                ]
+            )
+        )
+        with pytest.raises(ValueError, match="invalid context"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_export_omits_context_when_any(self, tmp_db, tmp_path):
+        """Export omits the context field when it equals 'any' (default)."""
+        fixture_file = tmp_path / "any_ctx.yaml"
+        fixture_file.write_text(
+            yaml.dump([{"verb": "git", "flags": "*", "decision": "approved"}])
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+        assert len(entries) == 1
+        assert "context" not in entries[0], (
+            f"context='any' should be omitted from export, got {entries[0]!r}"
+        )
+
+    def test_export_includes_context_when_not_any(self, tmp_db, tmp_path):
+        """Export includes the context field when it is not 'any'."""
+        fixture_file = tmp_path / "toplevel_ctx.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "op",
+                        "subcommand": "read",
+                        "flags": "*",
+                        "context": "toplevel",
+                        "decision": "rejected",
+                        "reason": "standalone leaks secret",
+                    }
+                ]
+            )
+        )
+        apply_fixtures(tmp_db, fixture_file)
+
+        yaml_str = export_permissions(tmp_db)
+        entries = yaml.safe_load(yaml_str)
+        assert len(entries) == 1
+        assert entries[0].get("context") == "toplevel", (
+            f"Expected context='toplevel' in export, got {entries[0]!r}"
+        )
+
+    def test_roundtrip_with_context_toplevel(self, tmp_db, tmp_path):
+        """Round-trip: load with context='toplevel' → export → reload → same state."""
+        original = [
+            {
+                "verb": "op",
+                "subcommand": "read",
+                "flags": "*",
+                "context": "toplevel",
+                "decision": "rejected",
+                "reason": "standalone leaks secret",
+            }
+        ]
+        fixture_file = tmp_path / "roundtrip_ctx.yaml"
+        fixture_file.write_text(yaml.dump(original))
+
+        # Load → export
+        apply_fixtures(tmp_db, fixture_file)
+        exported_yaml = export_permissions(tmp_db)
+
+        # Clear and reload from exported YAML
+        tmp_db.execute("DELETE FROM permissions;")
+        tmp_db.execute("DELETE FROM rule_shapes;")
+        fixture_file.write_text(exported_yaml)
+        apply_fixtures(tmp_db, fixture_file)
+
+        # Verify final state
+        row = tmp_db.execute(
+            "SELECT context, verb, subcommand FROM rule_shapes WHERE verb='op';"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "toplevel"
+        assert row[1] == "op"
+        assert row[2] == "read"
+
+        # And exported context must appear in the re-loaded export too
+        re_exported = yaml.safe_load(export_permissions(tmp_db))
+        assert re_exported[0].get("context") == "toplevel"

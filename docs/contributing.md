@@ -19,7 +19,7 @@ Installing the plugin registers four hooks, materialises a SQLite database in th
 
 - **Single source of truth: the DB.** The observations database owns every permission rule as a structured row. `settings.json` files are mirrors, regenerated eagerly on every DB write.
 - **Single flat schema.** `lib/schema.sql` holds every `CREATE TABLE` / `CREATE VIEW`. No migration system, no `vN.sql` sequence, no `PRAGMA user_version`. Schema changes edit that file and rebuild against it.
-- **Rule shapes carry patterns.** `rule_shapes` supports literal and pattern forms on every axis: `verb` may be a `$VAR/...` prefix, `flags` may be `"*"` (wildcard), `path_spec` may be a `$HOME` / `$CWD` / `$PROJECT_ROOT` glob.
+- **Rule shapes carry patterns.** `rule_shapes` supports literal and pattern forms on every axis: `verb` may be a `$VAR/...` prefix or `"*"` (matches any verb), `flags` may be `"*"` (wildcard), `path_spec` may be a `$HOME` / `$CWD` / `$PROJECT_ROOT` glob or basename glob (`$VAR/**/<filename>`), and `context` may be `"any"`, `"toplevel"`, or `"substitution"` to scope a rule to where a command appears in the shell tree.
 - **Three-tier scope on one table.** `permissions(rule_shape_id, session_id?, project_id?, decision, source, reason, decided_at)` — at most one of `session_id` / `project_id` set; both NULL = global. Match priority: session → project → global.
 - **Tool-class-aware matching.** Bash, file tools (Read/Edit/Write/NotebookEdit), flat tools (Grep/Glob/WebSearch), MCP (`mcp__ns__tool`), and orchestration tools each dispatch to their own matcher under `src/nephoscope/learners/permission/match/`.
 
@@ -128,7 +128,12 @@ Per eligible candidate: per-axis prompts (verb / paths / flags — literal or ge
 
 ## Fixture round-trip
 
-`src/nephoscope/learners/permission/config/fixtures/safe_shapes.yaml` is the durable, version-controlled snapshot of user trust decisions. `nephoscope-learn seed` loads it into the DB (and syncs mirrors); `nephoscope-learn seed --export` dumps the DB back to YAML.
+The fixture files in `src/nephoscope/learners/permission/config/fixtures/` split into two roles:
+
+- **Shipped seed defaults** — `credential_leaks.yaml` and `secret_manager_standalones.yaml`. Auto-loaded by `nephoscope-init` on a fresh DB; existing DBs need a manual `nephoscope-learn seed` to pick them up.
+- **Durable trust-decision snapshot** — `safe_shapes.yaml`. Version-controlled record of user-shaped rules.
+
+`nephoscope-learn seed` loads a fixture into the DB (and syncs mirrors); `nephoscope-learn seed --export` dumps the DB back to YAML.
 
 ## `/nephoscope:permissions` subcommands
 

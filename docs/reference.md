@@ -27,9 +27,19 @@ Use them inside `--path-spec` values. Examples:
 
 - `$HOME/Downloads/**` — any file anywhere under your Downloads folder.
 - `$PROJECT_ROOT/build/**` — any file under the current project's `build/` folder.
+- `$PROJECT_ROOT/**/.env` — any file named `.env` anywhere inside the project, regardless of subdirectory depth.
 - `$CWD` — the exact directory Claude Code was started from.
 
 `**` means "any depth" inside the directory. A single `*` matches one path segment.
+
+## Multi-word subcommands
+
+Some CLIs use a two-word subgroup-action pattern. When writing rules for these tools, the canonical `subcommand` value joins both words with a single space. For example:
+
+- `vault kv get` → `subcommand: "kv get"`
+- `doppler secrets get` → `subcommand: "secrets get"`
+
+A rule with `subcommand: "kv get"` matches `vault kv get <anything>`; a rule with just `subcommand: "kv"` does not (the canonical form is the full two-word join).
 
 ## Inline absolute path-specs
 

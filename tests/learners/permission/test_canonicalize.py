@@ -589,9 +589,10 @@ def test_positional_path_not_under_any_ctx_var_produces_no_path_spec():
             assert "$" not in v.path_spec, f"Unexpected $VAR path_spec: {v.path_spec}"
 
 
-def test_relative_positional_path_produces_no_path_spec():
+def test_relative_positional_path_without_cwd_produces_no_path_spec():
+    """When ctx has no cwd, relative paths yield no $VAR path_spec (original behaviour)."""
     leaf = _leaf("rm", positional_paths=("relative/path",))
-    variants = to_pattern_form(leaf, CTX_FULL)
+    variants = to_pattern_form(leaf, CTX_HOME_ONLY)  # home only — no cwd
     for v in variants:
         if v.path_spec:
             assert "$" not in v.path_spec
@@ -601,8 +602,10 @@ def test_path_spec_variant_uses_best_verb():
     venv_python = f"{PROJECT}/.venv/bin/python"
     leaf = _leaf(venv_python, positional_paths=(f"{PROJECT}/script.py",))
     variants = to_pattern_form(leaf, CTX_FULL)
-    # Path-spec variants should use the patterned verb, not the literal.
-    path_spec_variants = [v for v in variants if v.path_spec and "$" in v.path_spec]
+    # Per-verb path-spec variants (verb != "*") should use the patterned verb.
+    path_spec_variants = [
+        v for v in variants if v.path_spec and "$" in v.path_spec and v.verb != "*"
+    ]
     for v in path_spec_variants:
         assert v.verb.startswith("$PROJECT_ROOT"), (
             f"Expected $PROJECT_ROOT verb on path-spec variant, got: {v.verb}"
@@ -917,6 +920,130 @@ def test_additional_dirs_produces_no_dollar_in_path_spec():
 
 
 # ===========================================================================
+# to_pattern_form — wildcard-verb variant (Phase B14)
+# ===========================================================================
+
+
+def test_wildcard_verb_variant_emitted_for_path_under_ctx_var():
+    """to_pattern_form emits a verb="*" variant for each distinct path_spec
+    when the leaf has positional paths under a ctx variable."""
+    path = f"{PROJECT}/src/secrets.py"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, CTX_FULL)
+
+    wildcard_verb_variants = [
+        v for v in variants if v.verb == "*" and v.path_spec and "$" in v.path_spec
+    ]
+    assert wildcard_verb_variants, 'Expected at least one verb="*" path-spec variant'
+
+    # Must have a glob form and a specific form.
+    path_specs_of_wildcards = {v.path_spec for v in wildcard_verb_variants}
+    assert "$PROJECT_ROOT/**" in path_specs_of_wildcards
+    assert "$PROJECT_ROOT/src/secrets.py" in path_specs_of_wildcards
+
+
+def test_wildcard_verb_variant_shape_fields():
+    """verb="*" variant has subcommand=None and flags="*"."""
+    path = f"{HOME}/.aws/credentials"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, CTX_HOME_ONLY)
+
+    wildcard_verb_variants = [v for v in variants if v.verb == "*"]
+    assert wildcard_verb_variants, 'Expected at least one verb="*" variant'
+    for v in wildcard_verb_variants:
+        assert v.subcommand is None, (
+            f"Expected subcommand=None on wildcard variant, got {v.subcommand!r}"
+        )
+        assert v.flags == "*", (
+            f'Expected flags="*" on wildcard variant, got {v.flags!r}'
+        )
+
+
+def test_wildcard_verb_variant_not_emitted_when_no_positional_paths():
+    """No wildcard-verb variant when the leaf has no positional paths."""
+    leaf = _leaf("git", subcommand="status")
+    variants = to_pattern_form(leaf, CTX_FULL)
+    wildcard_verb_variants = [v for v in variants if v.verb == "*"]
+    assert not wildcard_verb_variants, (
+        f'Expected no verb="*" variants for leaf with no paths, got {wildcard_verb_variants!r}'
+    )
+
+
+def test_wildcard_verb_variant_not_emitted_when_paths_outside_ctx():
+    """No wildcard-verb variant for positional paths not under any ctx var."""
+    leaf = _leaf("cat", positional_paths=("/etc/hosts",))
+    variants = to_pattern_form(leaf, CTX_FULL)
+    wildcard_verb_variants = [
+        v for v in variants if v.verb == "*" and v.path_spec and "$" in v.path_spec
+    ]
+    assert not wildcard_verb_variants, (
+        f"Expected no $VAR wildcard-verb variants for outside-ctx path, got {wildcard_verb_variants!r}"
+    )
+
+
+def test_wildcard_verb_variant_ordering_after_per_verb_path_spec_variants():
+    """verb="*" variants appear AFTER the corresponding per-verb path-spec variants."""
+    path = f"{HOME}/.aws/credentials"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, CTX_HOME_ONLY)
+
+    # Find indices of per-verb path-spec variants and wildcard-verb variants.
+    per_verb_path_indices = [
+        i
+        for i, v in enumerate(variants)
+        if v.verb != "*" and v.path_spec and "$HOME" in (v.path_spec or "")
+    ]
+    wildcard_verb_indices = [i for i, v in enumerate(variants) if v.verb == "*"]
+    assert per_verb_path_indices, "Expected per-verb path-spec variants"
+    assert wildcard_verb_indices, "Expected wildcard-verb variants"
+    assert max(per_verb_path_indices) < min(wildcard_verb_indices), (
+        f"Wildcard-verb variants must come after per-verb path-spec variants. "
+        f"Per-verb indices: {per_verb_path_indices}, wildcard indices: {wildcard_verb_indices}"
+    )
+
+
+def test_wildcard_verb_multiple_path_specs_each_emits_wildcard():
+    """Each distinct path_spec from positionals gets its own verb="*" variant."""
+    leaf = _leaf(
+        "diff",
+        positional_paths=(
+            f"{HOME}/.aws/credentials",
+            f"{HOME}/.kube/config",
+        ),
+    )
+    variants = to_pattern_form(leaf, CTX_HOME_ONLY)
+
+    wildcard_verb_path_specs = {
+        v.path_spec for v in variants if v.verb == "*" and v.path_spec
+    }
+    # Should cover glob + both specific paths.
+    assert "$HOME/**" in wildcard_verb_path_specs
+    assert "$HOME/.aws/credentials" in wildcard_verb_path_specs
+    assert "$HOME/.kube/config" in wildcard_verb_path_specs
+
+
+def test_no_duplicate_variants_with_wildcard_verb():
+    """Deduplication holds when wildcard-verb variants are present."""
+    path = f"{PROJECT}/src/app.py"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, CTX_FULL)
+    assert len(variants) == len(set(variants))
+
+
+def test_wildcard_verb_additional_dir_emits_inline_wildcard():
+    """A positional under an additional_dir also gets a verb="*" variant."""
+    extra_dir = "/opt/shared/tools"
+    path = extra_dir + "/setup.sh"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, CTX_EMPTY, [extra_dir])
+
+    wildcard_verb_path_specs = {v.path_spec for v in variants if v.verb == "*"}
+    assert extra_dir + "/**" in wildcard_verb_path_specs, (
+        f"Expected wildcard-verb variant for additional_dir path, got {wildcard_verb_path_specs!r}"
+    )
+
+
+# ===========================================================================
 # Integration boundary: additional_dirs flows from parse_command → to_pattern_form
 # → rule_shape lookup → Verdict
 #
@@ -987,6 +1114,7 @@ def test_additional_dirs_inline_path_spec_round_trips_through_bash_match():
             subcommand TEXT,
             flags TEXT NOT NULL DEFAULT '[]',
             path_spec TEXT,
+            context TEXT NOT NULL DEFAULT 'any',
             created_at TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE permissions (
@@ -1050,3 +1178,315 @@ def test_additional_dirs_inline_path_spec_round_trips_through_bash_match():
     from nephoscope.learners.permission.match._types import Verdict
 
     assert verdict == Verdict.Allow, f"Expected Allow, got {verdict}"
+
+
+# ===========================================================================
+# Phase 2 — is_substitution_child marker on CanonicalLeaf
+# ===========================================================================
+
+
+def test_standalone_op_read_is_not_substitution_child():
+    """parse_command("op read 'op://x'") → one leaf, is_substitution_child=False."""
+    leaves = parse_command("op read 'op://x'")
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf.verb == "op"
+    assert leaf.is_substitution_child is False
+
+
+def test_op_read_inside_command_substitution_is_substitution_child():
+    """The inner `op read` inside $(...) gets is_substitution_child=True.
+
+    parse_command('curl -H "Bearer $(op read \\'op://x\\')"') →
+    outer curl with False, inner op read with True.
+    """
+    leaves = parse_command("curl -H \"Bearer $(op read 'op://x')\"")
+    assert len(leaves) == 2
+
+    curl_leaf = next(lf for lf in leaves if lf.verb == "curl")
+    op_leaf = next(lf for lf in leaves if lf.verb == "op")
+
+    assert curl_leaf.is_substitution_child is False
+    assert op_leaf.is_substitution_child is True
+
+
+def test_list_operator_commands_both_toplevel():
+    """parse_command('op read ... && op read ...') → two leaves, both False."""
+    leaves = parse_command("op read 'op://x' && op read 'op://y'")
+    assert len(leaves) == 2
+    for lf in leaves:
+        assert lf.is_substitution_child is False
+
+
+def test_nested_substitution_innermost_is_substitution_child():
+    """Nested command substitution: innermost op read has is_substitution_child=True.
+
+    parse_command('$(echo $(op read \\'op://x\\'))') →
+    outer echo with True, inner op read with True.
+    Both are reached via substitution recursion.
+    """
+    leaves = parse_command("$(echo $(op read 'op://x'))")
+    # We expect at least the innermost op read.
+    op_leaves = [lf for lf in leaves if lf.verb == "op"]
+    assert op_leaves, "Expected at least one op leaf in nested substitution"
+    for lf in op_leaves:
+        assert lf.is_substitution_child is True, (
+            f"Expected is_substitution_child=True on nested op leaf, got {lf.is_substitution_child!r}"
+        )
+
+
+def test_process_substitution_inner_command_is_substitution_child():
+    """parse_command('diff <(op read ...)')  → inner op read has is_substitution_child=True."""
+    leaves = parse_command("diff <(op read 'op://x')")
+    op_leaves = [lf for lf in leaves if lf.verb == "op"]
+    assert op_leaves, "Expected op leaf from process substitution"
+    for lf in op_leaves:
+        assert lf.is_substitution_child is True
+
+
+def test_simple_commands_have_false_by_default():
+    """Any parse_command result without substitution has is_substitution_child=False."""
+    for cmd in ["git status", "ls -la", "echo hello", "uv run pytest"]:
+        for lf in parse_command(cmd):
+            assert lf.is_substitution_child is False, (
+                f"Expected False for {cmd!r}, verb={lf.verb!r}"
+            )
+
+
+# ===========================================================================
+# Phase 2 — PatternVariant.context field
+# ===========================================================================
+
+
+def test_pattern_variant_context_toplevel_for_nontsubstitution_leaf():
+    """Variants for a top-level (non-substitution) leaf all carry context='toplevel'."""
+    leaves = parse_command("op read 'op://x'")
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf.is_substitution_child is False
+
+    variants = to_pattern_form(leaf, CTX_EMPTY)
+    for v in variants:
+        assert v.context == "toplevel", (
+            f"Expected context='toplevel' on all variants for top-level leaf, got {v.context!r}"
+        )
+
+
+def test_pattern_variant_context_substitution_for_substitution_child():
+    """Variants for a substitution-child leaf all carry context='substitution'."""
+    leaves = parse_command("curl -H \"Bearer $(op read 'op://x')\"")
+    op_leaf = next(lf for lf in leaves if lf.verb == "op")
+    assert op_leaf.is_substitution_child is True
+
+    variants = to_pattern_form(op_leaf, CTX_EMPTY)
+    for v in variants:
+        assert v.context == "substitution", (
+            f"Expected context='substitution' on all variants for substitution-child leaf, "
+            f"got {v.context!r}"
+        )
+
+
+# ===========================================================================
+# Phase 2 — multi-word (two-word) subcommand resolution
+#
+# Some CLIs (vault, doppler) namespace commands as ``<verb> <group> <action>``
+# where the second token is a subgroup, not a final subcommand. The
+# canonicalizer must produce a single ``"<group> <action>"`` subcommand for
+# these, so seed rules can match without the third token leaking into
+# positional_paths.
+# ===========================================================================
+
+
+def test_two_word_subcommand_vault_kv_get():
+    """vault kv get foo → subcommand='kv get', positional=('foo',)."""
+    leaves = parse_command("vault kv get secret/foo")
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf.verb == "vault"
+    assert leaf.subcommand == "kv get"
+    assert leaf.positional_paths == ("secret/foo",)
+
+
+def test_two_word_subcommand_vault_kv_put():
+    """vault kv put foo=bar → subcommand='kv put'."""
+    leaves = parse_command("vault kv put foo=bar")
+    assert len(leaves) == 1
+    assert leaves[0].verb == "vault"
+    assert leaves[0].subcommand == "kv put"
+
+
+def test_two_word_subcommand_vault_kv_no_third_token_falls_through():
+    """vault kv -h → subcommand='kv' (third token is a flag, not a positional)."""
+    leaves = parse_command("vault kv -h")
+    assert len(leaves) == 1
+    assert leaves[0].verb == "vault"
+    # Third token is a flag, not a non-flag positional — fall through.
+    assert leaves[0].subcommand == "kv"
+    assert "-h" in leaves[0].flags
+
+
+def test_two_word_subcommand_vault_kv_alone_falls_through():
+    """vault kv → subcommand='kv' (only two tokens; default branch)."""
+    leaves = parse_command("vault kv")
+    assert len(leaves) == 1
+    assert leaves[0].verb == "vault"
+    assert leaves[0].subcommand == "kv"
+
+
+def test_two_word_subcommand_vault_auth_list():
+    """vault auth list → subcommand='auth list'."""
+    leaves = parse_command("vault auth list")
+    assert len(leaves) == 1
+    assert leaves[0].verb == "vault"
+    assert leaves[0].subcommand == "auth list"
+
+
+def test_two_word_subcommand_doppler_secrets_get():
+    """doppler secrets get KEY → subcommand='secrets get', positional=('KEY',)."""
+    leaves = parse_command("doppler secrets get KEY")
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf.verb == "doppler"
+    assert leaf.subcommand == "secrets get"
+    assert leaf.positional_paths == ("KEY",)
+
+
+def test_two_word_subcommand_does_not_break_single_word_vault():
+    """vault read secret/foo (not in two-word allowlist) → subcommand='read'."""
+    leaves = parse_command("vault read secret/foo")
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf.verb == "vault"
+    # ('vault', 'read') is NOT in TWO_WORD_SUBCOMMAND_VERBS → default branch.
+    assert leaf.subcommand == "read"
+    assert leaf.positional_paths == ("secret/foo",)
+
+
+def test_two_word_subcommand_third_token_is_flag_falls_through():
+    """vault kv --help → subcommand='kv' (third token is a flag, not a positional)."""
+    leaves = parse_command("vault kv --help")
+    assert len(leaves) == 1
+    assert leaves[0].verb == "vault"
+    assert leaves[0].subcommand == "kv"
+    assert "--help" in leaves[0].flags
+
+
+def test_two_word_subcommand_third_token_is_substitution_falls_through():
+    """vault kv $(echo get) → subcommand='kv' (third token is substitution)."""
+    leaves = parse_command("vault kv $(echo get)")
+    vault_leaves = [lf for lf in leaves if lf.verb == "vault"]
+    assert len(vault_leaves) == 1
+    # Third token starts with $( — _is_positional_subcommand returns False.
+    assert vault_leaves[0].subcommand == "kv"
+
+
+# ===========================================================================
+# B14 — relative-path resolution against $CWD
+# ===========================================================================
+
+# Context constants for B14 tests.
+# _B14_CWD is a subdirectory of _B14_PROJECT so that $CWD wins (longer path).
+_B14_HOME = "/home/alice"
+_B14_PROJECT = "/home/alice/work"
+_B14_CWD = "/home/alice/work/myproject"
+_CTX_B14_FULL = {"home": _B14_HOME, "project_root": _B14_PROJECT, "cwd": _B14_CWD}
+# CWD-only context — no project_root, so $CWD is the only prefix.
+_CTX_B14_CWD_ONLY = {"cwd": _B14_CWD}
+_CTX_B14_EMPTY: dict[str, str] = {}
+
+
+def test_relative_env_file_with_cwd_emits_cwd_path_specs():
+    """parse_command("cat .env") with cwd in ctx → $CWD/.env and $CWD/**/.env variants.
+
+    Uses a CWD-only context so that $CWD is the longest (only) prefix and wins.
+    """
+    leaf = _leaf("cat", positional_paths=(".env",))
+    variants = to_pattern_form(leaf, _CTX_B14_CWD_ONLY)
+    path_specs = {v.path_spec for v in variants}
+
+    # Must emit the specific path and the basename-glob.
+    assert "$CWD/.env" in path_specs, f"Expected $CWD/.env in {path_specs!r}"
+    assert "$CWD/**/.env" in path_specs, f"Expected $CWD/**/.env in {path_specs!r}"
+
+
+def test_relative_nested_file_with_cwd_emits_expected_path_specs():
+    """parse_command("cat src/foo.txt") with cwd → $CWD/src/foo.txt and $CWD/**/foo.txt.
+
+    Uses a CWD-only context so that $CWD is the only prefix.
+    """
+    leaf = _leaf("cat", positional_paths=("src/foo.txt",))
+    variants = to_pattern_form(leaf, _CTX_B14_CWD_ONLY)
+    path_specs = {v.path_spec for v in variants}
+
+    assert "$CWD/src/foo.txt" in path_specs, (
+        f"Expected $CWD/src/foo.txt in {path_specs!r}"
+    )
+    assert "$CWD/**" in path_specs, f"Expected $CWD/** in {path_specs!r}"
+    assert "$CWD/**/foo.txt" in path_specs, (
+        f"Expected $CWD/**/foo.txt in {path_specs!r}"
+    )
+
+
+def test_relative_env_file_without_cwd_produces_no_dollar_path_spec():
+    """cat .env with EMPTY ctx (no cwd) → no $VAR path_spec variants (old behaviour preserved)."""
+    leaf = _leaf("cat", positional_paths=(".env",))
+    variants = to_pattern_form(leaf, _CTX_B14_EMPTY)
+    for v in variants:
+        assert "$" not in (v.path_spec or ""), (
+            f"Expected no $VAR path_spec with empty ctx, got {v.path_spec!r}"
+        )
+
+
+# ===========================================================================
+# B14 — basename-glob variant ($VAR/**/<basename>)
+# ===========================================================================
+
+
+def test_absolute_path_under_project_emits_basename_glob():
+    """Absolute path /work/proj/apps/web/.env → $PROJECT_ROOT/**/.env emitted."""
+    path = f"{_B14_PROJECT}/apps/web/.env"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B14_FULL)
+    path_specs = {v.path_spec for v in variants}
+
+    # Existing: glob + specific.
+    assert "$PROJECT_ROOT/**" in path_specs
+    assert "$PROJECT_ROOT/apps/web/.env" in path_specs
+    # New: basename-glob.
+    assert "$PROJECT_ROOT/**/.env" in path_specs, (
+        f"Expected $PROJECT_ROOT/**/.env in {path_specs!r}"
+    )
+
+
+def test_path_exactly_equal_to_ctx_var_emits_no_basename_glob():
+    """cat <ctx_var_base> → only $VAR/**, no basename-glob (no tail) for that var.
+
+    Uses a single-ctx-var context so other vars don't introduce basename-globs
+    via a longer-than-base subtail match.
+    """
+    path = _B14_PROJECT  # exact match: path == base
+    leaf = _leaf("ls", positional_paths=(path,))
+    variants = to_pattern_form(leaf, {"project_root": _B14_PROJECT})
+    path_specs = {v.path_spec for v in variants}
+
+    # Glob-only for exact match against the only ctx-var.
+    assert "$PROJECT_ROOT/**" in path_specs
+    # No basename-glob because there is no tail under $PROJECT_ROOT.
+    basename_globs = [
+        ps for ps in path_specs if ps and ps.startswith("$") and "/**/" in ps
+    ]
+    assert not basename_globs, (
+        f"Expected no basename-glob for exact match, got {basename_globs!r}"
+    )
+
+
+def test_existing_glob_and_specific_still_emitted_alongside_basename_glob():
+    """Both $VAR/** and $VAR/tail still present when basename-glob is added."""
+    path = f"{_B14_PROJECT}/src/module.py"
+    leaf = _leaf("rm", positional_paths=(path,))
+    variants = to_pattern_form(leaf, _CTX_B14_FULL)
+    path_specs = {v.path_spec for v in variants}
+
+    assert "$PROJECT_ROOT/**" in path_specs
+    assert "$PROJECT_ROOT/src/module.py" in path_specs
+    assert "$PROJECT_ROOT/**/module.py" in path_specs

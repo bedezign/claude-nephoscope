@@ -36,13 +36,28 @@ def _flags_key(flags: frozenset[str]) -> str:
 def _lookup_rule_shape_id(
     conn: sqlite3.Connection, variant: PatternVariant
 ) -> int | None:
+    """Return the rule_shapes.id for a matching rule, or None.
+
+    The ``context`` filter uses ``IN ('any', ?)`` so that rules with
+    ``context='any'`` match every leaf (regardless of whether the leaf is
+    top-level or inside a substitution), while rules with
+    ``context='toplevel'`` or ``context='substitution'`` only match the
+    corresponding leaf context.
+    """
     row = conn.execute(
         "SELECT id FROM rule_shapes"
         " WHERE verb = ?"
         "   AND IFNULL(subcommand, '') = IFNULL(?, '')"
         "   AND flags = ?"
-        "   AND IFNULL(path_spec, '') = IFNULL(?, '');",
-        (variant.verb, variant.subcommand, variant.flags, variant.path_spec),
+        "   AND IFNULL(path_spec, '') = IFNULL(?, '')"
+        "   AND context IN ('any', ?);",
+        (
+            variant.verb,
+            variant.subcommand,
+            variant.flags,
+            variant.path_spec,
+            variant.context,
+        ),
     ).fetchone()
     return int(row[0]) if row is not None else None
 

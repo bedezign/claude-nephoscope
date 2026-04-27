@@ -792,6 +792,485 @@ class TestGetAdditionalDirsSessionMerge:
 
 
 # ---------------------------------------------------------------------------
+# Wildcard-verb rule shape (verb="*") — Phase B14
+# ---------------------------------------------------------------------------
+
+
+class TestWildcardVerbRuleShape:
+    """verb="*" seed rules block any reader on a credential path."""
+
+    _HOME = "/home/tester"
+
+    def _ctx(self):
+        return {"home": self._HOME}
+
+    def test_wildcard_verb_deny_cat_credential(self, tmp_db):
+        """verb="*" deny on $HOME/.aws/credentials catches `cat ~/.aws/credentials`.
+
+        The seed row uses the $HOME placeholder; to_pattern_form emits a wildcard-verb
+        variant with the same placeholder, which the DB lookup matches exactly.
+        """
+        shape_id = _insert_rule_shape(
+            tmp_db,
+            verb="*",
+            subcommand=None,
+            flags="*",
+            path_spec="$HOME/.aws/credentials",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": f"cat {self._HOME}/.aws/credentials"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny
+
+    def test_wildcard_verb_deny_grep_credential(self, tmp_db):
+        """Same verb="*" rule catches `grep aws ~/.aws/credentials`."""
+        shape_id = _insert_rule_shape(
+            tmp_db,
+            verb="*",
+            subcommand=None,
+            flags="*",
+            path_spec="$HOME/.aws/credentials",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": f"grep aws {self._HOME}/.aws/credentials"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny
+
+    def test_wildcard_verb_does_not_match_unrelated_path(self, tmp_db):
+        """A verb="*" rule scoped to credentials path must NOT fire on unrelated paths."""
+        shape_id = _insert_rule_shape(
+            tmp_db,
+            verb="*",
+            subcommand=None,
+            flags="*",
+            path_spec="$HOME/.aws/credentials",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": "cat /tmp/something-unrelated.txt"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        # /tmp/something-unrelated.txt is not under $HOME and does not match the
+        # credential path_spec — so the deny rule must not fire.
+        assert v != Verdict.Deny
+
+    def test_per_verb_rule_beats_wildcard_verb(self, tmp_db):
+        """Per-verb approved rule wins over verb="*" rejected rule for the same path.
+
+        to_pattern_form emits per-verb path-spec variants (e.g. verb="cat",
+        flags="[]", path_spec="$HOME/.aws/credentials") BEFORE the wildcard-verb
+        variant (verb="*", flags="*", path_spec="$HOME/.aws/credentials"). The
+        _decision_for_leaf loop returns on the first match, so the per-verb rule
+        takes precedence.
+        """
+        # Per-verb allow for cat on $HOME/.aws/credentials.
+        # flags="[]" matches the literal-flags path-spec variant emitted by
+        # to_pattern_form for a cat command without any flags.
+        per_verb_shape_id = _insert_rule_shape(
+            tmp_db,
+            verb="cat",
+            subcommand=None,
+            flags="[]",
+            path_spec="$HOME/.aws/credentials",
+        )
+        _insert_permission(tmp_db, per_verb_shape_id, "approved")
+
+        # Wildcard-verb deny on the same path.
+        wildcard_shape_id = _insert_rule_shape(
+            tmp_db,
+            verb="*",
+            subcommand=None,
+            flags="*",
+            path_spec="$HOME/.aws/credentials",
+        )
+        _insert_permission(tmp_db, wildcard_shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": f"cat {self._HOME}/.aws/credentials"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        # Per-verb rule wins → Allow.
+        assert v == Verdict.Allow
+
+
+# ---------------------------------------------------------------------------
+# Context-aware matching (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _insert_rule_shape_with_context(
+    conn: sqlite3.Connection,
+    verb: str,
+    subcommand: str | None = None,
+    flags: str = "*",
+    path_spec: str | None = None,
+    context: str = "any",
+) -> int:
+    """Insert a rule_shape with a context constraint."""
+    conn.execute(
+        "INSERT OR IGNORE INTO rule_shapes"
+        " (verb, subcommand, flags, path_spec, context, first_seen, last_seen)"
+        " VALUES (?, ?, ?, ?, ?, '2025-01-01Z', '2025-01-01Z');",
+        (verb, subcommand, flags, path_spec, context),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM rule_shapes"
+        " WHERE verb=? AND IFNULL(subcommand,'')=IFNULL(?,'') AND flags=?"
+        " AND IFNULL(path_spec,'')=IFNULL(?,'') AND context=?;",
+        (verb, subcommand, flags, path_spec, context),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+class TestContextAwareMatcher:
+    """Phase 2: context='toplevel' and context='any' rules filter by invocation context."""
+
+    def test_toplevel_deny_matches_standalone_op_read(self, tmp_db):
+        """context='toplevel' deny fires on standalone `op read ...`."""
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="op",
+            subcommand="read",
+            flags="*",
+            path_spec=None,
+            context="toplevel",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": "op read 'op://Private/item/password'"},
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        assert v == Verdict.Deny
+
+    def test_toplevel_deny_does_not_fire_on_substitution_form(self, tmp_db):
+        """context='toplevel' deny must NOT fire when `op read` is inside $(...).
+
+        The inner op read leaf has is_substitution_child=True, so its variants
+        carry context='substitution'. A rule with context='toplevel' must not
+        match context='substitution' variants.
+        """
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="op",
+            subcommand="read",
+            flags="*",
+            path_spec=None,
+            context="toplevel",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        # curl with op read inside command substitution.
+        v = bash_match(
+            "Bash",
+            {
+                "command": "curl -H \"Authorization: Bearer $(op read 'op://Private/item/password')\""
+            },
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        # op read is inside $(...) — toplevel deny must not fire.
+        # curl itself has no deny rule; the verdict must not be Deny.
+        assert v != Verdict.Deny
+
+    def test_any_context_deny_matches_standalone(self, tmp_db):
+        """context='any' deny fires on standalone `op read`."""
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="op",
+            subcommand="read",
+            flags="*",
+            path_spec=None,
+            context="any",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": "op read 'op://Private/item/password'"},
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        assert v == Verdict.Deny
+
+    def test_any_context_deny_matches_substitution_form(self, tmp_db):
+        """context='any' deny fires even when `op read` is inside $(...).
+
+        The inner op read leaf has context='substitution', but a rule with
+        context='any' matches both contexts.
+        """
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="op",
+            subcommand="read",
+            flags="*",
+            path_spec=None,
+            context="any",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {
+                "command": "curl -H \"Authorization: Bearer $(op read 'op://Private/item/password')\""
+            },
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        assert v == Verdict.Deny
+
+    def test_two_rules_same_shape_different_context_coexist(self, tmp_db):
+        """Two rules with same (v,s,f,p) but different context can coexist in the DB."""
+        id_any = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="op",
+            subcommand="read",
+            flags="*",
+            path_spec=None,
+            context="any",
+        )
+        id_top = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="op",
+            subcommand="read",
+            flags="*",
+            path_spec=None,
+            context="toplevel",
+        )
+        # Both must have distinct ids (unique index includes context).
+        assert id_any != id_top
+        count = tmp_db.execute(
+            "SELECT COUNT(*) FROM rule_shapes WHERE verb='op' AND subcommand='read';"
+        ).fetchone()[0]
+        assert count == 2
+
+
+class TestTwoWordSubcommandMatchEndToEnd:
+    """Two-word subcommand verbs (vault, doppler) match seed rules end-to-end.
+
+    Regression guard: before the canonicalize fix, ``vault kv get foo`` produced
+    ``subcommand="kv"`` (not ``"kv get"``), so a seed row with
+    ``subcommand="kv get"`` never matched. These tests assert the full path
+    parse_command → to_pattern_form → DB lookup → Verdict.
+    """
+
+    def test_vault_kv_get_matches_toplevel_deny(self, tmp_db):
+        """A toplevel deny on (vault, "kv get", *, NULL) fires on the standalone form."""
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="vault",
+            subcommand="kv get",
+            flags="*",
+            path_spec=None,
+            context="toplevel",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": "vault kv get secret/db-password"},
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        assert v == Verdict.Deny
+
+    def test_doppler_secrets_get_matches_toplevel_deny(self, tmp_db):
+        """A toplevel deny on (doppler, "secrets get", *, NULL) fires standalone."""
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="doppler",
+            subcommand="secrets get",
+            flags="*",
+            path_spec=None,
+            context="toplevel",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {"command": "doppler secrets get DATABASE_URL"},
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        assert v == Verdict.Deny
+
+    def test_vault_kv_get_inside_substitution_does_not_fire_toplevel(self, tmp_db):
+        """A toplevel deny on `vault kv get` does not fire inside $(...) — same
+        substitution-vs-toplevel split that motivated the context column."""
+        shape_id = _insert_rule_shape_with_context(
+            tmp_db,
+            verb="vault",
+            subcommand="kv get",
+            flags="*",
+            path_spec=None,
+            context="toplevel",
+        )
+        _insert_permission(tmp_db, shape_id, "rejected")
+
+        v = bash_match(
+            "Bash",
+            {
+                "command": 'curl -H "Authorization: Bearer $(vault kv get -field=value secret/api-key)"'
+            },
+            tmp_db,
+            None,
+            None,
+            {},
+        )
+        # Inner vault kv get is substitution-child; toplevel rule must not fire.
+        assert v != Verdict.Deny
+
+
+# ---------------------------------------------------------------------------
+# B14 — .env seed-rule matching via $CWD/**/.env basename-glob
+# ---------------------------------------------------------------------------
+
+
+class TestEnvFileSeedRuleMatching:
+    """Deny rule with path_spec=$CWD/**/.env matches .env at any depth.
+
+    Relies on Change 1 (relative-path resolution against $CWD) and Change 2
+    (basename-glob emission) both being in place so that `cat .env` and
+    `cat apps/web/.env` emit a $CWD/**/.env variant that matches the seed rule.
+    """
+
+    _CWD = "/work/proj"
+
+    def _ctx(self):
+        return {"cwd": self._CWD}
+
+    def _seed_env_rule(self, conn: sqlite3.Connection) -> int:
+        """Insert verb='*', flags='*', path_spec='$CWD/**/.env' → rejected."""
+        shape_id = _insert_rule_shape(
+            conn,
+            verb="*",
+            subcommand=None,
+            flags="*",
+            path_spec="$CWD/**/.env",
+        )
+        _insert_permission(conn, shape_id, "rejected")
+        return shape_id
+
+    def test_cat_env_in_cwd_is_denied(self, tmp_db):
+        """cat .env (relative, resolved to $CWD/.env) → Deny."""
+        self._seed_env_rule(tmp_db)
+        v = bash_match(
+            "Bash",
+            {"command": "cat .env"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat .env", got {v!r}'
+
+    def test_cat_env_in_subdirectory_is_denied(self, tmp_db):
+        """cat src/.env (relative, resolved to $CWD/src/.env) → Deny."""
+        self._seed_env_rule(tmp_db)
+        v = bash_match(
+            "Bash",
+            {"command": "cat src/.env"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat src/.env", got {v!r}'
+
+    def test_cat_env_deep_path_is_denied(self, tmp_db):
+        """cat apps/web/.env (relative, deep) → Deny."""
+        self._seed_env_rule(tmp_db)
+        v = bash_match(
+            "Bash",
+            {"command": "cat apps/web/.env"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat apps/web/.env", got {v!r}'
+
+    def test_env_rule_does_not_match_different_basename(self, tmp_db):
+        """$CWD/**/.env rule must NOT fire on cat src/foo.txt (different basename)."""
+        self._seed_env_rule(tmp_db)
+        v = bash_match(
+            "Bash",
+            {"command": "cat src/foo.txt"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v != Verdict.Deny, (
+            f'Unexpected Deny for unrelated file "cat src/foo.txt", got {v!r}'
+        )
+
+    def test_env_rule_does_not_match_env_example(self, tmp_db):
+        """$CWD/**/.env rule must NOT fire on .env.example (different basename)."""
+        self._seed_env_rule(tmp_db)
+        v = bash_match(
+            "Bash",
+            {"command": "cat .env.example"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v != Verdict.Deny, f'Unexpected Deny for ".env.example", got {v!r}'
+
+    def test_env_rule_does_not_match_env_template(self, tmp_db):
+        """$CWD/**/.env rule must NOT fire on .env.template."""
+        self._seed_env_rule(tmp_db)
+        v = bash_match(
+            "Bash",
+            {"command": "cat .env.template"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v != Verdict.Deny, f'Unexpected Deny for ".env.template", got {v!r}'
+
+
+# ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
 

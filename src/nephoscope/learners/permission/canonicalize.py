@@ -83,6 +83,28 @@ TASK_RUNNERS: frozenset[tuple[str, ...]] = frozenset(
     }
 )
 
+
+# Verbs whose CLI groups commands as ``<verb> <group> <action>`` rather than
+# ``<verb> <subcommand>``. For these, the second token is a subgroup (not a
+# final subcommand) and ``_resolve_subcommand`` should join ``"<group> <action>"``
+# into a single space-separated subcommand. The third token must be a real
+# positional (not a flag, not a substitution) — otherwise we fall through to
+# the default single-word resolution and the leaf gets ``subcommand=<group>``.
+#
+# Reserved for genuine multi-word CLIs only — adding entries here changes how
+# every shape with that verb is canonicalized, so seed rules and stored
+# candidates have to agree on the form. ``aws``, ``gcloud``, ``kubectl``, ``gh``
+# are likely future entries but are NOT added here without the matching seed
+# rules to back them.
+TWO_WORD_SUBCOMMAND_VERBS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("vault", "kv"),
+        ("vault", "auth"),
+        ("vault", "secrets"),
+        ("doppler", "secrets"),
+    }
+)
+
 # Verbs whose first positional argument is content (a path, pattern, message,
 # file, or script body) rather than a subcommand. For these, ``_resolve_sub-
 # command`` returns ``(None, 1)`` so repeated invocations with different
@@ -200,6 +222,11 @@ class CanonicalLeaf:
     expression). The scope module uses these to classify the leaf against
     the session's project root. They are NOT part of the canonical shape
     — shapes stay keyed on (verb, subcommand, flags).
+
+    ``is_substitution_child`` is True when this leaf was reached by
+    recursing into a commandsubstitution or processsubstitution node
+    (i.e. the command lives inside ``$(...)`` or ``<(...)``). It defaults
+    to False so all existing callers compile without change.
     """
 
     verb: str
@@ -208,6 +235,7 @@ class CanonicalLeaf:
     redirections: tuple[Redirection, ...]
     raw_leaf: str
     positional_paths: tuple[str, ...] = ()
+    is_substitution_child: bool = False
 
 
 @dataclass(frozen=True)
@@ -233,16 +261,41 @@ class PatternVariant:
         ``"$VAR/**"``    — any path under the named context variable.
         ``"$VAR/<tail>"``— specific subpath relative to the context variable.
 
+    ``context``
+        The actual invocation context of the leaf this variant was derived
+        from. Values: ``"toplevel"`` (command is at the top of the shell
+        command tree) or ``"substitution"`` (command is inside a
+        ``$(...)`` or ``<(...)``).  Derived from
+        :attr:`CanonicalLeaf.is_substitution_child` in
+        :func:`to_pattern_form`.
+
+        The match SQL binds this value against the ``rule_shapes.context``
+        column (which stores the *rule's* constraint: ``"any"``,
+        ``"toplevel"``, or ``"substitution"``).  A rule with
+        ``context='any'`` matches every leaf; a rule with
+        ``context='toplevel'`` only matches top-level leaves.
+
+        Note on wildcard-verb (``verb="*"``)/context interaction: a
+        substitution-child leaf emits ``context='substitution'`` on all its
+        variants, including the wildcard-verb one.  A credential-path seed
+        rule with ``context='any'`` therefore still fires on substitution
+        children of those paths — which is correct behaviour (reading
+        ``~/.aws/credentials`` inside a substitution is just as dangerous).
+        Only ``context='toplevel'`` rules are specifically scoped to avoid
+        substitution children.
+
     Review scripts can detect the variant type without extra metadata:
         - ``verb.startswith("$")``          → verb has a $VAR pattern
         - ``path_spec and "$" in path_spec`` → path_spec has a $VAR pattern
         - ``flags == "*"``                   → flags wildcard
+        - ``context == "substitution"``      → leaf is inside $(...) or <(...)
     """
 
     verb: str
     subcommand: str | None
     flags: str
     path_spec: str | None
+    context: str = "toplevel"
 
 
 def parse_command(raw: str) -> list[CanonicalLeaf]:
@@ -312,6 +365,11 @@ def to_pattern_form(
     best_verb = verb_patterned if verb_patterned is not None else leaf.verb
     sub = leaf.subcommand
 
+    # Derive the actual context from the leaf's substitution status.
+    # "toplevel"    — command was at the top level of the shell command tree.
+    # "substitution"— command was inside a $(...) or <(...).
+    leaf_context = "substitution" if leaf.is_substitution_child else "toplevel"
+
     # base path_spec: "" when no positionals at all; None otherwise (any)
     base_path_spec: str | None = "" if not leaf.positional_paths else None
 
@@ -337,6 +395,7 @@ def to_pattern_form(
             subcommand=sub,
             flags=flags_literal,
             path_spec=base_path_spec,
+            context=leaf_context,
         )
     )
 
@@ -348,6 +407,7 @@ def to_pattern_form(
                 subcommand=sub,
                 flags=flags_literal,
                 path_spec=base_path_spec,
+                context=leaf_context,
             )
         )
 
@@ -359,6 +419,7 @@ def to_pattern_form(
                 subcommand=sub,
                 flags=flags_literal,
                 path_spec=ps,
+                context=leaf_context,
             )
         )
 
@@ -369,8 +430,25 @@ def to_pattern_form(
             subcommand=sub,
             flags="*",
             path_spec=base_path_spec,
+            context=leaf_context,
         )
     )
+
+    # 5. Wildcard-verb — one per distinct path_spec derived from positionals.
+    # verb="*" covers every reader verb on a credential path so a single seed
+    # rule blocks cat, grep, head, etc. without N per-verb rows.
+    # These come AFTER per-verb path-spec variants (step 3) so per-verb rules
+    # win on lookup when both exist for the same path.
+    for ps in path_specs:
+        _add(
+            PatternVariant(
+                verb="*",
+                subcommand=None,
+                flags="*",
+                path_spec=ps,
+                context=leaf_context,
+            )
+        )
 
     return variants
 
@@ -450,18 +528,34 @@ def _match_ctx_prefix(
     seen: set[str],
     result: list[str],
 ) -> bool:
-    """Try matching path against ctx-var prefixes. Returns True when matched."""
+    """Emit variants under every matching ctx-var prefix; return whether any matched.
+
+    Real-world sessions commonly have overlapping ctx vars — ``PROJECT_ROOT``
+    and ``CWD`` are equal in the typical "session opened at the project root"
+    case. Emitting under only the longest-prefix winner means seed rules keyed
+    on a different ctx-var (e.g. ``$CWD/**/.env``) never match. The variant
+    emitter's job is to enumerate every reasonable rule key for the leaf; the
+    DB lookup decides which key actually has a rule. ``seen`` still dedupes
+    identical strings.
+    """
+    matched = False
     for var_name, base in ordered:
         glob = var_name + "/**"
         if path == base:
             _emit_path_spec(glob, None, seen, result)
-            return True
+            matched = True
+            continue
         if path.startswith(base + "/"):
             tail = path[len(base) + 1 :]
             specific = var_name + "/" + tail
             _emit_path_spec(glob, specific, seen, result)
-            return True
-    return False
+            # Basename-glob: matches any depth ending in this filename.
+            basename = tail.rsplit("/", 1)[-1] if "/" in tail else tail
+            if basename:
+                basename_glob = var_name + "/**/" + basename
+                _emit_path_spec(basename_glob, None, seen, result)
+            matched = True
+    return matched
 
 
 def _match_additional_dir(
@@ -513,10 +607,13 @@ def _path_specs_from_positionals(
     norm_extra = _normalise_dirs(additional_dirs)
     seen: set[str] = set()
     result: list[str] = []
+    cwd = next((base for var, base in ordered if var == "$CWD"), None)
 
     for path in positional_paths:
         if not path.startswith("/"):
-            continue
+            if cwd is None:
+                continue
+            path = cwd + "/" + path
         if _match_ctx_prefix(path, ordered, seen, result):
             continue
         _match_additional_dir(path, norm_extra, seen, result)
@@ -534,15 +631,27 @@ def _flags_json(flags: frozenset[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _walk(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
-    """Recursively collect leaf commands from ``node``."""
+def _walk(
+    node: bashlex.ast.node,
+    out: list[CanonicalLeaf],
+    *,
+    in_substitution: bool = False,
+) -> None:
+    """Recursively collect leaf commands from ``node``.
+
+    ``in_substitution`` is propagated down from ``_handle_word_part`` and
+    ``_handle_redirect_part`` when recursing into commandsubstitution or
+    processsubstitution nodes.  It is flipped to ``True`` before recursing
+    into the inner command, so any :class:`CanonicalLeaf` produced there
+    carries :attr:`~CanonicalLeaf.is_substitution_child` = True.
+    """
     kind = getattr(node, "kind", None)
     if kind == "command":
-        _process_command(node, out)
+        _process_command(node, out, in_substitution=in_substitution)
         return
     # Compound nodes: recurse into `parts` (pipelines, lists, compound, ...).
     for child in getattr(node, "parts", ()) or ():
-        _walk(child, out)
+        _walk(child, out, in_substitution=in_substitution)
 
 
 def _handle_word_part(
@@ -553,7 +662,7 @@ def _handle_word_part(
     """Append word to accumulator and recurse into any command substitutions."""
     words.append(part)
     for sub in _substitutions_in(part):
-        _walk(sub, out)
+        _walk(sub, out, in_substitution=True)
 
 
 def _handle_redirect_part(
@@ -566,7 +675,9 @@ def _handle_redirect_part(
     target = getattr(part, "output", None)
     if target is not None and getattr(target, "kind", None) == "word":
         for sub in _substitutions_in(target):
-            _walk(sub, out)
+            # A command inside a redirect target (e.g. ``> >(tee log)``) is
+            # still inside a substitution — mark it accordingly.
+            _walk(sub, out, in_substitution=True)
 
 
 def _partition_command_parts(
@@ -593,9 +704,19 @@ def _partition_command_parts(
     return words, redirects
 
 
-def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
+def _process_command(
+    node: bashlex.ast.node,
+    out: list[CanonicalLeaf],
+    *,
+    in_substitution: bool = False,
+) -> None:
     """Extract a CanonicalLeaf from a ``CommandNode`` and recurse into any
-    command/process substitutions reachable from its words."""
+    command/process substitutions reachable from its words.
+
+    ``in_substitution`` is forwarded from ``_walk`` and stored on the
+    resulting :class:`CanonicalLeaf` as
+    :attr:`~CanonicalLeaf.is_substitution_child`.
+    """
     parts: list[bashlex.ast.node] = list(getattr(node, "parts", ()) or ())
     words, redirects = _partition_command_parts(parts, out)
 
@@ -620,6 +741,7 @@ def _process_command(node: bashlex.ast.node, out: list[CanonicalLeaf]) -> None:
             redirections=redirections,
             raw_leaf=raw_leaf,
             positional_paths=positional_paths,
+            is_substitution_child=in_substitution,
         )
     )
 
@@ -668,6 +790,27 @@ def _resolve_task_runner_subcommand(
     return None  # not a task runner
 
 
+def _resolve_two_word_subcommand(
+    verb: str, words: list[bashlex.ast.node]
+) -> tuple[str, int] | None:
+    """Return ``("<group> <action>", 3)`` for two-word subcommand verbs.
+
+    Returns ``None`` when the verb/group pair is not in
+    :data:`TWO_WORD_SUBCOMMAND_VERBS` or when the third token is not a real
+    positional (flag, substitution, or absent). The caller then falls through
+    to single-word subcommand resolution.
+    """
+    if len(words) < 3:
+        return None
+    second = _word_literal(words[1])
+    if not second or (verb, second) not in TWO_WORD_SUBCOMMAND_VERBS:
+        return None
+    third = _word_literal(words[2])
+    if not _is_positional_subcommand(third):
+        return None
+    return f"{second} {third}", 3
+
+
 def _resolve_subcommand(
     verb: str, words: list[bashlex.ast.node]
 ) -> tuple[str | None, int]:
@@ -688,6 +831,13 @@ def _resolve_subcommand(
     # the positional slot entirely.
     if verb in CONTENT_VERBS:
         return None, 1
+
+    # Two-word subcommand verbs (vault, doppler) — group + action joined.
+    # Checked before the default branch so the two-word form wins; falls
+    # through to the default when the third token isn't a real positional.
+    two_word_result = _resolve_two_word_subcommand(verb, words)
+    if two_word_result is not None:
+        return two_word_result
 
     # Default: first non-flag token after the verb.
     if len(words) >= 2:

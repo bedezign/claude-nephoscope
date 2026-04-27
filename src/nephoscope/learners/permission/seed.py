@@ -7,13 +7,14 @@ back to YAML.
 
 Fixture YAML schema:
 
-    - verb: str (required)
+    - verb: str (required, or "*" wildcard)
       subcommand: str? (optional)
       flags: list[str] | "*" (required)
-      path_spec: str? (optional, one of: NULL, "", "$VAR/**", "$VAR/<tail>")
+      path_spec: str? (optional, one of: NULL, "", "$VAR/**", "$VAR/<tail>", "$VAR/**/<filename>")
       tier: str (optional, default "global", one of: "session", "project", "global")
       decision: str (required, one of: "approved", "rejected")
       reason: str? (optional)
+      context: str? (optional, default "any", one of: "any", "toplevel", "substitution")
 
 Round-trip idempotency: applying a fixture to an empty DB and exporting should
 yield equivalent YAML (field order may differ, but content is identical).
@@ -48,12 +49,15 @@ def _yaml_to_flags(flags: Any) -> str:
     raise ValueError(f"invalid flags: {flags!r}")
 
 
+_VALID_CONTEXTS: frozenset[str] = frozenset({"any", "toplevel", "substitution"})
+
+
 def _validate_entry(
     idx: int, entry: Any
-) -> tuple[str, str, Any, str | None, str | None, str, str | None]:
+) -> tuple[str, str, Any, str | None, str | None, str, str | None, str]:
     """Validate a single fixture entry and return its fields.
 
-    Returns (verb, decision, flags_raw, subcommand, path_spec, tier, reason).
+    Returns (verb, decision, flags_raw, subcommand, path_spec, tier, reason, context).
     Raises ValueError on invalid schema.
     """
     if not isinstance(entry, dict):
@@ -76,11 +80,18 @@ def _validate_entry(
     path_spec = entry.get("path_spec")
     tier = entry.get("tier", "global")
     reason = entry.get("reason")
+    context = entry.get("context", "any")
 
     if tier not in ("session", "project", "global"):
         raise ValueError(f"entry {idx} invalid tier: {tier!r}")
 
-    return verb, decision, flags_raw, subcommand, path_spec, tier, reason
+    if context not in _VALID_CONTEXTS:
+        raise ValueError(
+            f"entry {idx} invalid context: {context!r} "
+            f"(must be one of: {sorted(_VALID_CONTEXTS)})"
+        )
+
+    return verb, decision, flags_raw, subcommand, path_spec, tier, reason, context
 
 
 def _apply_entry(
@@ -94,6 +105,7 @@ def _apply_entry(
     tier: str,
     reason: str | None,
     now: str,
+    context: str = "any",
 ) -> None:
     """Upsert one rule_shape + permission row for a fixture entry."""
     if tier != "global":
@@ -110,6 +122,7 @@ def _apply_entry(
         flags_json=flags_json,
         path_spec=path_spec,
         ts=now,
+        context=context,
     )
     insert_permission(
         conn,
@@ -172,7 +185,7 @@ def apply_fixtures(
     perms_created = 0
 
     for idx, entry in enumerate(entries):
-        verb, decision, flags_raw, subcommand, path_spec, tier, reason = (
+        verb, decision, flags_raw, subcommand, path_spec, tier, reason, context = (
             _validate_entry(idx, entry)
         )
         _apply_entry(
@@ -186,6 +199,7 @@ def apply_fixtures(
             tier,
             reason,
             now,
+            context=context,
         )
         shapes_created += 1
         perms_created += 1
@@ -194,6 +208,28 @@ def apply_fixtures(
         _sync_global_mirror(conn)
 
     return shapes_created, perms_created
+
+
+def _build_entry(row: tuple[Any, ...]) -> dict[str, Any]:
+    """Convert a v_permissions row to a YAML-ready dict."""
+    verb, subcommand, flags_str, path_spec, context, tier, decision, reason = row
+
+    flags: Any = "*" if flags_str == "*" else json.loads(flags_str)
+    entry: dict[str, Any] = {"verb": verb, "flags": flags, "decision": decision}
+
+    if subcommand is not None:
+        entry["subcommand"] = subcommand
+    if path_spec is not None:
+        entry["path_spec"] = path_spec
+    # Omit context when it is 'any' (the default) to keep YAML lean.
+    if context is not None and context != "any":
+        entry["context"] = context
+    if tier != "global":
+        entry["tier"] = tier
+    if reason is not None:
+        entry["reason"] = reason
+
+    return entry
 
 
 def export_permissions(
@@ -212,39 +248,13 @@ def export_permissions(
     """
     rows = conn.execute(
         """
-        SELECT verb, subcommand, flags, path_spec, tier, decision, reason
+        SELECT verb, subcommand, flags, path_spec, context, tier, decision, reason
           FROM v_permissions
          ORDER BY tier, decision, verb, COALESCE(subcommand, ''), flags, COALESCE(path_spec, '')
         """
     ).fetchall()
 
-    entries = []
-    for row in rows:
-        verb, subcommand, flags_str, path_spec, tier, decision, reason = row
-
-        # Reconstruct flags: "*" stays as string, JSON array becomes list
-        if flags_str == "*":
-            flags = "*"
-        else:
-            flags = json.loads(flags_str)
-
-        entry: dict[str, Any] = {
-            "verb": verb,
-            "flags": flags,
-            "decision": decision,
-        }
-
-        if subcommand is not None:
-            entry["subcommand"] = subcommand
-        if path_spec is not None:
-            entry["path_spec"] = path_spec
-        if tier != "global":
-            entry["tier"] = tier
-        if reason is not None:
-            entry["reason"] = reason
-
-        entries.append(entry)
-
+    entries = [_build_entry(row) for row in rows]
     yaml_str = yaml.dump(entries, default_flow_style=False, sort_keys=False)
 
     if output_path is not None:
