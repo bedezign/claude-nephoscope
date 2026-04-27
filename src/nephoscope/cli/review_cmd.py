@@ -191,7 +191,7 @@ def _do_promote(
     flags_parsed = _parse_flags_arg(flags_json)
     conn = _connect()
     try:
-        sess_id, proj_id = _resolve_tier_ids(conn, tier, session_id, project_id)
+        sess_id, proj_id = _resolve_tier_ids(tier, session_id, project_id)
         db = _lib_db()
         now = db._now()
         shape_id = db.upsert_rule_shape(
@@ -216,7 +216,7 @@ def _count_concrete_siblings(
     """Count concrete (non-wildcard) sibling permissions at the given tier."""
     conn = _connect()
     try:
-        sess_id, proj_id = _resolve_tier_ids(conn, tier, session_id, project_id)
+        sess_id, proj_id = _resolve_tier_ids(tier, session_id, project_id)
         row = conn.execute(
             """
             SELECT COUNT(*)
@@ -247,7 +247,7 @@ def _subsume_siblings(
 
     conn = _connect()
     try:
-        sess_id, proj_id = _resolve_tier_ids(conn, tier, session_id, project_id)
+        sess_id, proj_id = _resolve_tier_ids(tier, session_id, project_id)
         cur = conn.execute(
             """
             DELETE FROM permissions

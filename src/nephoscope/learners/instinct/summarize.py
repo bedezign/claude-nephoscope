@@ -214,7 +214,12 @@ def _render_summary_lines(
 
     lines.append("## Sample recent calls (last 20)")
     for row in rows[-20:]:
-        status = "" if row["ok"] is None else ("ok" if row["ok"] else "ERR")
+        if row["ok"] is None:
+            status = ""
+        elif row["ok"]:
+            status = "ok"
+        else:
+            status = "ERR"
         lines.append(f"  [{row['ts']}] {status:<3} {_format_row_snippet(row)}")
     lines.append("")
 

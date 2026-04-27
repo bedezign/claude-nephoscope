@@ -372,7 +372,6 @@ def _parse_flags_arg(raw: str | None) -> str:
 
 
 def _resolve_tier_ids(
-    conn: sqlite3.Connection,  # noqa: ARG001 — reserved for future validation
     tier: str,
     session_id_arg: int | None,
     project_id_arg: int | None,
@@ -497,7 +496,7 @@ def _cmd_write_permission(args: argparse.Namespace, decision: str) -> int:
     conn = _connect()
     try:
         session_id, project_id = _resolve_tier_ids(
-            conn, args.tier, args.session_id, args.project_id
+            args.tier, args.session_id, args.project_id
         )
         db = _lib_db()
         now = _now()
@@ -566,7 +565,7 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
     conn = _connect()
     try:
         session_id, project_id = _resolve_tier_ids(
-            conn, args.tier, args.session_id, args.project_id
+            args.tier, args.session_id, args.project_id
         )
         row = conn.execute(
             """
@@ -740,7 +739,7 @@ def _cmd_count_concrete_siblings(args: argparse.Namespace) -> int:
     conn = _connect()
     try:
         session_id, project_id = _resolve_tier_ids(
-            conn, args.tier, args.session_id, args.project_id
+            args.tier, args.session_id, args.project_id
         )
         row = conn.execute(
             """
@@ -782,7 +781,7 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
     conn = _connect()
     try:
         session_id, project_id = _resolve_tier_ids(
-            conn, args.tier, args.session_id, args.project_id
+            args.tier, args.session_id, args.project_id
         )
         cur = conn.execute(
             """

@@ -1450,7 +1450,6 @@ def test_stamp_additional_dirs_cache_warns_on_missing_row(tmp_path, capsys):
     _stamp_additional_dirs_cache(
         conn,
         project_id=None,
-        target_path=tmp_path / "settings.json",
         raw_data={},
         mtime=0.0,
     )

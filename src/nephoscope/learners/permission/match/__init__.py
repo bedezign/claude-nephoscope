@@ -237,9 +237,9 @@ def _run_tiers(
     matcher uses it; other matchers accept but ignore the extra kwarg.
     """
     tiers: list[tuple[int | None, int | None]] = [
-        (session_id, project_id),  # session tier (session_id may be None)
-        (None, project_id),  # project tier
-        (None, None),  # global tier
+        (session_id, project_id),
+        (None, project_id),
+        (None, None),
     ]
 
     seen: set[tuple[int | None, int | None]] = set()

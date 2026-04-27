@@ -215,9 +215,8 @@ def _resolve_project_id(conn: sqlite3.Connection, target_path: Path) -> int | No
     row = conn.execute(
         "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
     ).fetchone()
-    if row and row[0]:
-        if str(Path(row[0]).expanduser().resolve()) == target_abs:
-            return None
+    if row and row[0] and str(Path(row[0]).expanduser().resolve()) == target_abs:
+        return None
 
     for proj_id, proj_path in conn.execute(
         "SELECT id, settings_json_path FROM projects"

@@ -660,7 +660,6 @@ def _apply_per_entry_actions(
 def _stamp_additional_dirs_cache(
     conn: sqlite3.Connection,
     project_id: int | None,
-    target_path: Path,
     raw_data: dict[str, Any],
     mtime: float,
 ) -> None:
@@ -782,9 +781,7 @@ def reconcile(
     # cache (it reads the file but writes no permission rows).  mtime was
     # captured before any write so it is consistent with the parsed content.
     if _file_mtime is not None and _raw_data:
-        _stamp_additional_dirs_cache(
-            conn, project_id, target_path, _raw_data, _file_mtime
-        )
+        _stamp_additional_dirs_cache(conn, project_id, _raw_data, _file_mtime)
 
     # --- First-touch detection ---
     first_touch = _is_first_touch(conn, project_id)

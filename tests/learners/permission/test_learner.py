@@ -553,35 +553,26 @@ class TestCandidateLeaf:
 
 
 class TestResolveTierIds:
-    def _fake_conn(self):
-        return sqlite3.connect(":memory:")
-
     def test_global_tier_returns_none_none(self):
-        conn = self._fake_conn()
-        assert _resolve_tier_ids(conn, "global", None, None) == (None, None)
+        assert _resolve_tier_ids("global", None, None) == (None, None)
 
     def test_session_tier_returns_session_id(self):
-        conn = self._fake_conn()
-        assert _resolve_tier_ids(conn, "session", 42, None) == (42, None)
+        assert _resolve_tier_ids("session", 42, None) == (42, None)
 
     def test_project_tier_returns_project_id(self):
-        conn = self._fake_conn()
-        assert _resolve_tier_ids(conn, "project", None, 7) == (None, 7)
+        assert _resolve_tier_ids("project", None, 7) == (None, 7)
 
     def test_session_tier_without_session_id_raises(self):
-        conn = self._fake_conn()
         with pytest.raises(SystemExit, match="--session-id"):
-            _resolve_tier_ids(conn, "session", None, None)
+            _resolve_tier_ids("session", None, None)
 
     def test_project_tier_without_project_id_raises(self):
-        conn = self._fake_conn()
         with pytest.raises(SystemExit, match="--project-id"):
-            _resolve_tier_ids(conn, "project", None, None)
+            _resolve_tier_ids("project", None, None)
 
     def test_unknown_tier_raises(self):
-        conn = self._fake_conn()
         with pytest.raises(SystemExit, match="unknown tier"):
-            _resolve_tier_ids(conn, "superuser", None, None)
+            _resolve_tier_ids("superuser", None, None)
 
 
 # ===========================================================================
