@@ -229,7 +229,7 @@ class TestFileMatcher:
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec=None)
         _insert_permission(tmp_db, shape_id, "approved")
         v = file_match(
-            "Read", {"file_path": "/home/steve/file.py"}, _conn(tmp_db), None, None, {}
+            "Read", {"file_path": "/home/user/file.py"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Allow
 
@@ -242,7 +242,7 @@ class TestFileMatcher:
         assert v == Verdict.Allow
         # File path provided → no match.
         v2 = file_match(
-            "Read", {"file_path": "/home/steve/file.py"}, _conn(tmp_db), None, None, {}
+            "Read", {"file_path": "/home/user/file.py"}, _conn(tmp_db), None, None, {}
         )
         assert v2 == Verdict.NoOpinion
 
@@ -266,10 +266,10 @@ class TestFileMatcher:
     def test_project_root_token_resolved(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "Edit", path_spec="$PROJECT_ROOT/**")
         _insert_permission(tmp_db, shape_id, "approved")
-        ctx = {"project_root": "/home/steve/myproject"}
+        ctx = {"project_root": "/home/user/myproject"}
         v = file_match(
             "Edit",
-            {"file_path": "/home/steve/myproject/src/main.py"},
+            {"file_path": "/home/user/myproject/src/main.py"},
             _conn(tmp_db),
             None,
             None,
@@ -280,7 +280,7 @@ class TestFileMatcher:
     def test_path_outside_glob_returns_noop(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec="$HOME/.claude/**")
         _insert_permission(tmp_db, shape_id, "approved")
-        ctx = {"home": "/home/steve"}
+        ctx = {"home": "/home/user"}
         v = file_match(
             "Read", {"file_path": "/tmp/unrelated.py"}, _conn(tmp_db), None, None, ctx
         )
@@ -289,10 +289,10 @@ class TestFileMatcher:
     def test_rejected_path_returns_deny(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "Write", path_spec="$HOME/.claude/**")
         _insert_permission(tmp_db, shape_id, "rejected")
-        ctx = {"home": "/home/steve"}
+        ctx = {"home": "/home/user"}
         v = file_match(
             "Write",
-            {"file_path": "/home/steve/.claude/settings.json"},
+            {"file_path": "/home/user/.claude/settings.json"},
             _conn(tmp_db),
             None,
             None,
@@ -567,7 +567,7 @@ class TestDispatchTierPriority:
 
     def test_session_approved_beats_global_rejected(self, tmp_db, monkeypatch):
         monkeypatch.delenv("HOOK_FULL_MATCH", raising=False)
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-tier-001", proj_id)
         shape_id = _insert_rule_shape(tmp_db, "git", "fetch")
         _insert_permission(tmp_db, shape_id, "rejected")  # global
@@ -582,7 +582,7 @@ class TestDispatchTierPriority:
 
     def test_project_approved_beats_global_rejected(self, tmp_db, monkeypatch):
         monkeypatch.delenv("HOOK_FULL_MATCH", raising=False)
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         shape_id = _insert_rule_shape(tmp_db, "git", "fetch")
         _insert_permission(tmp_db, shape_id, "rejected")  # global
         _insert_permission(tmp_db, shape_id, "approved", project_id=proj_id)  # project

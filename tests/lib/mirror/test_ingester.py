@@ -111,11 +111,11 @@ class TestParseBash:
         assert row["flags"] == "*"
 
     def test_bash_absolute_path_with_wildcard(self):
-        # e.g. Bash(/home/steve/.pyenv/versions/*/bin/python3 *)
+        # e.g. Bash(/home/user/.pyenv/versions/*/bin/python3 *)
         row = parse_entry(
-            "Bash(/home/steve/.pyenv/versions/*/bin/python3 *)", source="test"
+            "Bash(/home/user/.pyenv/versions/*/bin/python3 *)", source="test"
         )
-        assert row["verb"] == "/home/steve/.pyenv/versions/*/bin/python3"
+        assert row["verb"] == "/home/user/.pyenv/versions/*/bin/python3"
         assert row["subcommand"] is None
         assert row["flags"] == "*"
         assert row["tool_class"] == "bash"
@@ -135,40 +135,40 @@ class TestParseFileTools:
     """File entries: ``<Verb>(//abs/path)``.  Path is stored including the ``//``."""
 
     def test_read_glob_path(self):
-        row = parse_entry("Read(//home/steve/.claude/**)", source="test")
+        row = parse_entry("Read(//home/user/.claude/**)", source="test")
         assert row["tool"] == "Read"
         assert row["verb"] == "Read"
-        assert row["path_spec"] == "//home/steve/.claude/**"
+        assert row["path_spec"] == "//home/user/.claude/**"
         assert row["subcommand"] is None
         assert row["flags"] is None
         assert row["tool_class"] == "file"
 
     def test_edit_glob_path(self):
-        row = parse_entry("Edit(//home/steve/data/clients/**)", source="test")
+        row = parse_entry("Edit(//home/user/data/clients/**)", source="test")
         assert row["tool"] == "Edit"
-        assert row["path_spec"] == "//home/steve/data/clients/**"
+        assert row["path_spec"] == "//home/user/data/clients/**"
         assert row["tool_class"] == "file"
 
     def test_write_glob_path(self):
-        row = parse_entry("Write(//home/steve/data/**)", source="test")
+        row = parse_entry("Write(//home/user/data/**)", source="test")
         assert row["tool"] == "Write"
-        assert row["path_spec"] == "//home/steve/data/**"
+        assert row["path_spec"] == "//home/user/data/**"
         assert row["tool_class"] == "file"
 
     def test_multiedit_glob_path(self):
-        row = parse_entry("MultiEdit(//home/steve/.claude/**)", source="test")
+        row = parse_entry("MultiEdit(//home/user/.claude/**)", source="test")
         assert row["tool"] == "MultiEdit"
-        assert row["path_spec"] == "//home/steve/.claude/**"
+        assert row["path_spec"] == "//home/user/.claude/**"
         assert row["tool_class"] == "file"
 
     def test_file_tool_exact_file_path(self):
-        row = parse_entry("Read(//home/steve/.claude/settings.json)", source="test")
-        assert row["path_spec"] == "//home/steve/.claude/settings.json"
+        row = parse_entry("Read(//home/user/.claude/settings.json)", source="test")
+        assert row["path_spec"] == "//home/user/.claude/settings.json"
         assert row["tool_class"] == "file"
 
     def test_read_pyenv_python_glob(self):
-        row = parse_entry("Read(//home/steve/.pyenv/versions/**)", source="test")
-        assert row["path_spec"] == "//home/steve/.pyenv/versions/**"
+        row = parse_entry("Read(//home/user/.pyenv/versions/**)", source="test")
+        assert row["path_spec"] == "//home/user/.pyenv/versions/**"
         assert row["tool_class"] == "file"
 
 
@@ -303,7 +303,7 @@ class TestMalformedEntries:
     def test_file_tool_single_slash_raises(self):
         # Single slash is not the canonical form — requires double slash.
         with pytest.raises(IngesterError, match="must start with '//'"):
-            parse_entry("Read(/home/steve/file)", source="test")
+            parse_entry("Read(/home/user/file)", source="test")
 
     def test_file_tool_relative_path_raises(self):
         with pytest.raises(IngesterError, match="must start with '//'"):
@@ -397,10 +397,10 @@ class TestParsePermissionsJson:
     def test_realistic_settings_block(self, tmp_path):
         """Parse a settings block matching real ~/.claude/settings.json entries."""
         allow = [
-            "Read(//home/steve/.claude/**)",
-            "Read(//home/steve/data/clients/**)",
-            "Edit(//home/steve/data/clients/**)",
-            "Write(//home/steve/data/clients/**)",
+            "Read(//home/user/.claude/**)",
+            "Read(//home/user/data/clients/**)",
+            "Edit(//home/user/data/clients/**)",
+            "Write(//home/user/data/clients/**)",
             "Bash(git *)",
             "Bash(uv *)",
             "Bash(wl-copy*)",
@@ -545,13 +545,13 @@ class TestRoundTrip:
         self._roundtrip("Bash(wl-copy*)")
 
     def test_read_path_glob_roundtrip(self):
-        self._roundtrip("Read(//home/steve/.claude/**)")
+        self._roundtrip("Read(//home/user/.claude/**)")
 
     def test_edit_path_roundtrip(self):
-        self._roundtrip("Edit(//home/steve/data/clients/**)")
+        self._roundtrip("Edit(//home/user/data/clients/**)")
 
     def test_write_path_roundtrip(self):
-        self._roundtrip("Write(//home/steve/data/**)")
+        self._roundtrip("Write(//home/user/data/**)")
 
     def test_mcp_fully_qualified_roundtrip(self):
         self._roundtrip("mcp__claude-peers__send_message")

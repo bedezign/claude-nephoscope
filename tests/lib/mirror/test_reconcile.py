@@ -302,7 +302,7 @@ class TestDiff:
                 "verb": "Read",
                 "subcommand": None,
                 "flags": "[]",
-                "path_spec": "//home/steve/.claude/**",
+                "path_spec": "//home/user/.claude/**",
                 "decision": "approved",
             }
         ]
@@ -312,7 +312,7 @@ class TestDiff:
                 "verb": "Read",
                 "subcommand": None,
                 "flags": None,
-                "path_spec": "//home/steve/.claude/**",
+                "path_spec": "//home/user/.claude/**",
                 "decision": "allow",
             }
         ]
@@ -328,7 +328,7 @@ class TestDiff:
                 "verb": "Read",
                 "subcommand": None,
                 "flags": None,
-                "path_spec": "//home/steve/.claude/**",
+                "path_spec": "//home/user/.claude/**",
                 "decision": "approved",
             }
         ]
@@ -338,7 +338,7 @@ class TestDiff:
                 "verb": "Read",
                 "subcommand": None,
                 "flags": None,
-                "path_spec": "//home/steve/.claude/**",
+                "path_spec": "//home/user/.claude/**",
                 "decision": "allow",
             }
         ]

@@ -217,18 +217,18 @@ class TestSerializeFile:
 
     def test_read_ingester_format_double_slash(self):
         """Ingester-produced path_spec (// prefix) → wrapped directly."""
-        assert serialize(row("Read", path_spec="//home/steve/.claude/**")) == (
-            "Read(//home/steve/.claude/**)"
+        assert serialize(row("Read", path_spec="//home/user/.claude/**")) == (
+            "Read(//home/user/.claude/**)"
         )
 
     def test_edit_ingester_format_double_slash(self):
-        assert serialize(row("Edit", path_spec="//home/steve/data/clients/**")) == (
-            "Edit(//home/steve/data/clients/**)"
+        assert serialize(row("Edit", path_spec="//home/user/data/clients/**")) == (
+            "Edit(//home/user/data/clients/**)"
         )
 
     def test_write_ingester_format_double_slash(self):
-        assert serialize(row("Write", path_spec="//home/steve/data/**")) == (
-            "Write(//home/steve/data/**)"
+        assert serialize(row("Write", path_spec="//home/user/data/**")) == (
+            "Write(//home/user/data/**)"
         )
 
     # ---- DB-native convention: path_spec is a real absolute path (single /) ----
@@ -240,8 +240,8 @@ class TestSerializeFile:
         assert serialize(row("Read", path_spec="/abs/**")) == "Read(//abs/**)"
 
     def test_read_with_abs_glob_home_single_slash(self):
-        result = serialize(row("Read", path_spec="/home/steve/.claude/**"))
-        assert result == "Read(//home/steve/.claude/**)"
+        result = serialize(row("Read", path_spec="/home/user/.claude/**"))
+        assert result == "Read(//home/user/.claude/**)"
 
     def test_edit_with_exact_abs_path_single_slash(self):
         """Edit with a specific absolute file path."""
@@ -255,8 +255,8 @@ class TestSerializeFile:
         )
 
     def test_multiedit_with_path_single_slash(self):
-        assert serialize(row("MultiEdit", path_spec="/home/steve/projects/**")) == (
-            "MultiEdit(//home/steve/projects/**)"
+        assert serialize(row("MultiEdit", path_spec="/home/user/projects/**")) == (
+            "MultiEdit(//home/user/projects/**)"
         )
 
     # ---- Bare form (no path constraint) ----

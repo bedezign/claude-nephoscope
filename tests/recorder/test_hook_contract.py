@@ -49,8 +49,8 @@ def canonical_pre_payload(**overrides: Any) -> dict[str, Any]:
     """
     base: dict[str, Any] = {
         "session_id": "019673a0-1111-7000-8000-000000000001",
-        "transcript_path": "/home/steve/.claude/projects/whatever/transcript.jsonl",
-        "cwd": "/home/steve/data/clients/example/projects/foo",
+        "transcript_path": "/home/user/.claude/projects/whatever/transcript.jsonl",
+        "cwd": "/home/user/data/clients/example/projects/foo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": "echo hello", "description": "smoke"},
@@ -64,8 +64,8 @@ def canonical_pre_payload(**overrides: Any) -> dict[str, Any]:
 def canonical_post_payload(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "session_id": "019673a0-1111-7000-8000-000000000001",
-        "transcript_path": "/home/steve/.claude/projects/whatever/transcript.jsonl",
-        "cwd": "/home/steve/data/clients/example/projects/foo",
+        "transcript_path": "/home/user/.claude/projects/whatever/transcript.jsonl",
+        "cwd": "/home/user/data/clients/example/projects/foo",
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": "echo hello"},
@@ -109,7 +109,7 @@ class TestCanonicalPayloadContract:
 
     def test_pre_resolves_cwd_to_project(self, tmp_db, recorder):
         recorder._handle(
-            "pre", canonical_pre_payload(cwd="/home/steve/data/clients/foo/bar")
+            "pre", canonical_pre_payload(cwd="/home/user/data/clients/foo/bar")
         )
         cwd = tmp_db.execute(
             "SELECT p.cwd FROM tool_calls tc "
@@ -118,7 +118,7 @@ class TestCanonicalPayloadContract:
             ("toolu_019673a000000001",),
         ).fetchone()
         assert cwd is not None
-        assert cwd[0] == "/home/steve/data/clients/foo/bar"
+        assert cwd[0] == "/home/user/data/clients/foo/bar"
 
     def test_pre_resolves_session_id_to_session(self, tmp_db, recorder):
         recorder._handle(
@@ -384,9 +384,7 @@ class TestEndToEndMain:
 class TestSessionStartSweep:
     """B6: SessionStart sweeps stale .tmp files via cleanup_stale_tmp."""
 
-    def _session_start_payload(
-        self, cwd: str = "/home/steve/project"
-    ) -> dict[str, Any]:
+    def _session_start_payload(self, cwd: str = "/home/user/project") -> dict[str, Any]:
         return {
             "session_id": "019673a0-aabb-7000-8000-000000000099",
             "hook_event_name": "SessionStart",
@@ -571,7 +569,7 @@ class TestSessionStartExtraDirs:
     SessionStart and stores the parsed list in `sessions.extra_dirs`.
     """
 
-    def _payload(self, cwd: str = "/home/steve/project") -> dict[str, Any]:
+    def _payload(self, cwd: str = "/home/user/project") -> dict[str, Any]:
         return {
             "session_id": "019673a0-cccc-7000-8000-000000000077",
             "hook_event_name": "SessionStart",

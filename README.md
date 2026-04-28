@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/images/logo-small.png" alt="nephoscope" width="180">
+  <img src="docs/images/logo.svg" alt="nephoscope" width="180">
+</p>
+<p align="center">
+  <img src="docs/images/claude-mark.svg" alt="Claude Code" width="16">&nbsp;Built for <strong>Claude Code</strong>
 </p>
 
 # nephoscope

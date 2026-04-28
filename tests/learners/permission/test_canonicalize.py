@@ -265,7 +265,7 @@ def test_content_verb_echo_drops_message_as_subcommand():
 
 
 def test_content_verb_ls_drops_path_as_subcommand():
-    a = parse_command("ls /home/steve")
+    a = parse_command("ls /home/user")
     b = parse_command("ls /tmp")
     assert a[0].subcommand is None
     assert b[0].subcommand is None
@@ -273,7 +273,7 @@ def test_content_verb_ls_drops_path_as_subcommand():
 
 
 def test_content_verb_ls_still_captures_flags():
-    leaves = parse_command("ls -la /home/steve")
+    leaves = parse_command("ls -la /home/user")
     assert leaves[0].verb == "ls"
     assert leaves[0].subcommand is None
     assert leaves[0].flags == frozenset({"-l", "-a"})

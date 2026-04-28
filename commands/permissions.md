@@ -12,8 +12,8 @@ namespace so the two don't collide.
 
 ## Context
 
-- Plugin venv: !`test -f "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-learn" && echo "ready" || echo "not bootstrapped — start a new session and the SessionStart hook will install it"`
-- DB path: !`echo "${OBSERVABILITY_DB:-${CLAUDE_PLUGIN_DATA}/observations.db}"`
+- Plugin venv: `${CLAUDE_PLUGIN_DATA}/.venv/` (installed by the SessionStart hook on first run)
+- DB path: `$OBSERVABILITY_DB` if set; otherwise `${CLAUDE_PLUGIN_DATA}/observations.db`
 
 ## Preflight
 

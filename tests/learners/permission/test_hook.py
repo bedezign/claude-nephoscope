@@ -52,7 +52,7 @@ import nephoscope.learners.permission.hook as hook_mod
 def _make_payload(
     command: str,
     tool_use_id: str = "toolu_test_001",
-    cwd: str = "/home/steve/project",
+    cwd: str = "/home/user/project",
     tool: str = "Bash",
 ) -> dict[str, Any]:
     return {
@@ -252,7 +252,8 @@ class TestProceduralDeny:
     def test_guarded_path_redirection_denied(self, tmp_db, monkeypatch):
         """Redirection into ~/.claude/ is a hard deny regardless of permissions."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        payload = _make_payload("echo malicious > /home/steve/.claude/CLAUDE.md")
+        target = Path.home() / ".claude" / "CLAUDE.md"
+        payload = _make_payload(f"echo malicious > {target}")
         result = _run_hook(payload, db_path, monkeypatch)
         assert _decision(result) == "deny"
 
@@ -294,7 +295,7 @@ class TestPermissionsApproved:
 
     def test_project_approved_emits_allow(self, tmp_db, monkeypatch):
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         _insert_tool_call(tmp_db, "toolu_proj", project_id=proj_id)
         shape_id = _insert_rule_shape(tmp_db, "git", "diff")
         _insert_permission(tmp_db, shape_id, "approved", project_id=proj_id)
@@ -304,7 +305,7 @@ class TestPermissionsApproved:
 
     def test_session_approved_emits_allow(self, tmp_db, monkeypatch):
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-uuid-001", proj_id)
         _insert_tool_call(tmp_db, "toolu_sess", session_id=sess_id, project_id=proj_id)
         shape_id = _insert_rule_shape(tmp_db, "pytest", None, '["--verbose"]')
@@ -358,7 +359,7 @@ class TestPermissionsRejected:
     def test_rejected_beats_global_approved(self, tmp_db, monkeypatch):
         """Session-tier rejection overrides global approval for same shape."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-uuid-002", proj_id)
         _insert_tool_call(tmp_db, "toolu_rej", session_id=sess_id, project_id=proj_id)
         # git fetch has no procedural deny/ask rules → pure permissions test.
@@ -388,7 +389,7 @@ class TestTierPriority:
     def test_session_approved_beats_project_rejected(self, tmp_db, monkeypatch):
         """Session approval takes priority over project rejection."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-uuid-003", proj_id)
         _insert_tool_call(tmp_db, "toolu_tier1", session_id=sess_id, project_id=proj_id)
         shape_id = _insert_rule_shape(tmp_db, "git", "fetch")
@@ -401,7 +402,7 @@ class TestTierPriority:
     def test_project_approved_beats_global_rejected(self, tmp_db, monkeypatch):
         """Project approval takes priority over global rejection."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         _insert_tool_call(tmp_db, "toolu_tier2", project_id=proj_id)
         shape_id = _insert_rule_shape(tmp_db, "git", "fetch")
         _insert_permission(tmp_db, shape_id, "rejected")  # global rejected
@@ -427,7 +428,7 @@ class TestAskTier:
     def test_ask_verb_emits_ask(self, tmp_db, monkeypatch):
         """rm is in ask_verbs; unresolved → ask."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-uuid-ask1", proj_id)
         _insert_tool_call(tmp_db, "toolu_ask1", session_id=sess_id, project_id=proj_id)
         payload = _make_payload("rm /tmp/file.txt", tool_use_id="toolu_ask1")
@@ -437,7 +438,7 @@ class TestAskTier:
     def test_ask_registers_pending_row(self, tmp_db, monkeypatch):
         """Ask writes a permission_ask_pending row with inlined shape."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-uuid-ask2", proj_id)
         _insert_tool_call(tmp_db, "toolu_ask2", session_id=sess_id, project_id=proj_id)
         payload = _make_payload("rm -f /tmp/file.txt", tool_use_id="toolu_ask2")
@@ -517,8 +518,8 @@ class TestPatternVariantMatching:
     def test_path_spec_glob_match(self, tmp_db, monkeypatch):
         """rule_shape with path_spec='$PROJECT_ROOT/**' matches via variant."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        cwd = "/home/steve/myproject/repository"
-        proj_root = "/home/steve/myproject"
+        cwd = "/home/user/myproject/repository"
+        proj_root = "/home/user/myproject"
         proj_id = _insert_project(tmp_db, cwd, root=proj_root)
         _insert_tool_call(tmp_db, "toolu_pathspec", project_id=proj_id)
 
@@ -526,7 +527,7 @@ class TestPatternVariantMatching:
         shape_id = _insert_rule_shape(tmp_db, "cat", None, "[]", "$PROJECT_ROOT/**")
         _insert_permission(tmp_db, shape_id, "approved")
 
-        # cat /home/steve/myproject/src/main.py should match via $PROJECT_ROOT/**
+        # cat /home/user/myproject/src/main.py should match via $PROJECT_ROOT/**
         payload = _make_payload(
             f"cat {proj_root}/src/main.py",
             tool_use_id="toolu_pathspec",
@@ -545,7 +546,7 @@ class TestPatternVariantMatching:
         shape_id = _insert_rule_shape(tmp_db, "$HOME/.local/bin/my-tool")
         _insert_permission(tmp_db, shape_id, "approved")
 
-        payload = _make_payload(local_bin, cwd="/home/steve/project")
+        payload = _make_payload(local_bin, cwd="/home/user/project")
         result = _run_hook(payload, db_path, monkeypatch)
         assert _decision(result) == "allow"
 
@@ -588,7 +589,7 @@ class TestMixedPipelineLeaves:
     def test_idempotent_pending_row(self, tmp_db, monkeypatch):
         """INSERT OR IGNORE: a second ask for the same tool_use_id is a no-op."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
-        proj_id = _insert_project(tmp_db, "/home/steve/project")
+        proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-idem", proj_id)
         _insert_tool_call(tmp_db, "toolu_idem", session_id=sess_id, project_id=proj_id)
         payload = _make_payload("rm /tmp/a", tool_use_id="toolu_idem")
