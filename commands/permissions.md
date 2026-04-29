@@ -342,6 +342,8 @@ Print a table showing the global mirror and each registered project.
 
 Columns: scope, path, last_synced, hash_status (`stamped` / `null` / `mismatch`).
 
+When trusted directories are configured in the nephoscope config file, `mirror-status` also prints a "Workspace coverage" section below the table. This section lists each trusted directory with a `✓` if its Read/Edit/Write entries are present in the global settings file, or `✗` if not. A hint at the end suggests running `reconcile` when any entries are missing.
+
 ```bash
 "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-permissions" mirror-status
 ```

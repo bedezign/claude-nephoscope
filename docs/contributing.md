@@ -74,6 +74,8 @@ nephoscope/
 
 The slice-only hash means edits to **non-permissions** parts of `settings.json` (hooks block, env, model, `permissions.defaultMode`, `permissions.additionalDirectories`) do not flip the stored hash to mismatch — only changes to the rule arrays themselves do. Malformed or non-UTF-8 content is treated as a mismatch (the writer raises `MirrorHashMismatch` with a "settings.json is malformed" message; `mirror-status` reports `mismatch`).
 
+When trusted directories are configured (global mirror only), the write flow also manages a top-level `_nephoscopeAllowedTools` key. The `_inject_permissions` entry point in `lib/mirror/writer.py` generates `Write(<root>/**)`, `Edit(<root>/**)`, `Read(<root>/**)` entries for each configured trusted directory and appends them to `permissions.allow`. The dedicated `_nephoscopeAllowedTools` key tracks exactly which entries nephoscope wrote, so re-syncs replace rather than accumulate. When `trusted_dirs` is empty, the key is removed.
+
 **Canonical forms** rendered by `serializer.py`:
 
 | Tool class | Example |
@@ -130,10 +132,10 @@ Per eligible candidate: per-axis prompts (verb / paths / flags — literal or ge
 
 The fixture files in `src/nephoscope/learners/permission/config/fixtures/` split into two roles:
 
-- **Shipped seed defaults** — `credential_leaks.yaml` and `secret_manager_standalones.yaml`. Auto-loaded by `nephoscope-init` on a fresh DB; existing DBs need a manual `nephoscope-learn seed` to pick them up.
+- **Shipped seed defaults** — `credential_leaks.yaml`, `secret_manager_standalones.yaml`, and `safe_shapes.yaml`. All three are auto-loaded by `nephoscope-init` on a fresh DB.
 - **Durable trust-decision snapshot** — `safe_shapes.yaml`. Version-controlled record of user-shaped rules.
 
-`nephoscope-learn seed` loads a fixture into the DB (and syncs mirrors); `nephoscope-learn seed --export` dumps the DB back to YAML.
+`nephoscope-learn seed` can be used to reload fixtures or export the current permissions to YAML via `nephoscope-learn seed --export`, which dumps the DB back to YAML format.
 
 ## `/nephoscope:permissions` subcommands
 

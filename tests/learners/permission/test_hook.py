@@ -426,12 +426,12 @@ class TestAskTier:
     """Step 5: unresolved leaf with deny.yaml ask rule → pending + ask."""
 
     def test_ask_verb_emits_ask(self, tmp_db, monkeypatch):
-        """rm is in ask_verbs; unresolved → ask."""
+        """rm -r is in ask_flag_patterns; unresolved → ask."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-uuid-ask1", proj_id)
         _insert_tool_call(tmp_db, "toolu_ask1", session_id=sess_id, project_id=proj_id)
-        payload = _make_payload("rm /tmp/file.txt", tool_use_id="toolu_ask1")
+        payload = _make_payload("rm -r /tmp/file.txt", tool_use_id="toolu_ask1")
         result = _run_hook(payload, db_path, monkeypatch)
         assert _decision(result) == "ask"
 
@@ -468,7 +468,7 @@ class TestAskTier:
         """Ask emits ask but does NOT insert pending when session_id is None."""
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         # No tool_call row → no session_id.
-        payload = _make_payload("rm /tmp/file.txt", tool_use_id="toolu_norow")
+        payload = _make_payload("rm -r /tmp/file.txt", tool_use_id="toolu_norow")
         result = _run_hook(payload, db_path, monkeypatch)
         assert _decision(result) == "ask"
         conn = sqlite3.connect(str(db_path))
@@ -479,9 +479,9 @@ class TestAskTier:
         assert row is None
 
     def test_ask_fires_even_without_db(self, tmp_path, monkeypatch):
-        """No-DB path: ask still emits ask for ask-tier verbs."""
+        """No-DB path: ask still emits ask for ask_flag_patterns matches."""
         db_path = tmp_path / "nonexistent.db"
-        payload = _make_payload("rm /tmp/file.txt")
+        payload = _make_payload("rm -r /tmp/file.txt")
         result = _run_hook(payload, db_path, monkeypatch)
         assert _decision(result) == "ask"
 
@@ -580,9 +580,9 @@ class TestMixedPipelineLeaves:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         shape_id = _insert_rule_shape(tmp_db, "git", "log")
         _insert_permission(tmp_db, shape_id, "approved")
-        # rm (no flags) is in ask_verbs; no approval in DB.
+        # rm -r matches ask_flag_patterns; no approval in DB.
         # Use && to get two separate top-level leaves.
-        payload = _make_payload("git log && rm /tmp/stale.txt")
+        payload = _make_payload("git log && rm -r /tmp/stale.txt")
         result = _run_hook(payload, db_path, monkeypatch)
         assert _decision(result) == "ask"
 
@@ -592,7 +592,7 @@ class TestMixedPipelineLeaves:
         proj_id = _insert_project(tmp_db, "/home/user/project")
         sess_id = _insert_session(tmp_db, "sess-idem", proj_id)
         _insert_tool_call(tmp_db, "toolu_idem", session_id=sess_id, project_id=proj_id)
-        payload = _make_payload("rm /tmp/a", tool_use_id="toolu_idem")
+        payload = _make_payload("rm -r /tmp/a", tool_use_id="toolu_idem")
         _run_hook(payload, db_path, monkeypatch)
         _run_hook(payload, db_path, monkeypatch)
         conn = sqlite3.connect(str(db_path))

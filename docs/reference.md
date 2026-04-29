@@ -7,11 +7,32 @@ Dense lookup tables. For concepts, read [how it works](how-it-works.md); for com
 | Variable | Purpose | Default |
 |---|---|---|
 | `OBSERVABILITY_DB` | Observations database path | `${CLAUDE_PLUGIN_DATA}/observations.db`, else `~/.cache/nephoscope/observations.db` |
+| `NEPHOSCOPE_CONFIG` | Path to the nephoscope config file (TOML) | `~/.config/nephoscope/config.toml` |
 | `NEPHOSCOPE_DISABLE_MARKER` | Opt-out marker path — if the file exists, all hooks short-circuit silently | `${CLAUDE_PLUGIN_DATA}/disabled`, else `~/.config/nephoscope/disabled` |
 | `NEPHOSCOPE_INSTINCT_DIR` | Where the instinct summarizer expects the observer to write `.md` files | `${CLAUDE_PLUGIN_DATA}/instincts`, else `~/.claude/instincts` |
 | `HOOK_FULL_MATCH` | Debug: force the runtime hook to fully dispatch even for mirror-covered tool classes | unset |
 
 `${CLAUDE_PLUGIN_DATA}` is set by Claude Code when a plugin loads; for a `nephoscope@bedezign` install it resolves to `~/.claude/plugins/data/nephoscope-bedezign/`.
+
+## Configuration file
+
+Nephoscope reads its settings from a TOML file at `$NEPHOSCOPE_CONFIG` (default `~/.config/nephoscope/config.toml`). An absent file is fine — all settings default silently. Malformed TOML raises an error.
+
+Three keys are supported:
+
+| Key | Type | Default | Purpose |
+|---|---|---|---|
+| `trusted_dirs` | list of strings | `[]` | Top-level project directories. Files under these paths are pre-approved for Read/Edit/Write via injection into the global mirror's `_nephoscopeAllowedTools` key. Also enables the `$TRUSTED_DIR` placeholder. |
+| `auto_register_project_paths` | boolean | `false` | When true, `nephoscope-init` silently adds the current working directory to `trusted_dirs` instead of prompting. |
+| `non_bash_tool_matching` | boolean | `false` | Enables full DB matching for non-Bash tool classes (Write/Edit/Read). When false (default), non-Bash tool matching follows mirror-only behaviour. |
+
+Example configuration file:
+
+```toml
+trusted_dirs = ["/home/you/code/myproject", "/opt/company/shared"]
+auto_register_project_paths = false
+non_bash_tool_matching = false
+```
 
 ## Placeholders
 
@@ -22,6 +43,8 @@ Path-spec shortcuts that nephoscope expands at the time a rule is evaluated.
 | `$HOME` | Your home directory (e.g. `/home/you`) | Always available. |
 | `$CWD` | The directory Claude Code was started in | Set per session, fixed for the life of the session. |
 | `$PROJECT_ROOT` | The project root — the nearest ancestor directory of `$CWD` that looks like a project (has a `.git`, `pyproject.toml`, `package.json`, or similar marker) | Set when a recognisable project is detected; otherwise falls back to `$CWD`. |
+| `$TRUSTED_DIR` | A trusted directory listed in `trusted_dirs` in the config file. | Set when at least one trusted directory is configured. |
+| `$ADDITIONAL_DIR` | An additional directory — listed in `permissions.additionalDirectories` in the settings file or passed via `claude --add-dir` at launch. | Set when at least one additional directory is registered. |
 
 Use them inside `--path-spec` values. Examples:
 
@@ -46,6 +69,15 @@ A rule with `subcommand: "kv get"` matches `vault kv get <anything>`; a rule wit
 When a tool call's path falls under an additional directory — one listed in the persistent settings file (`permissions.additionalDirectories`) or passed as a launch-time `--add-dir` flag — nephoscope writes the rule using the real path rather than a placeholder. For example, if `/opt/company/shared` is an additional directory, a rule covering files there will appear as `/opt/company/shared/**` — not `$EXTRA/...` or any other shorthand. These specs are written verbatim into the settings file, so the rule works regardless of which project or session is active.
 
 Mid-session additions typed into the `/permissions` UI (which prints "for this session") are kept in Claude Code's memory only and are not currently visible to nephoscope. To have a runtime-added directory tracked, add it to `settings.local.json` or relaunch with `--add-dir`. See [How it works](how-it-works.md) for the full picture.
+
+## Initialisation flags
+
+`nephoscope-init` accepts the following flags:
+
+| Flag | Purpose |
+|---|---|
+| `--db-path <path>` | Override the resolved database path. Bypasses `$OBSERVABILITY_DB` and plugin data dir defaults. Useful for tests or alternative locations. |
+| `--no-workspace-prompts` | Skip the interactive trusted directories configuration prompt. Use when scripting or in CI where no terminal is available. |
 
 ## Slash subcommands
 

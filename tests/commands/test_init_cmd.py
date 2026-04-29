@@ -58,7 +58,7 @@ class TestInitCmdFixtureLoad:
 
         from nephoscope.cli.init_cmd import main
 
-        rc = main([])
+        rc = main(["--no-workspace-prompts"])
         assert rc == 0
 
         conn = _open_db(db_path)
@@ -79,7 +79,7 @@ class TestInitCmdFixtureLoad:
 
         from nephoscope.cli.init_cmd import main
 
-        rc = main([])
+        rc = main(["--no-workspace-prompts"])
         assert rc == 0
 
         conn = _open_db(db_path)
@@ -107,11 +107,11 @@ class TestInitCmdFixtureLoad:
         from nephoscope.cli.init_cmd import main
 
         # First init — fresh DB.
-        rc1 = main([])
+        rc1 = main(["--no-workspace-prompts"])
         assert rc1 == 0
 
         # Second init — existing DB; fixture must NOT be loaded again.
-        rc2 = main([])
+        rc2 = main(["--no-workspace-prompts"])
         assert rc2 == 0
 
         conn = _open_db(db_path)
@@ -136,7 +136,7 @@ class TestInitCmdFixtureLoad:
 
         from nephoscope.cli.init_cmd import main
 
-        rc = main([])
+        rc = main(["--no-workspace-prompts"])
         assert rc == 0
 
     def test_init_idempotent_exit_zero(self, tmp_path, monkeypatch):
@@ -146,8 +146,8 @@ class TestInitCmdFixtureLoad:
 
         from nephoscope.cli.init_cmd import main
 
-        main([])
-        rc = main([])
+        main(["--no-workspace-prompts"])
+        rc = main(["--no-workspace-prompts"])
         assert rc == 0
 
 
@@ -171,7 +171,7 @@ class TestInitCmdSecretManagerFixture:
 
         from nephoscope.cli.init_cmd import main
 
-        rc = main([])
+        rc = main(["--no-workspace-prompts"])
         assert rc == 0
 
         conn = _open_db(db_path)
@@ -199,7 +199,7 @@ class TestInitCmdSecretManagerFixture:
 
         from nephoscope.cli.init_cmd import main
 
-        main([])
+        main(["--no-workspace-prompts"])
 
         conn = _open_db(db_path)
         try:

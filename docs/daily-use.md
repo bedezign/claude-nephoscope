@@ -139,6 +139,8 @@ Most likely explanations, in order:
 
 `mirror-status` compares the permission rules nephoscope wrote into your settings file against what's actually there. A mismatch means the `permissions.allow`/`deny`/`ask` arrays were changed by something other than nephoscope — usually a hand-edit or another tool. Edits to other parts of `settings.json` (hooks, env, model, anything outside those three arrays) are ignored on purpose, so unrelated edits never trigger a mismatch.
 
+When trusted directories are configured, `mirror-status` also prints a "Workspace coverage" section listing each trusted directory with a `✓` if its allowed-tools entries are present in the global settings file, or `✗` if not. A hint message suggests running `reconcile` when any entries are missing.
+
 Run:
 
 ```

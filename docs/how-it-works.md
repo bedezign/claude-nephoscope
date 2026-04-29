@@ -70,10 +70,12 @@ Paths change between sessions and projects, so nephoscope lets you write rules u
 - **`$HOME`** — your home directory (e.g. `/home/you`).
 - **`$CWD`** — the directory Claude Code is running from in the current session (what `pwd` would print when you started it).
 - **`$PROJECT_ROOT`** — the root of the project you're currently working in. Nephoscope looks at the nearest directory above you that looks like a project (for example, one containing a `.git` or `pyproject.toml`).
+- **`$TRUSTED_DIR`** — a trusted directory listed in the config file's `trusted_dirs` key. Enabled when at least one trusted directory is configured.
+- **`$ADDITIONAL_DIR`** — an additional directory from the persistent settings list, or a launch-time `--add-dir` flag. Enabled when at least one additional directory is registered.
 
-You can use these inside a path. For example, `$PROJECT_ROOT/**` means "anywhere inside the current project" — the `**` covers any depth. `$HOME/Downloads/**` means "anywhere in your Downloads folder."
+You can use these inside a path. For example, `$PROJECT_ROOT/**` means "anywhere inside the current project" — the `**` covers any depth. `$HOME/Downloads/**` means "anywhere in your Downloads folder." `$TRUSTED_DIR/**` means anywhere inside a configured trusted directory.
 
-If a path falls under a directory you have added on top of your project, nephoscope writes the rule using the real absolute path instead of a placeholder — for example, `/opt/company/shared/**`. Those inline specs work as written and are not session- or project-specific.
+When a path falls under both a trusted directory and an additional directory, the rule is written using the `$TRUSTED_DIR` form. If a path falls under only an additional directory, nephoscope writes the rule using the real absolute path (for example, `/opt/company/shared/**`) to ensure backward compatibility with existing rules. Those inline specs also emit portable `$ADDITIONAL_DIR/**` forms so new rules can use the placeholder.
 
 There are three places nephoscope looks for those extra directories:
 
@@ -138,6 +140,8 @@ That file holds your asks, your candidates, and your rules. From those rules, ne
 - **Session-tier rules** live only in the database; they are never mirrored to a settings file.
 
 The settings files are where Claude Code's built-in permission gate looks to decide whether to ask you. Nephoscope rewrites the relevant one every time you change a rule.
+
+When trusted directories are configured, nephoscope also writes a top-level `_nephoscopeAllowedTools` key into `~/.claude/settings.json`. This key holds the auto-generated `Write(<root>/**)`, `Edit(<root>/**)`, `Read(<root>/**)` entries for each trusted directory; the same entries are also appended to `permissions.allow`. The dedicated key exists so re-syncs replace rather than accumulate.
 
 If you delete the database file, nephoscope forgets everything and starts from scratch. If you uninstall the plugin (`/plugin uninstall nephoscope@bedezign`), the hooks disappear but the settings entries remain unless you also remove them by hand.
 

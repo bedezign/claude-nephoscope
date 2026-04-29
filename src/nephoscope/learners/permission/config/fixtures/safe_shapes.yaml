@@ -48,3 +48,397 @@
 #     - "-f"
 #   decision: rejected
 #   reason: "Destructive recursive deletion"
+
+# ---------------------------------------------------------------------------
+# Shell read/inspect verbs — curated safe additions
+#
+# Common non-destructive shell tools pre-approved at global tier so routine
+# inspection commands do not prompt.  Note: ln and mkdir create filesystem
+# entries and are included per explicit requirement; confirm if read-only
+# intent is desired instead.
+# ---------------------------------------------------------------------------
+
+- verb: awk
+  flags: []
+  decision: approved
+  reason: "Text processing — read-only by default"
+
+- verb: cat
+  flags: []
+  decision: approved
+  reason: "Non-destructive file content display"
+
+- verb: cut
+  flags: []
+  decision: approved
+  reason: "Field extraction — read-only"
+
+- verb: diff
+  flags: []
+  decision: approved
+  reason: "Non-destructive file comparison"
+
+- verb: echo
+  flags: []
+  decision: approved
+  reason: "String output — non-destructive"
+
+- verb: file
+  flags: []
+  decision: approved
+  reason: "File type inspection — read-only"
+
+- verb: find
+  flags: []
+  decision: approved
+  reason: "Non-destructive filesystem search"
+
+- verb: grep
+  flags: []
+  decision: approved
+  reason: "Non-destructive content search"
+
+- verb: head
+  flags: []
+  decision: approved
+  reason: "Non-destructive file preview"
+
+- verb: ln
+  flags: []
+  decision: approved
+  reason: "Symlink creation"
+
+- verb: ls
+  flags: []
+  decision: approved
+  reason: "Non-destructive directory listing"
+
+- verb: mkdir
+  flags: []
+  decision: approved
+  reason: "Directory creation"
+
+- verb: readlink
+  flags: []
+  decision: approved
+  reason: "Symlink target inspection — read-only"
+
+- verb: sort
+  flags: []
+  decision: approved
+  reason: "Non-destructive output sorting"
+
+- verb: stat
+  flags: []
+  decision: approved
+  reason: "File metadata inspection — read-only"
+
+- verb: tail
+  flags: []
+  decision: approved
+  reason: "Non-destructive file tail display"
+
+- verb: tr
+  flags: []
+  decision: approved
+  reason: "Character translation — read-only pipeline use"
+
+- verb: wc
+  flags: []
+  decision: approved
+  reason: "Non-destructive word/line count"
+
+- verb: which
+  flags: []
+  decision: approved
+  reason: "Command path lookup — read-only"
+
+- verb: jq
+  flags: []
+  decision: approved
+  reason: "Non-destructive JSON query"
+
+- verb: column
+  flags: []
+  decision: approved
+  reason: "Non-destructive column formatting"
+
+- verb: uniq
+  flags: []
+  decision: approved
+  reason: "Non-destructive duplicate filtering"
+
+- verb: paste
+  flags: []
+  decision: approved
+  reason: "Non-destructive file line merging"
+
+- verb: join
+  flags: []
+  decision: approved
+  reason: "Non-destructive file field joining"
+
+- verb: comm
+  flags: []
+  decision: approved
+  reason: "Non-destructive line comparison"
+
+- verb: od
+  flags: []
+  decision: approved
+  reason: "Non-destructive octal/hex dump"
+
+- verb: xxd
+  flags: []
+  decision: approved
+  reason: "Non-destructive hex dump"
+
+- verb: du
+  flags: []
+  decision: approved
+  reason: "Disk usage inspection — read-only"
+
+- verb: df
+  flags: []
+  decision: approved
+  reason: "Disk free space inspection — read-only"
+
+- verb: ldd
+  flags: []
+  decision: approved
+  reason: "Shared library dependency inspection — read-only"
+
+- verb: nm
+  flags: []
+  decision: approved
+  reason: "Symbol table inspection — read-only"
+
+- verb: lsof
+  flags: []
+  decision: approved
+  reason: "Open file list inspection — read-only"
+
+- verb: strings
+  flags: []
+  decision: approved
+  reason: "Printable string extraction — read-only"
+
+- verb: ps
+  flags: []
+  decision: approved
+  reason: "Process list inspection — read-only"
+
+- verb: pgrep
+  flags: []
+  decision: approved
+  reason: "Process name lookup — read-only"
+
+- verb: pstree
+  flags: []
+  decision: approved
+  reason: "Process tree inspection — read-only"
+
+- verb: pidof
+  flags: []
+  decision: approved
+  reason: "PID lookup by name — read-only"
+
+- verb: uname
+  flags: []
+  decision: approved
+  reason: "Kernel/OS info — read-only"
+
+- verb: hostname
+  flags: []
+  decision: approved
+  reason: "Host name lookup — read-only"
+
+- verb: date
+  flags: []
+  decision: approved
+  reason: "Date/time display — read-only"
+
+- verb: uptime
+  flags: []
+  decision: approved
+  reason: "System uptime — read-only"
+
+- verb: id
+  flags: []
+  decision: approved
+  reason: "User/group identity — read-only"
+
+- verb: whoami
+  flags: []
+  decision: approved
+  reason: "Current user name — read-only"
+
+- verb: env
+  flags: []
+  decision: approved
+  reason: "Environment variable display — read-only"
+
+- verb: printenv
+  flags: []
+  decision: approved
+  reason: "Environment variable display — read-only"
+
+- verb: locale
+  flags: []
+  decision: approved
+  reason: "Locale settings display — read-only"
+
+- verb: nproc
+  flags: []
+  decision: approved
+  reason: "CPU count — read-only"
+
+- verb: pwd
+  flags: []
+  decision: approved
+  reason: "Current directory — read-only"
+
+- verb: tty
+  flags: []
+  decision: approved
+  reason: "Terminal name — read-only"
+
+- verb: realpath
+  flags: []
+  decision: approved
+  reason: "Path canonicalization — read-only"
+
+- verb: test
+  flags: []
+  decision: approved
+  reason: "Conditional expression evaluation — read-only"
+
+- verb: "true"
+  flags: []
+  decision: approved
+  reason: "Always-success shell builtin"
+
+- verb: "false"
+  flags: []
+  decision: approved
+  reason: "Always-failure shell builtin"
+
+- verb: printf
+  flags: []
+  decision: approved
+  reason: "Formatted string output — non-destructive"
+
+- verb: type
+  flags: []
+  decision: approved
+  reason: "Command type lookup — read-only"
+
+- verb: sqlite3
+  flags: []
+  decision: approved
+  reason: "SQLite query — read-only by default"
+
+- verb: sha256sum
+  flags: []
+  decision: approved
+  reason: "SHA-256 checksum — read-only"
+
+- verb: sha1sum
+  flags: []
+  decision: approved
+  reason: "SHA-1 checksum — read-only"
+
+- verb: md5sum
+  flags: []
+  decision: approved
+  reason: "MD5 checksum — read-only"
+
+- verb: sha512sum
+  flags: []
+  decision: approved
+  reason: "SHA-512 checksum — read-only"
+
+- verb: b2sum
+  flags: []
+  decision: approved
+  reason: "BLAKE2 checksum — read-only"
+
+- verb: cksum
+  flags: []
+  decision: approved
+  reason: "CRC checksum — read-only"
+
+# sed -i: rejected — in-place file editing bypasses the Edit tool audit trail
+- verb: sed
+  flags:
+    - "-i"
+  decision: rejected
+  reason: "in-place file editing — use explicit Edit tool instead"
+  tier: global
+
+- verb: mkdir
+  flags:
+    - "-p"
+  decision: approved
+  reason: "mkdir -p (create with parents) — directory creation only"
+
+- verb: cp
+  flags: []
+  decision: approved
+  reason: "File copy — non-destructive in dev context"
+
+- verb: python3
+  flags:
+    - "-c"
+  decision: approved
+  reason: "python3 -c — inline script"
+
+- verb: python
+  flags:
+    - "-c"
+  decision: approved
+  reason: "python -c — inline script"
+
+- verb: uv
+  subcommand: python
+  flags:
+    - "-c"
+  decision: approved
+  reason: "uv run python -c — inline Python via uv"
+
+- verb: ctags
+  flags: "*"
+  decision: approved
+  reason: "ctags — read-only tag generation"
+
+- verb: echo
+  flags: "*"
+  decision: approved
+  reason: "echo with any flags — non-destructive; covers separator strings parsed as flags"
+
+- verb: cd
+  flags: []
+  decision: approved
+  reason: "directory navigation — no destructive potential"
+
+- verb: rm
+  flags:
+    - "-f"
+    - "-r"
+  path_spec: "$TRUSTED_DIR/**"
+  decision: approved
+  reason: "rm -rf within a trusted directory"
+
+- verb: rm
+  flags:
+    - "-r"
+  path_spec: "$TRUSTED_DIR/**"
+  decision: approved
+  reason: "rm -r within a trusted directory"
+
+- verb: rm
+  flags:
+    - "-f"
+  path_spec: "$TRUSTED_DIR/**"
+  decision: approved
+  reason: "rm -f within a trusted directory"

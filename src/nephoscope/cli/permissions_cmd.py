@@ -14,6 +14,8 @@ subprocess.  The CLI wrappers in commands/permissions.md delegate here via
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -21,6 +23,7 @@ from typing import Any
 
 from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
 
+_SETTINGS_JSON_PATH_QUERY = "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
 
 # ---------------------------------------------------------------------------
 # Helper: open an isolated connection (hash-check guard off for dry-run)
@@ -102,10 +105,14 @@ def mirror_status_cmd(db_path: str | Path) -> int:
 
     Columns: scope, path, last_synced, hash_status
     hash_status values: stamped | null | mismatch
+
+    After the table, prints a Workspace Coverage section when workspace_roots
+    are configured in nephoscope.toml.
     """
     conn = _connect(db_path)
     try:
         rows = _collect_mirror_rows(conn)
+        gm_row = conn.execute(_SETTINGS_JSON_PATH_QUERY).fetchone()
     finally:
         conn.close()
 
@@ -120,6 +127,9 @@ def mirror_status_cmd(db_path: str | Path) -> int:
         status_word = _HASH_STATUS_WORDS.get(hash_status)
         suffix = f" ({status_word})" if status_word else ""
         print(f"{scope:<20}  {path:<50}  {last_synced:<26}  {hash_status}{suffix}")
+
+    global_settings_path = Path(gm_row[0]) if gm_row and gm_row[0] else Path("")
+    _print_workspace_coverage(global_settings_path)
     return 0
 
 
@@ -212,9 +222,7 @@ def _resolve_project_id(conn: sqlite3.Connection, target_path: Path) -> int | No
     """Return project_id for target_path, or None for global scope."""
     target_abs = str(target_path.expanduser().resolve())
 
-    row = conn.execute(
-        "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
-    ).fetchone()
+    row = conn.execute(_SETTINGS_JSON_PATH_QUERY).fetchone()
     if row and row[0] and str(Path(row[0]).expanduser().resolve()) == target_abs:
         return None
 
@@ -255,18 +263,69 @@ def reload_hint_cmd(settings_path: str | Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# workspace_coverage
+# ---------------------------------------------------------------------------
+
+
+def _print_workspace_coverage(settings_path: Path) -> None:
+    """Print a Workspace Coverage section showing which workspace roots are covered.
+
+    Covered means the global settings.json has a Write(<root>/**) entry in
+    _nephoscopeAllowedTools — the marker written by the mirror writer when
+    workspace_roots are configured.
+
+    Skipped entirely when workspace_roots is empty.
+    """
+    from nephoscope.config import get_config
+
+    # uses cached config; reflects state at process start
+    cfg = get_config()
+    if not cfg.trusted_dirs:
+        return
+
+    covered_entries: list[str] = []
+    if settings_path.exists():
+        try:
+            data: dict = json.loads(settings_path.read_text())
+            covered_entries = data.get("_nephoscopeAllowedTools", [])
+        except json.JSONDecodeError:
+            covered_entries = []
+
+    print("\nWorkspace coverage:")
+    any_uncovered = False
+    for root in cfg.trusted_dirs:
+        resolved = os.path.realpath(os.path.expanduser(root))
+        marker = f"Write({resolved}/**)"
+        if marker in covered_entries:
+            symbol = "✓"
+        else:
+            symbol = "✗"
+            any_uncovered = True
+        print(f"  {resolved}  {symbol}")
+    if any_uncovered:
+        print(
+            "  Run 'nephoscope-permissions reconcile' to generate allowedTools entries."
+        )
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    import os
-
-    _db_help = (
-        "Path to the nephoscope observations database file.\n"
-        "Defaults to the OBSERVABILITY_DB environment variable."
+def _add_db_arg(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--db",
+        default=os.environ.get("OBSERVABILITY_DB", ""),
+        dest="db",
+        help=(
+            "Path to the nephoscope observations database file.\n"
+            "Defaults to the OBSERVABILITY_DB environment variable."
+        ),
     )
 
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nephoscope.cli.permissions_cmd",
         description=(
@@ -291,9 +350,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    r.add_argument(
-        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
-    )
+    _add_db_arg(r)
     r.add_argument(
         "--project",
         default=None,
@@ -327,9 +384,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    ms.add_argument(
-        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
-    )
+    _add_db_arg(ms)
 
     md = sub.add_parser(
         "mirror-dry-run",
@@ -341,9 +396,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    md.add_argument(
-        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
-    )
+    _add_db_arg(md)
     md.add_argument(
         "--project",
         default=None,
@@ -365,9 +418,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    rh.add_argument(
-        "--db", default=os.environ.get("OBSERVABILITY_DB", ""), dest="db", help=_db_help
-    )
+    _add_db_arg(rh)
     rh.add_argument(
         "--settings-path",
         required=True,
@@ -378,19 +429,25 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _dispatch_reconcile(args: argparse.Namespace) -> int:
+def _require_db(subcommand: str, args: argparse.Namespace) -> int | None:
+    """Return 1 with an error message when --db is not set; None when set."""
     if not args.db:
         print(
-            "reconcile: please give a database path with --db, or set the"
-            " OBSERVABILITY_DB environment variable.",
+            f"{subcommand}: please give a database path with --db, or set"
+            " the OBSERVABILITY_DB environment variable.",
             file=sys.stderr,
         )
         return 1
+    return None
+
+
+def _dispatch_reconcile(args: argparse.Namespace) -> int:
+    err = _require_db("reconcile", args)
+    if err is not None:
+        return err
     if not args.target_path:
         conn = _connect(args.db)
-        row = conn.execute(
-            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
-        ).fetchone()
+        row = conn.execute(_SETTINGS_JSON_PATH_QUERY).fetchone()
         conn.close()
         if not row or not row[0]:
             print(
@@ -407,33 +464,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.cmd == "reconcile":
-        return _dispatch_reconcile(args)
-
-    if args.cmd == "mirror-status":
-        if not args.db:
-            print(
-                "mirror-status: please give a database path with --db, or set"
-                " the OBSERVABILITY_DB environment variable.",
-                file=sys.stderr,
-            )
-            return 1
-        return mirror_status_cmd(args.db)
-
-    if args.cmd == "mirror-dry-run":
-        if not args.db:
-            print(
-                "mirror-dry-run: please give a database path with --db, or set"
-                " the OBSERVABILITY_DB environment variable.",
-                file=sys.stderr,
-            )
-            return 1
-        return mirror_dry_run_cmd(args.db, args.target_path)
-
-    if args.cmd == "reload-hint":
-        return reload_hint_cmd(args.settings_path)
-
-    return 0  # pragma: no cover
+    match args.cmd:
+        case "reconcile":
+            return _dispatch_reconcile(args)
+        case "mirror-status":
+            err = _require_db("mirror-status", args)
+            if err is not None:
+                return err
+            return mirror_status_cmd(args.db)
+        case "mirror-dry-run":
+            err = _require_db("mirror-dry-run", args)
+            if err is not None:
+                return err
+            return mirror_dry_run_cmd(args.db, args.target_path)
+        case "reload-hint":
+            return reload_hint_cmd(args.settings_path)
+        case _:
+            return 0  # pragma: no cover
 
 
 if __name__ == "__main__":  # pragma: no cover

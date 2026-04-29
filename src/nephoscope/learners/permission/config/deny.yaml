@@ -33,7 +33,6 @@ denied_subcommands:
 denied_flag_patterns: {}
 
 ask_verbs:
-  - rm
   - mv
   - chmod
   - chown

@@ -239,7 +239,12 @@ def _emit_ask_bash(
     """Register ask-pending bookkeeping and emit an ask response for Bash."""
     cmd = tool_input.get("command", "")
     leaves = parse_command(cmd) if cmd else []
-    if leaves and session_id is not None and tool_use_id_str is not None and conn is not None:
+    if (
+        leaves
+        and session_id is not None
+        and tool_use_id_str is not None
+        and conn is not None
+    ):
         _register_ask_pending(conn, tool_use_id_str, session_id, leaves)
     _emit("ask", _ask_reason_from_leaves(leaves))
 
@@ -365,9 +370,7 @@ def _parse_tool_fields(
     return tool, tool_input, tool_use_id_str, payload_cwd
 
 
-def main() -> (
-    int
-):  # NOSONAR S3516 - hook entry points must always exit 0 (domain rule)
+def main() -> int:  # NOSONAR S3516 - hook entry points must always exit 0 (domain rule)
     # Opt-out marker short-circuits the entire gate; fall-through keeps
     # Claude Code's native prompt behaviour intact while the plugin is
     # muted.

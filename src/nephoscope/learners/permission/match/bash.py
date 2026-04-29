@@ -69,11 +69,12 @@ def _decision_for_leaf(
     session_id: int | None,
     project_id: int | None,
     additional_dirs: list[str] | None = None,
+    trusted_dirs: list[str] | None = None,
 ) -> str | None:
     """Return the first permissions decision for *leaf*, or None."""
     from nephoscope.lib.db import lookup_permissions  # type: ignore[import-untyped]
 
-    for variant in to_pattern_form(leaf, ctx, additional_dirs):
+    for variant in to_pattern_form(leaf, ctx, additional_dirs, trusted_dirs):
         shape_id = _lookup_rule_shape_id(conn, variant)
         if shape_id is None:
             continue
@@ -91,6 +92,7 @@ def match(
     project_id: int | None,
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,
+    trusted_dirs: list[str] | None = None,
 ) -> Verdict:
     """Match a Bash tool invocation against the permissions DB.
 
@@ -100,6 +102,11 @@ def match(
     ``additional_dirs`` is the merged list of ``permissions.additionalDirectories``
     entries (global + project) for the current session, sourced from the
     mtime-gated DB cache in ``scope.get_additional_dirs``.
+
+    ``trusted_dirs`` is the list of configured trusted directories from
+    ``get_config().trusted_dirs``.  Positional paths under these directories
+    are emitted with the ``$TRUSTED_DIR/**`` / ``$TRUSTED_DIR/<tail>``
+    placeholder forms so that a single seeded rule covers any trusted dir.
     """
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command.strip():
@@ -111,7 +118,9 @@ def match(
 
     # Resolve permissions for each leaf.
     leaf_decisions: list[str | None] = [
-        _decision_for_leaf(conn, leaf, ctx, session_id, project_id, additional_dirs)
+        _decision_for_leaf(
+            conn, leaf, ctx, session_id, project_id, additional_dirs, trusted_dirs
+        )
         for leaf in leaves
     ]
 

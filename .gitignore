@@ -21,3 +21,5 @@ htmlcov/
 *.db-shm
 *.db-wal
 *.bak
+
+.claude-plugin/marketplace.json

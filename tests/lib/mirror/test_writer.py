@@ -1317,3 +1317,81 @@ def test_unrelated_edits_do_not_flip_hash(tmp_path, db_conn):
     assert _hash_status(path_str, stored_hash_after_second) == "stamped", (
         "_hash_status must report 'stamped' after sync with unrelated edits present"
     )
+
+
+# ---------------------------------------------------------------------------
+# os.rename failure: error propagates, DB hash unchanged, temp file orphaned
+# ---------------------------------------------------------------------------
+
+
+def test_rename_failure_propagates_and_leaves_db_hash_unchanged(
+    tmp_path, db_conn, monkeypatch
+):
+    """When os.rename fails after fsync succeeds, the OSError must propagate
+    and the DB hash must NOT be updated — mirror state stays consistent with
+    the pre-call value (NULL on first-touch, prior hash on subsequent runs).
+
+    The temp file may be left behind as orphan state; cleanup_stale_tmp is the
+    designated reaper. We assert the temp file path is observable so a future
+    cleanup invocation can find and remove it.
+    """
+    from nephoscope.lib.mirror import writer as writer_mod
+    from nephoscope.lib.mirror.writer import sync_global
+
+    target = Path(
+        db_conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+    )
+    tmp_target = target.parent / (target.name + ".tmp")
+
+    # Pre-condition: DB hash is NULL (first-touch path).
+    pre_hash = db_conn.execute(
+        "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    assert pre_hash is None, "precondition: DB hash must start as NULL"
+
+    # Pre-condition: target does not yet exist.
+    assert not target.exists(), "precondition: target must not exist"
+
+    # Patch os.rename in the writer's module namespace so the writer's call
+    # raises OSError after the temp file has been written and fsync'd.
+    def _raise_rename(src, dst):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(writer_mod.os, "rename", _raise_rename)
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
+    ):
+        with pytest.raises(OSError, match="simulated rename failure"):
+            sync_global(db_conn)
+
+    # DB hash must still be NULL — stamp must not have happened.
+    post_hash = db_conn.execute(
+        "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    assert post_hash is None, (
+        "DB hash must remain NULL when os.rename fails;"
+        " stamping past a failed write is the bug we are guarding against"
+    )
+
+    # Cache columns must also be untouched (last_synced still NULL).
+    last_synced = db_conn.execute(
+        "SELECT settings_json_last_synced FROM global_mirror WHERE id = 1;"
+    ).fetchone()[0]
+    assert last_synced is None, (
+        "settings_json_last_synced must remain NULL when the rename failed"
+    )
+
+    # Target must NOT exist — the rename never completed, so no mirror file.
+    assert not target.exists(), (
+        "target must not exist when rename failed (only the temp file should remain)"
+    )
+
+    # Temp file should be observable on disk as orphan state — cleanup_stale_tmp
+    # is the designated reaper for these. Confirm it can find and remove it.
+    assert tmp_target.exists(), (
+        "temp file should be left on disk as orphan after rename failure"
+        " (cleanup_stale_tmp reaps these on a later sync)"
+    )

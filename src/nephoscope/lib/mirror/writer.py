@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 
+from nephoscope.config import get_config
 from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
 from nephoscope.lib.paths import canonicalize
 
@@ -159,54 +160,59 @@ def _stamp_cache(
         _warn_if_no_row("_stamp_cache", table, project_id)
 
 
-def _build_content(
+def _generate_workspace_entries(trusted_dirs: list[str]) -> list[str]:
+    """Return Write/Edit/Read allow entries for each workspace root.
+
+    Tilde-expands and realpath-resolves each root before formatting so the
+    entries are always absolute, canonical paths.
+    """
+    entries: list[str] = []
+    for root in trusted_dirs:
+        resolved = os.path.realpath(os.path.expanduser(root))
+        entries.extend(
+            [
+                f"Write({resolved}/**)",
+                f"Edit({resolved}/**)",
+                f"Read({resolved}/**)",
+            ]
+        )
+    return entries
+
+
+def _fetch_permission_rows(
     conn: sqlite3.Connection,
     project_id: int | None,
-    target: Path | None = None,
-) -> bytes:
-    """Query permission rows and render them into JSON mirror bytes.
+) -> list:
+    """Run the appropriate permission query for global or project scope."""
+    where = (
+        "p.project_id IS NULL AND p.session_id IS NULL"
+        if project_id is None
+        else "p.project_id = ? AND p.session_id IS NULL"
+    )
+    params = () if project_id is None else (project_id,)
+    return conn.execute(
+        f"""
+        SELECT p.id, p.decision, p.source, p.reason, p.decided_at,
+               rs.verb, rs.subcommand, rs.flags, rs.path_spec,
+               p.session_id, p.project_id
+          FROM permissions p
+          JOIN rule_shapes rs ON rs.id = p.rule_shape_id
+         WHERE {where}
+         ORDER BY p.decided_at ASC, p.id ASC;
+        """,
+        params,
+    ).fetchall()
 
-    Calls ``serializer.serialize(row)`` for each row; rows that return None
-    (orchestration rules, default-allow, never written to JSON) are skipped.
-    Decisions map as: approved → allow, rejected → deny, ask → ask.
 
-    Read-merge-write: if *target* exists its contents are parsed and the new
-    ``allow``/``deny``/``ask`` lists are merged in.  All other top-level keys
-    (``attribution``, ``model``, ``hooks``, ``tui``, …) and any other keys
-    inside ``permissions`` (e.g. ``defaultMode``) are left untouched.
+def _classify_permission_rows(
+    rows: list,
+) -> tuple[list[str], list[str], list[str]]:
+    """Serialize rows and partition them into allow / deny / ask lists.
 
-    Raises ``ValueError`` when *target* exists but cannot be parsed as JSON —
-    we never silently overwrite a file we cannot understand.
+    Rows that serialize to None (orchestration rules, default-allow) are
+    skipped — they are never written to JSON.
     """
-    from nephoscope.lib.mirror import (
-        serializer,
-    )  # late import: serializer lives in same package
-
-    if project_id is None:
-        rows = conn.execute(
-            """
-            SELECT p.id, p.decision, p.source, p.reason, p.decided_at,
-                   rs.verb, rs.subcommand, rs.flags, rs.path_spec,
-                   p.session_id, p.project_id
-              FROM permissions p
-              JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-             WHERE p.project_id IS NULL AND p.session_id IS NULL
-             ORDER BY p.decided_at ASC, p.id ASC;
-            """
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT p.id, p.decision, p.source, p.reason, p.decided_at,
-                   rs.verb, rs.subcommand, rs.flags, rs.path_spec,
-                   p.session_id, p.project_id
-              FROM permissions p
-              JOIN rule_shapes rs ON rs.id = p.rule_shape_id
-             WHERE p.project_id = ? AND p.session_id IS NULL
-             ORDER BY p.decided_at ASC, p.id ASC;
-            """,
-            (project_id,),
-        ).fetchall()
+    from nephoscope.lib.mirror import serializer  # late import: same package
 
     allow: list[str] = []
     deny: list[str] = []
@@ -238,22 +244,77 @@ def _build_content(
         elif decision == "ask":
             ask.append(canonical)
 
-    # Read-merge-write: load existing file to preserve foreign top-level keys
-    # and any permissions sub-keys we don't own (e.g. defaultMode).
-    if target is not None and target.exists():
-        raw = target.read_bytes()
-        try:
-            existing: dict = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{target}: cannot parse existing JSON — {exc}") from exc
-    else:
-        existing = {}
+    return allow, deny, ask
 
+
+def _load_existing_json(target: Path | None) -> dict:
+    """Load target as JSON for read-merge-write; return {} when absent.
+
+    Raises ``ValueError`` when the file exists but cannot be parsed — we
+    never silently overwrite a file we cannot understand.
+    """
+    if target is None or not target.exists():
+        return {}
+    raw = target.read_bytes()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{target}: cannot parse existing JSON — {exc}") from exc
+
+
+def _inject_permissions(
+    existing: dict,
+    allow: list[str],
+    deny: list[str],
+    ask: list[str],
+    project_id: int | None,
+) -> None:
+    """Write allow/deny/ask into *existing* and apply workspace-root injection.
+
+    Mutates *existing* in place.  For the global mirror (``project_id is None``)
+    workspace-root entries are appended to the allow list and tracked in
+    ``_nephoscopeAllowedTools`` so re-syncs replace rather than accumulate them.
+    """
     existing.setdefault("permissions", {})
-    existing["permissions"]["allow"] = allow
     existing["permissions"]["deny"] = deny
     existing["permissions"]["ask"] = ask
 
+    if project_id is None:
+        # Workspace-root injection (global mirror only).
+        cfg = get_config()
+        generated = _generate_workspace_entries(cfg.trusted_dirs)
+        existing["permissions"]["allow"] = allow + generated if generated else allow
+        if generated:
+            existing["_nephoscopeAllowedTools"] = generated
+        else:
+            existing.pop("_nephoscopeAllowedTools", None)
+    else:
+        existing["permissions"]["allow"] = allow
+
+
+def _build_content(
+    conn: sqlite3.Connection,
+    project_id: int | None,
+    target: Path | None = None,
+) -> bytes:
+    """Query permission rows and render them into JSON mirror bytes.
+
+    Calls ``serializer.serialize(row)`` for each row; rows that return None
+    (orchestration rules, default-allow, never written to JSON) are skipped.
+    Decisions map as: approved → allow, rejected → deny, ask → ask.
+
+    Read-merge-write: if *target* exists its contents are parsed and the new
+    ``allow``/``deny``/``ask`` lists are merged in.  All other top-level keys
+    (``attribution``, ``model``, ``hooks``, ``tui``, …) and any other keys
+    inside ``permissions`` (e.g. ``defaultMode``) are left untouched.
+
+    Raises ``ValueError`` when *target* exists but cannot be parsed as JSON —
+    we never silently overwrite a file we cannot understand.
+    """
+    rows = _fetch_permission_rows(conn, project_id)
+    allow, deny, ask = _classify_permission_rows(rows)
+    existing = _load_existing_json(target)
+    _inject_permissions(existing, allow, deny, ask, project_id)
     return json.dumps(existing, indent=2).encode("utf-8")
 
 

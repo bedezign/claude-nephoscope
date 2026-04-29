@@ -35,6 +35,7 @@ a DB lookup or for the per-axis review prompts in ``review.sh``.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -178,6 +179,10 @@ CONTENT_VERBS: frozenset[str] = frozenset(
         "chmod",
         "chown",
         "chgrp",
+        # Interactive DB clients — first positional is a DB file (path), not a subcommand.
+        "sqlite3",
+        # Navigation — first positional is a path, not a subcommand.
+        "cd",
     }
 )
 
@@ -298,6 +303,43 @@ class PatternVariant:
     context: str = "toplevel"
 
 
+def pre_resolve_env_vars(raw: str) -> str:
+    """Expand env vars in ``raw`` so bashlex does not trip on unresolved forms.
+
+    Three passes run in strict order:
+
+    1. ``${VAR:-default}`` — use VAR value when set and non-empty; else use default.
+    2. ``${VAR}`` — replaced with os.environ.get(VAR, '').
+    3. ``$VAR`` (word-boundary aware) — replaced with os.environ.get(VAR, '').
+
+    Escaped dollar signs (``\\$VAR``) and command substitutions (``$(…)`` and
+    backtick forms) are never touched.  Positional / special-parameter forms
+    (``$1``, ``$?``, ``$$``, etc.) are also left alone by pass 3 because the
+    pattern requires an alphabetic or underscore start character.
+    """
+
+    def _resolve_default(m: re.Match[str]) -> str:
+        val = os.environ.get(m.group(1), "")
+        return val if val else m.group(2)
+
+    raw = re.sub(
+        r"(?<!\\)\$\{([A-Za-z_][\w]*):-([^}]*)\}",
+        _resolve_default,
+        raw,
+    )
+    raw = re.sub(
+        r"(?<!\\)\$\{([A-Za-z_][\w]*)\}",
+        lambda m: os.environ.get(m.group(1), ""),
+        raw,
+    )
+    raw = re.sub(
+        r"(?<!\\)\$([A-Za-z_][\w]*)\b",
+        lambda m: os.environ.get(m.group(1), ""),
+        raw,
+    )
+    return raw
+
+
 def parse_command(raw: str) -> list[CanonicalLeaf]:
     """Parse ``raw`` and return one :class:`CanonicalLeaf` per leaf command.
 
@@ -306,6 +348,7 @@ def parse_command(raw: str) -> list[CanonicalLeaf]:
     """
     if not raw or not raw.strip():
         return []
+    raw = pre_resolve_env_vars(raw)
     try:
         trees = bashlex.parse(raw)
     except bashlex.errors.ParsingError:
@@ -325,6 +368,7 @@ def to_pattern_form(
     leaf: CanonicalLeaf,
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,
+    trusted_dirs: list[str] | None = None,
 ) -> list[PatternVariant]:
     """Return pattern variants for ``leaf`` given path context.
 
@@ -377,7 +421,7 @@ def to_pattern_form(
     # Pass norm_extra (already normalised) so _path_specs_from_positionals
     # does not re-run _normalise_dirs a second time.
     path_specs: list[str] = _path_specs_from_positionals(
-        leaf.positional_paths, ordered, norm_extra
+        leaf.positional_paths, ordered, norm_extra, trusted_dirs
     )
 
     seen: set[PatternVariant] = set()
@@ -458,6 +502,9 @@ def to_pattern_form(
 # ---------------------------------------------------------------------------
 
 
+_VAR_TO_KEY: dict[str, str] = {v: k for k, v in _CTX_VAR_NAMES.items()}
+
+
 def _ctx_pairs_ordered(ctx: dict[str, str]) -> list[tuple[str, str]]:
     """Return ``("$VAR", "/path")`` pairs sorted longest path first.
 
@@ -471,7 +518,7 @@ def _ctx_pairs_ordered(ctx: dict[str, str]) -> list[tuple[str, str]]:
     pairs.sort(
         key=lambda p: (
             -len(p[1]),
-            _CTX_PRIORITY.get({v: k for k, v in _CTX_VAR_NAMES.items()}[p[0]], 99),
+            _CTX_PRIORITY.get(_VAR_TO_KEY[p[0]], 99),
         )
     )
     return pairs
@@ -504,7 +551,46 @@ def _normalise_dirs(dirs: list[str] | None) -> list[str]:
     """
     if not dirs:
         return []
-    return [str(Path(d).expanduser()).rstrip("/") for d in dirs if d and d.strip()]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for d in dirs:
+        if not d or not d.strip():
+            continue
+        normalised = str(Path(d).expanduser()).rstrip("/")
+        if normalised not in seen:
+            seen.add(normalised)
+            deduped.append(normalised)
+    return deduped
+
+
+def _normalise_trusted_dirs(dirs: list[str] | None) -> list[str]:
+    """Expand ``~`` and resolve symlinks for trusted directory paths.
+
+    Uses ``Path.expanduser().resolve()`` (realpath) rather than the purely
+    lexicographic ``_normalise_dirs`` so that symlinked trusted-dir entries
+    and symlinked paths both resolve to the same canonical form before
+    comparison.  Non-existent directories are kept at their expanded-but-
+    unresolved form so the list can be constructed before the directories
+    are created.
+
+    Returns an empty list when ``dirs`` is None or empty.
+    """
+    if not dirs:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for d in dirs:
+        if not d or not d.strip():
+            continue
+        p = Path(d).expanduser()
+        try:
+            resolved = str(p.resolve()).rstrip("/")
+        except OSError:
+            resolved = str(p).rstrip("/")
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+    return result
 
 
 def _emit_path_spec(
@@ -558,22 +644,56 @@ def _match_ctx_prefix(
     return matched
 
 
+def _match_trusted_dir(
+    path: str,
+    norm_trusted: list[str],
+    seen: set[str],
+    result: list[str],
+) -> bool:
+    """Try matching path against trusted_dirs; emit ``$TRUSTED_DIR`` placeholder specs.
+
+    Emits ``$TRUSTED_DIR/**`` for any path at or under a trusted dir, and
+    ``$TRUSTED_DIR/<tail>`` for paths strictly inside a trusted dir.  Returns
+    True when any trusted dir matched so the caller can skip additional_dir
+    matching (trusted_dir takes priority over the inline absolute form).
+    """
+    for base in norm_trusted:
+        if path == base:
+            _emit_path_spec("$TRUSTED_DIR/**", None, seen, result)
+            return True
+        if path.startswith(base + "/"):
+            tail = path[len(base) + 1 :]
+            specific = "$TRUSTED_DIR/" + tail
+            _emit_path_spec("$TRUSTED_DIR/**", specific, seen, result)
+            return True
+    return False
+
+
 def _match_additional_dir(
     path: str,
     norm_extra: list[str],
     seen: set[str],
     result: list[str],
 ) -> None:
-    """Try matching path against additional_dirs; emit inline absolute specs."""
+    """Try matching path against additional_dirs; emit inline absolute and named specs.
+
+    Emits both the inline absolute path-specs (``<dir>/**``, ``<dir>/<tail>``)
+    and the portable named forms (``$ADDITIONAL_DIR/**``, ``$ADDITIONAL_DIR/<tail>``).
+    The absolute forms are emitted first so that existing rules keyed on absolute
+    inline forms continue to match; the named forms enable new portable rules.
+    """
     for base in norm_extra:
         glob = base + "/**"
         if path == base:
             _emit_path_spec(glob, None, seen, result)
+            _emit_path_spec("$ADDITIONAL_DIR/**", None, seen, result)
             break
         if path.startswith(base + "/"):
             tail = path[len(base) + 1 :]
             specific = base + "/" + tail
             _emit_path_spec(glob, specific, seen, result)
+            named_specific = "$ADDITIONAL_DIR/" + tail
+            _emit_path_spec("$ADDITIONAL_DIR/**", named_specific, seen, result)
             break
 
 
@@ -581,30 +701,38 @@ def _path_specs_from_positionals(
     positional_paths: tuple[str, ...],
     ordered: list[tuple[str, str]],
     additional_dirs: list[str] | None = None,
+    trusted_dirs: list[str] | None = None,
 ) -> list[str]:
     """Derive ``path_spec`` strings from positional path arguments.
 
     For each positional path that lies under a ctx variable, emit:
-      - ``"$VAR/**"``        — any path under that variable
-      - ``"$VAR/<tail>"``    — the specific subpath
+      - ``"$VAR/**"``              — any path under that variable
+      - ``"$VAR/<tail>"``          — the specific subpath
+
+    For each positional path that lies under a trusted_dir (and did NOT match
+    any ctx variable), emit the portable named forms:
+      - ``"$TRUSTED_DIR/**"``      — any path under the trusted directory
+      - ``"$TRUSTED_DIR/<tail>"``  — the specific subpath
 
     For each positional path that lies under an additional_dir (and did NOT
-    match any ctx variable), emit the inline absolute equivalents:
-      - ``"<dir>/**"``       — any path under the additional directory
-      - ``"<dir>/<tail>"``   — the specific subpath
+    match any ctx variable or trusted_dir), emit inline absolute and named forms:
+      - ``"<dir>/**"``             — any path under the additional directory
+      - ``"<dir>/<tail>"``         — the specific subpath
+      - ``"$ADDITIONAL_DIR/**"``   — portable named equivalent
+      - ``"$ADDITIONAL_DIR/<tail>"``
 
-    Ctx-var matches take priority over additional_dir matches — a path under
-    both ``$PROJECT_ROOT`` and an additional_dir will be emitted with the
-    ``$PROJECT_ROOT`` placeholder, not the inline form.
+    Priority: ctx-var > trusted_dir > additional_dir.  A path under both a
+    trusted_dir and an additional_dir will only emit the ``$TRUSTED_DIR``
+    forms so rules remain unambiguous.
 
-    Deduplicates while preserving insertion order (``**`` glob before specific
-    path for the same base, ordered by the position of the matched directory).
+    Deduplicates while preserving insertion order.
 
     ``additional_dirs`` may be pre-normalised (from ``to_pattern_form``) or raw.
     ``_normalise_dirs`` is idempotent on already-absolute paths, so calling it
     here is safe either way and ensures direct callers also get expansion.
     """
     norm_extra = _normalise_dirs(additional_dirs)
+    norm_trusted = _normalise_trusted_dirs(trusted_dirs)
     seen: set[str] = set()
     result: list[str] = []
     cwd = next((base for var, base in ordered if var == "$CWD"), None)
@@ -615,6 +743,8 @@ def _path_specs_from_positionals(
                 continue
             path = cwd + "/" + path
         if _match_ctx_prefix(path, ordered, seen, result):
+            continue
+        if _match_trusted_dir(path, norm_trusted, seen, result):
             continue
         _match_additional_dir(path, norm_extra, seen, result)
 
@@ -912,11 +1042,11 @@ def _collect_positional_paths(words: Iterable[bashlex.ast.node]) -> tuple[str, .
     out: list[str] = []
     for word in words:
         literal = _word_literal(word)
-        if not literal:
-            continue
-        if literal.startswith("-"):
-            continue
-        if literal.startswith(_SUBSTITUTION_PREFIXES):
+        if (
+            not literal
+            or literal.startswith("-")
+            or literal.startswith(_SUBSTITUTION_PREFIXES)
+        ):
             continue
         out.append(literal)
     return tuple(out)

@@ -169,9 +169,9 @@ class TestBashMatcher:
         assert v == Verdict.Deny
 
     def test_ask_verb_returns_ask(self, tmp_db):
-        # rm has no DB approval → falls to ask tier in deny.py
+        # rm -r has no DB approval → falls to ask tier via ask_flag_patterns in deny.py
         v = bash_match(
-            "Bash", {"command": "rm /tmp/file"}, _conn(tmp_db), None, None, {}
+            "Bash", {"command": "rm -r /tmp/file"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Ask
 
