@@ -1490,3 +1490,106 @@ def test_existing_glob_and_specific_still_emitted_alongside_basename_glob():
     assert "$PROJECT_ROOT/**" in path_specs
     assert "$PROJECT_ROOT/src/module.py" in path_specs
     assert "$PROJECT_ROOT/**/module.py" in path_specs
+
+
+# ===========================================================================
+# Tilde normalization in verb and positional paths
+# ===========================================================================
+
+
+def test_tilde_in_verb_path_expands_to_home():
+    """A verb with a leading ``~`` is expanded to an absolute path before variant generation.
+
+    ``~/.claude/hooks/commit-pipeline.sh`` must produce ``$HOME/...`` verb
+    variants — not be left as a non-absolute string that skips all substitution.
+    """
+    from pathlib import Path
+
+    home = str(Path.home())
+    script = "~/.claude/hooks/commit-pipeline.sh"
+    leaves = parse_command(script)
+    assert len(leaves) == 1, f"Expected one leaf, got {leaves!r}"
+    leaf = leaves[0]
+
+    ctx = {"home": home}
+    variants = to_pattern_form(leaf, ctx)
+    verb_patterns = {v.verb for v in variants}
+
+    expanded = f"{home}/.claude/hooks/commit-pipeline.sh"
+    assert any(
+        expanded in v or v == "$HOME/.claude/hooks/commit-pipeline.sh"
+        for v in verb_patterns
+    ), f"Expected expanded verb variant in {verb_patterns!r}"
+    # The literal tilde must not appear in any verb.
+    assert not any("~" in v for v in verb_patterns), (
+        f"Unexpanded tilde found in verb variants: {verb_patterns!r}"
+    )
+
+
+def test_tilde_in_positional_path_expands_to_home():
+    """A positional argument with a leading ``~`` is expanded before path_spec generation.
+
+    ``cat ~/.claude/hooks/commit-oath-guard.py`` (``cat`` is a CONTENT_VERB, so the
+    path ends up in ``positional_paths``) must produce ``$HOME/...`` path_spec
+    variants rather than being silently dropped (no cwd join possible for non-absolute paths).
+    """
+    from pathlib import Path
+
+    home = str(Path.home())
+    cmd = "cat ~/.claude/hooks/commit-oath-guard.py"
+    leaves = parse_command(cmd)
+    assert leaves, f"Expected at least one leaf, got {leaves!r}"
+    cat_leaf = next(lf for lf in leaves if lf.verb == "cat")
+
+    ctx = {"home": home}
+    variants = to_pattern_form(cat_leaf, ctx)
+    path_specs = {v.path_spec for v in variants if v.path_spec}
+
+    # At minimum the $HOME/** glob must be present.
+    assert "$HOME/**" in path_specs, (
+        f"Expected $HOME/** in path_specs but got: {path_specs!r}"
+    )
+    # The literal tilde must not appear in any path_spec.
+    assert not any("~" in (ps or "") for ps in path_specs), (
+        f"Unexpanded tilde found in path_specs: {path_specs!r}"
+    )
+
+
+def test_tilde_slash_only_normalised_not_tilde_username():
+    """``~otheruser/...`` is NOT expanded — only bare ``~`` is in scope.
+
+    The verb ``~otheruser/.ssh/config`` should be left as-is (no expansion),
+    because ``~username`` form is explicitly out of scope for this feature.
+    """
+    cmd = "~otheruser/.ssh/config"
+    leaves = parse_command(cmd)
+    # bashlex may or may not parse this; either way no $HOME expansion must occur.
+    for leaf in leaves:
+        ctx = {"home": str(__import__("pathlib").Path.home())}
+        variants = to_pattern_form(leaf, ctx)
+        verb_patterns = {v.verb for v in variants}
+        # Must not have been expanded to the current user's home.
+        assert not any(
+            v.startswith(str(__import__("pathlib").Path.home())) for v in verb_patterns
+        ), f"~otheruser was incorrectly expanded: {verb_patterns!r}"
+
+
+def test_non_tilde_paths_unchanged():
+    """Absolute paths without ``~`` are untouched by tilde normalisation."""
+    from pathlib import Path
+
+    home = str(Path.home())
+    absolute = f"{home}/.claude/settings.json"
+    cmd = f"grep foo {absolute}"
+    leaves = parse_command(cmd)
+    assert leaves, f"Expected at least one leaf, got {leaves!r}"
+    grep_leaf = next(lf for lf in leaves if lf.verb == "grep")
+
+    ctx = {"home": home}
+    variants = to_pattern_form(grep_leaf, ctx)
+    path_specs = {v.path_spec for v in variants}
+
+    # The absolute path must still produce $HOME-prefixed path_specs.
+    assert "$HOME/**" in path_specs, (
+        f"Expected $HOME/** in path_specs for absolute path, got: {path_specs!r}"
+    )

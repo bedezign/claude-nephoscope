@@ -41,7 +41,7 @@ class TestAbsentConfigReturnsDefaults:
     def test_non_bash_tool_matching_default(self, isolated_config: Path) -> None:
         assert not isolated_config.exists()
         config = get_config()
-        assert config.non_bash_tool_matching is False
+        assert config.non_bash_tool_matching is True
 
 
 class TestTomlFieldLoading:
@@ -143,7 +143,7 @@ class TestEmptyTomlFile:
         config = get_config()
         assert config.trusted_dirs == []
         assert config.auto_register_project_paths is False
-        assert config.non_bash_tool_matching is False
+        assert config.non_bash_tool_matching is True
 
     def test_whitespace_only_toml_returns_defaults(self, isolated_config: Path) -> None:
         """A file containing only whitespace is valid TOML (empty document);

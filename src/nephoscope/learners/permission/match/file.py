@@ -73,9 +73,19 @@ def _resolve_path_spec(path_spec: str, ctx: dict[str, str]) -> str:
 
 
 def _glob_match(pattern: str, path: str) -> bool:
-    """Return True if *path* matches *pattern* (supports ``**``)."""
+    """Return True if *path* matches *pattern* (supports ``**``).
+
+    Claude Code stores absolute path patterns with a leading ``//`` double-slash
+    (e.g. ``//usr/local/lib/**``).  POSIX leaves ``//`` prefix
+    implementation-defined; ``PurePosixPath`` treats it as root ``"//"``
+    which makes ``.match()`` return ``False`` against a normal single-slash
+    path.  Normalise to a single leading slash before matching.
+    """
     if not pattern or not path:
         return False
+    # Normalise double-leading-slash that Claude Code emits for absolute patterns.
+    if pattern.startswith("//"):
+        pattern = pattern[1:]
     try:
         # PurePosixPath.match supports ** in Python 3.12+.
         if PurePosixPath(path).match(pattern):

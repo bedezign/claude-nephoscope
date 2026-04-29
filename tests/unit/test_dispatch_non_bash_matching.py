@@ -106,7 +106,7 @@ def _db_path_from(conn: sqlite3.Connection) -> Path:
 
 
 class TestNonBashMatchingFlagOff:
-    """When non_bash_tool_matching=false (or absent), file tools return NoOpinion."""
+    """When non_bash_tool_matching=false, file tools return NoOpinion."""
 
     def test_write_returns_noop_flag_off(self, tmp_db, tmp_path, monkeypatch):
         cfg = _write_config(tmp_path, non_bash_tool_matching=False)
@@ -140,10 +140,10 @@ class TestNonBashMatchingFlagOff:
 
         assert v == Verdict.NoOpinion
 
-    def test_absent_config_file_returns_noop(self, tmp_db, tmp_path, monkeypatch):
-        """No config file means defaults apply — non_bash_tool_matching=false."""
-        absent = tmp_path / "does_not_exist.toml"
-        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(absent))
+    def test_explicit_false_config_returns_noop(self, tmp_db, tmp_path, monkeypatch):
+        """Explicit non_bash_tool_matching=false config returns NoOpinion for file tools."""
+        cfg = _write_config(tmp_path, non_bash_tool_matching=False)
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(cfg))
         monkeypatch.delenv("HOOK_FULL_MATCH", raising=False)
 
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec=None)

@@ -24,7 +24,7 @@ from pathlib import Path
 class NephoscopeConfig:
     trusted_dirs: list[str] = field(default_factory=list)
     auto_register_project_paths: bool = False
-    non_bash_tool_matching: bool = False
+    non_bash_tool_matching: bool = True
 
 
 def _coerce_trusted_dirs(value: object) -> list[str]:
@@ -76,5 +76,5 @@ def get_config() -> NephoscopeConfig:
         auto_register_project_paths=bool(
             data.get("auto_register_project_paths", False)
         ),
-        non_bash_tool_matching=bool(data.get("non_bash_tool_matching", False)),
+        non_bash_tool_matching=bool(data.get("non_bash_tool_matching", True)),
     )

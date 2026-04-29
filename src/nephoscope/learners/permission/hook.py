@@ -171,6 +171,7 @@ def _register_ask_pending(
     tool_use_id_str: str,
     session_id: int,
     leaves: list[CanonicalLeaf],
+    permission_mode: str | None = None,
 ) -> None:
     """Insert a permission_ask_pending row for the first ask-tier leaf."""
     first_ask_leaf = _first_ask_leaf(leaves)
@@ -178,8 +179,9 @@ def _register_ask_pending(
         return
     conn.execute(
         "INSERT OR IGNORE INTO permission_ask_pending"
-        " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
-        " VALUES (?, ?, ?, ?, ?, ?);",
+        " (tool_use_id, session_id, verb, subcommand, flags, asked_at,"
+        "  permission_mode)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?);",
         (
             tool_use_id_str,
             session_id,
@@ -187,6 +189,7 @@ def _register_ask_pending(
             first_ask_leaf.subcommand,
             json.dumps(sorted(first_ask_leaf.flags), separators=(",", ":")),
             _now_iso(),
+            permission_mode,
         ),
     )
 
@@ -235,6 +238,7 @@ def _emit_ask_bash(
     tool_use_id_str: str | None,
     conn: sqlite3.Connection | None,
     session_id: int | None,
+    permission_mode: str | None = None,
 ) -> None:
     """Register ask-pending bookkeeping and emit an ask response for Bash."""
     cmd = tool_input.get("command", "")
@@ -245,7 +249,9 @@ def _emit_ask_bash(
         and tool_use_id_str is not None
         and conn is not None
     ):
-        _register_ask_pending(conn, tool_use_id_str, session_id, leaves)
+        _register_ask_pending(
+            conn, tool_use_id_str, session_id, leaves, permission_mode
+        )
     _emit("ask", _ask_reason_from_leaves(leaves))
 
 
@@ -256,6 +262,7 @@ def _emit_verdict(
     tool_use_id_str: str | None,
     conn: sqlite3.Connection | None,
     session_id: int | None,
+    permission_mode: str | None = None,
 ) -> None:
     """Translate a Verdict to hook output, with side-effects for Deny/Ask."""
     if verdict == Verdict.Allow:
@@ -264,7 +271,9 @@ def _emit_verdict(
         _emit_deny(tool_name, tool_input, tool_use_id_str, conn)
     elif verdict == Verdict.Ask:
         if tool_name == "Bash" and isinstance(tool_input, dict):
-            _emit_ask_bash(tool_input, tool_use_id_str, conn, session_id)
+            _emit_ask_bash(
+                tool_input, tool_use_id_str, conn, session_id, permission_mode
+            )
         else:
             _emit("ask")
     else:  # NoOpinion
@@ -328,6 +337,7 @@ def _with_db_verdict(
     tool_input: dict[str, Any],
     tool_use_id_str: str | None,
     payload_cwd: str,
+    permission_mode: str | None = None,
 ) -> None:
     """Dispatch to the per-tool-class matcher and emit the verdict."""
     session_id_int: int | None = None
@@ -343,19 +353,27 @@ def _with_db_verdict(
         project_id_int,
         cwd=payload_cwd or None,
     )
-    _emit_verdict(verdict, tool, tool_input, tool_use_id_str, conn, session_id_int)
+    _emit_verdict(
+        verdict,
+        tool,
+        tool_input,
+        tool_use_id_str,
+        conn,
+        session_id_int,
+        permission_mode,
+    )
 
 
 def _parse_tool_fields(
     data: dict[str, Any],
-) -> tuple[str | None, dict[str, Any], str | None, str]:
-    """Extract (tool, tool_input, tool_use_id_str, payload_cwd) from a payload dict.
+) -> tuple[str | None, dict[str, Any], str | None, str, str | None]:
+    """Extract (tool, tool_input, tool_use_id_str, payload_cwd, permission_mode).
 
     Returns tool=None when the payload has no valid tool name.
     """
     tool = data.get("tool_name") or data.get("tool")
     if not isinstance(tool, str) or not tool:
-        return None, {}, None, ""
+        return None, {}, None, "", None
 
     tool_input = data.get("tool_input") or data.get("input") or {}
     if not isinstance(tool_input, dict):
@@ -367,7 +385,11 @@ def _parse_tool_fields(
     )
 
     payload_cwd: str = data.get("cwd") or ""
-    return tool, tool_input, tool_use_id_str, payload_cwd
+    permission_mode_raw = data.get("permission_mode")
+    permission_mode: str | None = (
+        permission_mode_raw if isinstance(permission_mode_raw, str) else None
+    )
+    return tool, tool_input, tool_use_id_str, payload_cwd, permission_mode
 
 
 def main() -> int:  # NOSONAR S3516 - hook entry points must always exit 0 (domain rule)
@@ -383,7 +405,9 @@ def main() -> int:  # NOSONAR S3516 - hook entry points must always exit 0 (doma
         _emit(None)
         return 0
 
-    tool, tool_input, tool_use_id_str, payload_cwd = _parse_tool_fields(data)
+    tool, tool_input, tool_use_id_str, payload_cwd, permission_mode = (
+        _parse_tool_fields(data)
+    )
     if tool is None:
         _emit(None)
         return 0
@@ -403,7 +427,9 @@ def main() -> int:  # NOSONAR S3516 - hook entry points must always exit 0 (doma
     # With DB: dispatch to per-tool-class matcher.
     conn = _connect(db)
     try:
-        _with_db_verdict(conn, tool, tool_input, tool_use_id_str, payload_cwd)
+        _with_db_verdict(
+            conn, tool, tool_input, tool_use_id_str, payload_cwd, permission_mode
+        )
     finally:
         conn.close()
     return 0

@@ -442,3 +442,17 @@
   path_spec: "$TRUSTED_DIR/**"
   decision: approved
   reason: "rm -f within a trusted directory"
+
+# git and gh: wildcard-flags approval. Claude Code's LLM layer gates risky
+# operations (force-push, reset --hard, branch -D) at the reasoning layer;
+# the permission hook is a secondary gate that should not block routine git
+# and gh commands used in every development workflow.
+- verb: git
+  flags: "*"
+  decision: approved
+  reason: "git — all subcommands/flags; LLM layer gates risky operations (force-push, reset --hard)"
+
+- verb: gh
+  flags: "*"
+  decision: approved
+  reason: "gh — GitHub CLI; all subcommands/flags; LLM layer gates destructive operations"

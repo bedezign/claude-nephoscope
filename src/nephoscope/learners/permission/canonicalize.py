@@ -190,6 +190,19 @@ CONTENT_VERBS: frozenset[str] = frozenset(
 # "2>&1" has no file target; "> /dev/null" and ">> /dev/null" are harmless.
 _NOISE_REDIR_TARGETS: frozenset[str] = frozenset({"/dev/null"})
 
+
+def _expand_tilde(s: str) -> str:
+    """Expand a bare ``~`` at the start of a path string to the user's home directory.
+
+    Only bare ``~`` (``~/...`` or exactly ``~``) is expanded — ``~username``
+    forms are left unchanged because resolving other users' home directories is
+    out of scope and could produce incorrect matches.
+    """
+    if s == "~" or s.startswith("~/"):
+        return str(Path.home()) + s[1:]
+    return s
+
+
 # Mapping from ctx dict key to the $VAR sentinel used in rule_shapes.
 _CTX_VAR_NAMES: dict[str, str] = {
     "project_root": "$PROJECT_ROOT",
@@ -853,7 +866,7 @@ def _process_command(
     if not words:
         return
 
-    verb = _word_literal(words[0])
+    verb = _expand_tilde(_word_literal(words[0]))
     if not verb:
         return
 
@@ -1048,7 +1061,7 @@ def _collect_positional_paths(words: Iterable[bashlex.ast.node]) -> tuple[str, .
             or literal.startswith(_SUBSTITUTION_PREFIXES)
         ):
             continue
-        out.append(literal)
+        out.append(_expand_tilde(literal))
     return tuple(out)
 
 

@@ -41,12 +41,42 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
+def reset_mirror_hash(conn: sqlite3.Connection) -> None:
+    """Recompute and store the current on-disk hash in global_mirror.
+
+    Reads settings_json_path from global_mirror, hashes the permissions slice
+    of that file, and writes the result back to settings_json_sha256.  This
+    clears a stale stored hash so the next reconcile passes the hash-check gate
+    inside the atomic writer.
+
+    No-op when settings_json_path is NULL or the file does not exist.
+    """
+    row = conn.execute(_SETTINGS_JSON_PATH_QUERY).fetchone()
+    if row is None or row[0] is None:
+        return
+    path = Path(row[0]).expanduser()
+    if not path.exists():
+        return
+    new_hash = settings_permissions_hash(path.read_bytes())
+    conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
+        (new_hash,),
+    )
+
+
 def reconcile_cmd(
     db_path: str | Path,
     target_path: str | Path,
     mode: str = "interactive",
+    *,
+    force_rehash: bool = False,
 ) -> int:
     """Run reconcile and print a summary.
+
+    When *force_rehash* is True, recompute global_mirror.settings_json_sha256
+    from the on-disk file before reconciling.  Use this to recover from a
+    MirrorHashMismatch caused by direct edits to settings.json outside of
+    nephoscope (e.g. via a text editor).
 
     Returns 0 on success, 1 on ReconcileError.
     """
@@ -60,6 +90,8 @@ def reconcile_cmd(
 
     conn = _connect(db_path)
     try:
+        if force_rehash:
+            reset_mirror_hash(conn)
         report: ReconcileReport = reconcile(conn, Path(target_path), mode=mode)
     except ReconcileError as exc:
         print(f"reconcile error: {exc}", file=sys.stderr)
@@ -373,6 +405,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "  adopt             trust the file on the first sync only"
         ),
     )
+    r.add_argument(
+        "--force-rehash",
+        action="store_true",
+        default=False,
+        dest="force_rehash",
+        help=(
+            "Recompute the stored hash from the current settings file before\n"
+            "reconciling. Use this to recover from a hash mismatch caused by\n"
+            "editing settings.json directly outside of nephoscope."
+        ),
+    )
 
     ms = sub.add_parser(
         "mirror-status",
@@ -457,7 +500,12 @@ def _dispatch_reconcile(args: argparse.Namespace) -> int:
             )
             return 1
         args.target_path = row[0]
-    return reconcile_cmd(args.db, args.target_path, mode=args.mode)
+    return reconcile_cmd(
+        args.db,
+        args.target_path,
+        mode=args.mode,
+        force_rehash=args.force_rehash,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

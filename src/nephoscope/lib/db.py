@@ -1,8 +1,9 @@
 """Database helpers for the observations module.
 
-Single flat schema.sql, no schema versioning, no migration code. Helpers for
-the permission tables (rule_shapes, permissions) and candidate tracking
-(permission_candidates, permission_candidate_sessions).
+Versioned schema via PRAGMA user_version. Fresh DBs bootstrap from schema.sql
+(which sets user_version = 1). Older DBs are upgraded by _apply_migrations().
+Helpers for the permission tables (rule_shapes, permissions) and candidate
+tracking (permission_candidates, permission_candidate_sessions).
 """
 
 from __future__ import annotations
@@ -16,6 +17,56 @@ from typing import Any
 from nephoscope.lib.paths import canonicalize, observations_db_path
 
 MAX_STR = 500
+
+# Numbered migrations applied by _apply_migrations().  Each entry is
+# (target_version, sql).  Version 1 is the baseline established by schema.sql.
+_MIGRATIONS: list[tuple[int, str]] = [
+    (
+        2,
+        # Add audit-trail columns to permission_ask_pending.
+        # permission_mode: carried from the PreToolUse payload.
+        # resolved_at / outcome: set by the recorder PostToolUse handler.
+        "ALTER TABLE permission_ask_pending ADD COLUMN permission_mode TEXT;\n"
+        "ALTER TABLE permission_ask_pending ADD COLUMN resolved_at TEXT;\n"
+        "ALTER TABLE permission_ask_pending ADD COLUMN outcome TEXT"
+        "  CHECK (outcome IN ('approved', 'denied'));",
+    ),
+]
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Advance the schema to the latest version by running pending migrations.
+
+    Reads PRAGMA user_version and applies every entry in _MIGRATIONS whose
+    target version is greater than the current version, in ascending order.
+    Each migration runs in its own transaction; user_version is updated inside
+    the same transaction so a crash mid-migration leaves the DB in a consistent
+    state.
+
+    Version-0 DBs (pre-migration-runner installs) are stamped to 1 (the
+    old _ensure_rule_shapes_context shim already applied the context column)
+    and then advanced to v2 by the v1→v2 migration in _MIGRATIONS.
+    """
+    current: int = conn.execute("PRAGMA user_version;").fetchone()[0]
+    if current == 0:
+        # Old install stamped by the shim.  Baseline is v1; no delta SQL needed.
+        conn.execute("PRAGMA user_version = 1;")
+        current = 1
+
+    for target_version, sql in sorted(_MIGRATIONS):
+        if target_version <= current:
+            continue
+        # executescript() issues an implicit COMMIT before running, so we
+        # cannot wrap it in a BEGIN/COMMIT pair via conn.execute().  Instead,
+        # prepend the transaction control directly into the script string so
+        # everything runs inside a single atomic executescript() call.
+        script = f"BEGIN EXCLUSIVE;\n{sql}\nPRAGMA user_version = {target_version};\nCOMMIT;\n"
+        try:
+            conn.executescript(script)
+        except Exception:
+            conn.executescript("ROLLBACK;")
+            raise
+        current = target_version
 
 
 def _db_path() -> Path:
@@ -44,51 +95,16 @@ def _truncate(value: Any) -> Any:
     return value
 
 
-def _ensure_rule_shapes_context(conn: sqlite3.Connection) -> None:
-    """Idempotent migration: add rule_shapes.context column and update the unique index.
-
-    Fresh DBs created from the current schema.sql already have the column and
-    the new index.  Existing DBs from pre-Phase-2 installs do not.  Running
-    this on either kind is safe:
-
-    - ``ALTER TABLE ... ADD COLUMN`` raises ``OperationalError`` when the
-      column already exists — caught and ignored.
-    - ``DROP INDEX IF EXISTS`` is a no-op when the index is absent.
-    - ``CREATE UNIQUE INDEX`` raises ``OperationalError`` when the index
-      already exists — caught and ignored.
-    """
-    try:
-        conn.execute(
-            "ALTER TABLE rule_shapes ADD COLUMN context TEXT NOT NULL DEFAULT 'any'"
-        )
-    except sqlite3.OperationalError:
-        pass  # column already exists — no-op
-
-    conn.execute("BEGIN EXCLUSIVE")
-    try:
-        conn.execute("DROP INDEX IF EXISTS idx_rule_shapes_unique")
-        conn.execute(
-            "CREATE UNIQUE INDEX idx_rule_shapes_unique"
-            " ON rule_shapes(verb, IFNULL(subcommand, ''), flags,"
-            " IFNULL(path_spec, ''), context)"
-        )
-        conn.execute("COMMIT")
-    except sqlite3.OperationalError as exc:
-        conn.execute("ROLLBACK")
-        if "already exists" not in str(exc):
-            raise
-
-
 def _open() -> sqlite3.Connection:
     """Open the observations DB with WAL mode enabled.
 
     If the DB file is empty, runs the schema.sql to bootstrap tables and views.
     Raises RuntimeError if schema.sql is missing when needed.
 
-    After loading or re-using the schema, runs :func:`_ensure_rule_shapes_context`
-    to add the ``context`` column and update the unique index on
-    ``rule_shapes`` when upgrading a pre-Phase-2 DB.  The call is
-    idempotent — sub-millisecond when the column already exists.
+    After loading or re-using the schema, runs :func:`_apply_migrations` to
+    advance the DB to the latest schema version.  Fresh DBs start at
+    user_version 2 (set by schema.sql).  Existing v0 installs are stamped
+    to 1 then advanced to 2 by the v1→v2 migration.
     """
     db_path = _db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,8 +121,7 @@ def _open() -> sqlite3.Connection:
         sql = schema_path.read_text(encoding="utf-8")
         conn.executescript(sql)
 
-    # Idempotent Phase-2 migration: rule_shapes.context + updated unique index.
-    _ensure_rule_shapes_context(conn)
+    _apply_migrations(conn)
 
     return conn
 

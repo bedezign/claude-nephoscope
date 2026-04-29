@@ -29,6 +29,7 @@ import pytest
 # Imports under test
 # ---------------------------------------------------------------------------
 
+from nephoscope.config import get_config
 from nephoscope.learners.permission.match import Verdict, dispatch
 from nephoscope.learners.permission.match._types import Verdict as VerdictDirect
 from nephoscope.learners.permission.match.bash import match as bash_match
@@ -417,7 +418,19 @@ class TestOrchestrationMatcher:
 
 
 class TestDispatchFullMatchOff:
-    """With HOOK_FULL_MATCH unset/off, non-Bash tools → NoOpinion."""
+    """With HOOK_FULL_MATCH unset/off and non_bash_tool_matching explicitly false, non-Bash tools → NoOpinion."""
+
+    @pytest.fixture(autouse=True)
+    def _config_defaults(self, monkeypatch, tmp_path):
+        """Point NEPHOSCOPE_CONFIG at a config file with non_bash_tool_matching=false
+        so this class exercises the explicitly-off code path regardless of the
+        dataclass default."""
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("non_bash_tool_matching = false\n")
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(cfg))
+        get_config.cache_clear()
+        yield
+        get_config.cache_clear()
 
     def test_bash_still_runs_full_match(self, tmp_db, monkeypatch):
         monkeypatch.delenv("HOOK_FULL_MATCH", raising=False)

@@ -18,7 +18,7 @@ Installing the plugin registers four hooks, materialises a SQLite database in th
 ## Architecture at a glance
 
 - **Single source of truth: the DB.** The observations database owns every permission rule as a structured row. `settings.json` files are mirrors, regenerated eagerly on every DB write.
-- **Single flat schema.** `lib/schema.sql` holds every `CREATE TABLE` / `CREATE VIEW`. No migration system, no `vN.sql` sequence, no `PRAGMA user_version`. Schema changes edit that file and rebuild against it.
+- **Single flat schema.** `lib/schema.sql` holds every `CREATE TABLE` / `CREATE VIEW` and sets `PRAGMA user_version`. Additive changes (new columns) are also applied to live DBs via `_MIGRATIONS` in `lib/db.py`; the schema file remains the authoritative definition for fresh installs.
 - **Rule shapes carry patterns.** `rule_shapes` supports literal and pattern forms on every axis: `verb` may be a `$VAR/...` prefix or `"*"` (matches any verb), `flags` may be `"*"` (wildcard), `path_spec` may be a `$HOME` / `$CWD` / `$PROJECT_ROOT` glob or basename glob (`$VAR/**/<filename>`), and `context` may be `"any"`, `"toplevel"`, or `"substitution"` to scope a rule to where a command appears in the shell tree.
 - **Three-tier scope on one table.** `permissions(rule_shape_id, session_id?, project_id?, decision, source, reason, decided_at)` — at most one of `session_id` / `project_id` set; both NULL = global. Match priority: session → project → global.
 - **Tool-class-aware matching.** Bash, file tools (Read/Edit/Write/MultiEdit/NotebookEdit), flat tools (Grep/Glob/WebSearch), MCP (`mcp__ns__tool`), and orchestration tools each dispatch to their own matcher under `src/nephoscope/learners/permission/match/`.

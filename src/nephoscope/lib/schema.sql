@@ -109,13 +109,18 @@ CREATE INDEX idx_permissions_session ON permissions(session_id) WHERE session_id
 CREATE INDEX idx_permissions_project ON permissions(project_id) WHERE project_id IS NOT NULL;
 
 -- Transient hook→recorder correlation. Shape fields inlined.
+-- permission_mode: value from the PreToolUse payload (default/auto/acceptEdits/…).
+-- resolved_at/outcome: set by the recorder PostToolUse handler when the tool ran.
 CREATE TABLE permission_ask_pending (
-  tool_use_id TEXT    PRIMARY KEY,
-  session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  verb        TEXT    NOT NULL,
-  subcommand  TEXT,
-  flags       TEXT    NOT NULL,
-  asked_at    TEXT    NOT NULL
+  tool_use_id     TEXT    PRIMARY KEY,
+  session_id      INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  verb            TEXT    NOT NULL,
+  subcommand      TEXT,
+  flags           TEXT    NOT NULL,
+  asked_at        TEXT    NOT NULL,
+  permission_mode TEXT,
+  resolved_at     TEXT,
+  outcome         TEXT    CHECK (outcome IN ('approved', 'denied'))
 );
 
 -- Learner accumulation + observation ledger (shape fields inlined — no separate
@@ -204,3 +209,5 @@ INSERT OR IGNORE INTO permission_modes (name) VALUES
   ('default'), ('acceptEdits'), ('bypassPermissions'), ('plan'), ('auto');
 INSERT OR IGNORE INTO call_statuses (name) VALUES
   ('pending'), ('ok'), ('err'), ('denied'), ('orphan');
+
+PRAGMA user_version = 2;

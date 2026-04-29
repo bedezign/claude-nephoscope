@@ -210,6 +210,28 @@ def _handle_pre(
         )
 
 
+def _resolve_ask_pending(
+    conn: sqlite3.Connection,
+    tool_use_id: str,
+    now: str,
+) -> None:
+    """Mark a permission_ask_pending row as approved when its tool ran.
+
+    PostToolUse fires only when the tool actually executed.  In ``default``
+    mode this means the user explicitly approved the prompt; in ``auto`` /
+    ``acceptEdits`` / ``bypassPermissions`` modes Claude Code may have
+    auto-approved it.  Callers can use the stored ``permission_mode`` to
+    distinguish these cases.  Rows that are already resolved
+    (``resolved_at IS NOT NULL``) are left unchanged.
+    """
+    conn.execute(
+        "UPDATE permission_ask_pending"
+        " SET outcome = 'approved', resolved_at = ?"
+        " WHERE tool_use_id = ? AND resolved_at IS NULL;",
+        (now, tool_use_id),
+    )
+
+
 def _handle_post(
     conn: sqlite3.Connection,
     data: dict[str, Any],
@@ -276,6 +298,8 @@ def _handle_post(
     if tool_response and tool_call_id > 0:
         response_blob = _safe_minify(tool_response)[:RESPONSE_MAX]
         write_extra(conn, tool_call_id, "response", response_blob)
+
+    _resolve_ask_pending(conn, tool_use_id, now)
 
 
 def _handle(phase: str, data: dict[str, Any]) -> None:

@@ -7,8 +7,8 @@ regardless of whether the package has been ``pip install -e``'d. Anchored to
 ``__file__`` so tests always target the real code tree.
 
 Provides a ``tmp_db`` fixture that applies ``nephoscope/lib/schema.sql`` to an
-isolated SQLite database. No migration system — schema.sql is the single
-source of truth.
+isolated SQLite database.  Fresh DBs start at the current schema version;
+migration tests that need an older schema shape build their own DB directly.
 """
 
 from __future__ import annotations

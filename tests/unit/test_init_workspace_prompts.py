@@ -428,9 +428,16 @@ class TestMainSeedsGlobalMirrorSingleton:
     def fresh_db_no_singleton(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> Iterator[sqlite3.Connection]:
-        """Schema-only DB: tables exist but global_mirror row (id=1) absent."""
+        """Schema-only DB: tables exist but global_mirror row (id=1) absent.
+
+        Path.home() is redirected to tmp_path so that _seed_global_mirror_singleton
+        writes its settings_json_path as tmp_path/.claude/settings.json rather than
+        the live ~/.claude/settings.json.  Without this redirect, any subsequent
+        sync_global call would write to the real settings file.
+        """
         db_path = tmp_path / "fresh.db"
         monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         conn.executescript(_SCHEMA_PATH.read_text())
         conn.execute(

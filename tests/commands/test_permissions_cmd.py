@@ -257,6 +257,74 @@ def test_reconcile_hash_mismatch_returns_error(tmp_path: Path, capsys) -> None:
 
 
 # ---------------------------------------------------------------------------
+# --force-rehash: resets stored hash and allows reconcile to succeed
+# ---------------------------------------------------------------------------
+
+
+def _setup_stale_hash(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a DB with a valid settings file but a stale (wrong) stored hash."""
+    settings = tmp_path / "settings.json"
+    db_file = _make_db(tmp_path, settings)
+    settings.write_text('{"permissions":{"allow":[],"ask":[],"deny":[]}}')
+    wrong_hash = hashlib.sha256(b"wrong content").hexdigest()
+    conn = sqlite3.connect(str(db_file), isolation_level=None)
+    conn.execute(
+        "UPDATE global_mirror SET settings_json_sha256 = ? WHERE id = 1;",
+        (wrong_hash,),
+    )
+    conn.commit()
+    conn.close()
+    return db_file, settings
+
+
+def test_force_rehash_updates_stored_hash(tmp_path: Path) -> None:
+    """force_rehash=True rewrites global_mirror.settings_json_sha256 to match the file."""
+    db_file, settings = _setup_stale_hash(tmp_path)
+
+    from nephoscope.cli.permissions_cmd import reconcile_cmd
+    from nephoscope.lib.mirror.permissions_hash import settings_permissions_hash
+
+    reconcile_cmd(str(db_file), str(settings), mode="auto-json-wins", force_rehash=True)
+
+    expected_hash = settings_permissions_hash(settings.read_bytes())
+    conn = sqlite3.connect(str(db_file), isolation_level=None)
+    (stored,) = conn.execute(
+        "SELECT settings_json_sha256 FROM global_mirror WHERE id = 1;"
+    ).fetchone()
+    conn.close()
+
+    assert stored == expected_hash
+
+
+def test_force_rehash_then_reconcile_succeeds(tmp_path: Path) -> None:
+    """With a stale hash, force_rehash=True allows reconcile to complete without error."""
+    db_file, settings = _setup_stale_hash(tmp_path)
+
+    from nephoscope.cli.permissions_cmd import reconcile_cmd
+
+    rc = reconcile_cmd(
+        str(db_file), str(settings), mode="auto-json-wins", force_rehash=True
+    )
+
+    assert rc == 0
+
+
+def test_reconcile_without_force_rehash_still_errors_on_stale_hash(
+    tmp_path: Path, capsys
+) -> None:
+    """Without force_rehash, a stale stored hash still causes reconcile to return 1."""
+    db_file, settings = _setup_stale_hash(tmp_path)
+
+    from nephoscope.cli.permissions_cmd import reconcile_cmd
+
+    rc = reconcile_cmd(str(db_file), str(settings), mode="auto-json-wins")
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "reconcile error" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # _hash_status: malformed / empty file returns "mismatch" (not a crash)
 # ---------------------------------------------------------------------------
 
