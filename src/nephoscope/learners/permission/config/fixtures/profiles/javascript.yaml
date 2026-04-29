@@ -1,0 +1,6 @@
+# JavaScript/Node.js runtimes and package manager run commands.
+- {verb: node,  category: script_runner}
+- {verb: deno,  category: script_runner}
+- {verb: npm,   category: task_runner, second_word: run}
+- {verb: pnpm,  category: task_runner, second_word: run}
+- {verb: yarn,  category: task_runner, second_word: run}

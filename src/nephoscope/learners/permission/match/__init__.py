@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+from pathlib import Path
 from typing import Any
 
 from nephoscope.config import get_config  # type: ignore[import-untyped]
@@ -79,9 +80,10 @@ def _build_ctx(
     """Build path-substitution context from environment + DB."""
     ctx: dict[str, str] = {}
 
-    home = os.path.expanduser("~")
+    home = str(Path.home())
     if home:
         ctx["home"] = home
+        ctx["claude_dir"] = str(Path.home() / ".claude")
 
     effective_cwd = cwd or ""
     project_root: str | None = None

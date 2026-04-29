@@ -50,6 +50,9 @@ def _yaml_to_flags(flags: Any) -> str:
 
 
 _VALID_CONTEXTS: frozenset[str] = frozenset({"any", "toplevel", "substitution"})
+_VALID_VERB_CATEGORIES: frozenset[str] = frozenset(
+    {"task_runner", "two_word_subcommand", "content_verb", "script_runner"}
+)
 
 
 def _validate_entry(
@@ -261,3 +264,46 @@ def export_permissions(
         Path(output_path).write_text(yaml_str, encoding="utf-8")
 
     return yaml_str
+
+
+def apply_verb_types(
+    conn: sqlite3.Connection,
+    fixture_path: str | Path,
+) -> int:
+    """Load verb category entries from a YAML profile file and insert into verb_categories.
+
+    Each entry must have: verb (str), category (str). second_word (str) is optional.
+    Existing rows are left unchanged (INSERT OR IGNORE). Returns the number of rows
+    in the fixture (not the number actually inserted — duplicates are silently skipped).
+
+    Does NOT commit — the caller is responsible, matching apply_fixtures convention.
+
+    Raises ValueError on invalid entry shape or unknown category.
+    """
+    path = Path(fixture_path)
+    entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    if not isinstance(entries, list):
+        raise ValueError(
+            f"verb_types fixture must be a YAML list, got {type(entries).__name__}"
+        )
+    # Validate all entries before touching the DB to prevent partial writes on error.
+    validated: list[tuple[str, str, str | None]] = []
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"entry {idx} is not a dict: {entry!r}")
+        verb = entry.get("verb")
+        category = entry.get("category")
+        if not verb:
+            raise ValueError(f"entry {idx} missing verb")
+        if not category:
+            raise ValueError(f"entry {idx} missing category")
+        if category not in _VALID_VERB_CATEGORIES:
+            raise ValueError(f"entry {idx} invalid category {category!r}")
+        validated.append((verb, category, entry.get("second_word")))
+    for verb, category, second_word in validated:
+        conn.execute(
+            "INSERT OR IGNORE INTO verb_categories (verb, category, second_word)"
+            " VALUES (?, ?, ?);",
+            (verb, category, second_word),
+        )
+    return len(entries)

@@ -9,6 +9,9 @@ regardless of whether the package has been ``pip install -e``'d. Anchored to
 Provides a ``tmp_db`` fixture that applies ``nephoscope/lib/schema.sql`` to an
 isolated SQLite database.  Fresh DBs start at the current schema version;
 migration tests that need an older schema shape build their own DB directly.
+
+Provides a global ``patch_verb_categories`` autouse fixture so all tests that
+exercise ``parse_command`` see a full verb category set without requiring a DB.
 """
 
 from __future__ import annotations
@@ -27,7 +30,103 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 
+def _canonical_verb_categories() -> dict:
+    """Full verb category dict matching the combined profile fixtures."""
+    return {
+        "content_verb": frozenset(
+            {
+                "echo",
+                "printf",
+                "cat",
+                "head",
+                "tail",
+                "grep",
+                "egrep",
+                "fgrep",
+                "zgrep",
+                "wc",
+                "sort",
+                "uniq",
+                "tr",
+                "cut",
+                "tac",
+                "paste",
+                "sed",
+                "awk",
+                "ls",
+                "find",
+                "ps",
+                "df",
+                "du",
+                "free",
+                "pwd",
+                "stat",
+                "file",
+                "readlink",
+                "realpath",
+                "which",
+                "type",
+                "command",
+                "whereis",
+                "basename",
+                "dirname",
+                "date",
+                "uname",
+                "uptime",
+                "whoami",
+                "hostname",
+                "id",
+                "groups",
+                "rm",
+                "mv",
+                "cp",
+                "ln",
+                "touch",
+                "mkdir",
+                "rmdir",
+                "chmod",
+                "chown",
+                "chgrp",
+                "sqlite3",
+                "cd",
+            }
+        ),
+        "script_runner": frozenset({"python3", "python", "bash", "sh", "node", "deno"}),
+        "task_runner_pairs": {
+            ("npm", "run"): None,
+            ("pnpm", "run"): None,
+            ("yarn", "run"): None,
+            ("pdm", "run"): None,
+            ("uv", "run"): None,
+            ("cargo", "run"): None,
+            ("make",): None,
+            ("just",): None,
+        },
+        "two_word_subcommand": {
+            ("vault", "kv"): None,
+            ("vault", "auth"): None,
+            ("vault", "secrets"): None,
+            ("doppler", "secrets"): None,
+        },
+    }
+
+
 _LIVE_DB = Path.home() / ".cache" / "claude" / "observability" / "observations.db"
+
+
+@pytest.fixture(autouse=True)
+def patch_verb_categories(monkeypatch):
+    """Patch _load_verb_categories globally so tests work without a live DB."""
+    from nephoscope.learners.permission.canonicalize import _load_verb_categories
+
+    cats = _canonical_verb_categories()
+    monkeypatch.setattr(
+        "nephoscope.learners.permission.canonicalize._load_verb_categories",
+        lambda: cats,
+    )
+    _load_verb_categories.cache_clear()
+    yield
+    _load_verb_categories.cache_clear()
 
 
 def pytest_configure(config):
@@ -67,3 +166,11 @@ def tmp_db(tmp_path, monkeypatch):
         yield conn
     finally:
         conn.close()
+        try:
+            from nephoscope.learners.permission.canonicalize import (
+                _load_verb_categories,
+            )
+
+            _load_verb_categories.cache_clear()
+        except Exception:
+            pass

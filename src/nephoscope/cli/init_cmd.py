@@ -59,6 +59,14 @@ _AUTO_LOAD_FIXTURES: list[str] = [
     "secret_manager_standalones.yaml",
 ]
 
+# Verb-category profiles applied automatically on first install.
+# Each path is relative to _FIXTURES_DIR/profiles/.
+# Other profiles (python, javascript, task-runners, secrets-management) are opt-in.
+_AUTO_LOAD_VERB_PROFILES: list[str] = [
+    "core.yaml",
+    "shell-scripting.yaml",
+]
+
 
 def _resolve_target(cli_path: str | None) -> Path:
     """Return the DB path honouring the CLI override first, then env/defaults."""
@@ -347,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     _seed_global_mirror_singleton(conn)
 
     if not already_existed:
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.seed import apply_fixtures, apply_verb_types
 
         for fixture_name in _AUTO_LOAD_FIXTURES:
             fixture_path = _FIXTURES_DIR / fixture_name
@@ -358,6 +366,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"nephoscope-init: warning — fixture load failed ({fixture_name}): {exc}",
                     file=sys.stderr,
                 )
+
+        for profile_name in _AUTO_LOAD_VERB_PROFILES:
+            profile_path = _FIXTURES_DIR / "profiles" / profile_name
+            try:
+                apply_verb_types(conn, profile_path)
+            except Exception as exc:  # noqa: BLE001 — verb-types seed must not abort init.
+                print(
+                    f"nephoscope-init: warning — verb types load failed ({profile_name}): {exc}",
+                    file=sys.stderr,
+                )
+
+        conn.commit()
 
     conn.close()
 

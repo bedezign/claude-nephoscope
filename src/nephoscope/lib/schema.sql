@@ -41,6 +41,22 @@ CREATE TABLE file_paths       (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT U
 CREATE TABLE permission_modes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 CREATE TABLE call_statuses    (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 
+-- Verb category table — controls canonicalization shape in parse_command.
+-- category: 'task_runner' | 'two_word_subcommand' | 'content_verb' | 'script_runner'
+-- second_word: for task_runner (e.g. verb=uv, second_word=run) and
+--              two_word_subcommand (e.g. verb=vault, second_word=kv); NULL otherwise.
+CREATE TABLE verb_categories (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  verb        TEXT    NOT NULL,
+  category    TEXT    NOT NULL CHECK (category IN (
+                'task_runner', 'two_word_subcommand', 'content_verb', 'script_runner'
+              )),
+  second_word TEXT
+);
+CREATE UNIQUE INDEX idx_verb_categories_unique
+  ON verb_categories(verb, category, IFNULL(second_word, ''));
+CREATE INDEX idx_verb_categories_verb ON verb_categories(verb);
+
 -- Observations.
 CREATE TABLE tool_calls (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -136,6 +136,20 @@ class TestGlobMatch:
         # The directory path (trailing slash dropped by PurePosixPath) must match.
         assert _glob_match("//home/steve/.claude/**", "/home/steve/.claude/") is True
 
+    def test_double_slash_exact_match_no_glob(self):
+        # A double-slash path_spec with no wildcard must match the exact path.
+        assert (
+            _glob_match("//home/steve/.claude/foo.md", "/home/steve/.claude/foo.md")
+            is True
+        )
+
+    def test_double_slash_exact_match_does_not_match_different_file(self):
+        # Exact path_spec must not match a sibling file.
+        assert (
+            _glob_match("//home/steve/.claude/foo.md", "/home/steve/.claude/bar.md")
+            is False
+        )
+
 
 # ---------------------------------------------------------------------------
 # _path_spec_matches — no file_path with glob pattern
@@ -174,6 +188,29 @@ class TestPathSpecMatches:
                 ctx={},
             )
             is True
+        )
+
+    def test_double_slash_exact_no_glob_matches_target_file(self):
+        # path_spec is an exact path (no wildcard) with double-slash prefix;
+        # must match only the corresponding single-slash real path.
+        assert (
+            _path_spec_matches(
+                "//home/steve/.claude/foo.md",
+                "/home/steve/.claude/foo.md",
+                ctx={},
+            )
+            is True
+        )
+
+    def test_double_slash_exact_no_glob_does_not_match_nested_path(self):
+        # An exact path_spec must NOT match a sub-path beneath that location.
+        assert (
+            _path_spec_matches(
+                "//home/steve/.claude/foo.md",
+                "/home/steve/.claude/rules/something.md",
+                ctx={},
+            )
+            is False
         )
 
 

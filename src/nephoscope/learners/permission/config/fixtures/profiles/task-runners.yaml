@@ -1,0 +1,6 @@
+# Build and task runner tools.
+- {verb: make,  category: task_runner}
+- {verb: just,  category: task_runner}
+- {verb: uv,    category: task_runner, second_word: run}
+- {verb: pdm,   category: task_runner, second_word: run}
+- {verb: cargo, category: task_runner, second_word: run}

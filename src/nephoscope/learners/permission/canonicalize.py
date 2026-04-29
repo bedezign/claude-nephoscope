@@ -34,16 +34,20 @@ a DB lookup or for the per-axis review prompts in ``review.sh``.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
+import sqlite3 as _sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TypedDict
 
 import bashlex
 import bashlex.ast
 import bashlex.errors
+
+from nephoscope.lib.paths import observations_db_path
 
 
 # Purely-numeric flag tokens (single dash, one or more digits) collapse to the
@@ -71,120 +75,58 @@ _SHORT_FLAG_CLUSTER_RE = re.compile(r"^-[A-Za-z]{2,}$")
 _SUBSTITUTION_PREFIXES: tuple[str, ...] = ("<(", ">(", "$(")
 
 
-TASK_RUNNERS: frozenset[tuple[str, ...]] = frozenset(
-    {
-        ("npm", "run"),
-        ("pnpm", "run"),
-        ("yarn", "run"),
-        ("pdm", "run"),
-        ("uv", "run"),
-        ("cargo", "run"),
-        ("make",),
-        ("just",),
-    }
-)
+class _VerbCategories(TypedDict):
+    content_verb: set[str]
+    script_runner: set[str]
+    task_runner_pairs: dict[tuple[str, ...], None]
+    two_word_subcommand: dict[tuple[str, str], None]
 
 
-# Verbs whose CLI groups commands as ``<verb> <group> <action>`` rather than
-# ``<verb> <subcommand>``. For these, the second token is a subgroup (not a
-# final subcommand) and ``_resolve_subcommand`` should join ``"<group> <action>"``
-# into a single space-separated subcommand. The third token must be a real
-# positional (not a flag, not a substitution) — otherwise we fall through to
-# the default single-word resolution and the leaf gets ``subcommand=<group>``.
-#
-# Reserved for genuine multi-word CLIs only — adding entries here changes how
-# every shape with that verb is canonicalized, so seed rules and stored
-# candidates have to agree on the form. ``aws``, ``gcloud``, ``kubectl``, ``gh``
-# are likely future entries but are NOT added here without the matching seed
-# rules to back them.
-TWO_WORD_SUBCOMMAND_VERBS: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("vault", "kv"),
-        ("vault", "auth"),
-        ("vault", "secrets"),
-        ("doppler", "secrets"),
+def _empty_verb_categories() -> _VerbCategories:
+    return {
+        "content_verb": set(),
+        "script_runner": set(),
+        "task_runner_pairs": {},
+        "two_word_subcommand": {},
     }
-)
 
-# Verbs whose first positional argument is content (a path, pattern, message,
-# file, or script body) rather than a subcommand. For these, ``_resolve_sub-
-# command`` returns ``(None, 1)`` so repeated invocations with different
-# content collapse into a single canonical shape. Inverse of TASK_RUNNERS:
-# task runners promote a positional to subcommand; content verbs discard it.
-#
-# Destructive potential (``sed -i``, ``find -delete``, ``awk -i inplace``)
-# lives in flags, which are still captured — the deny-list can target those
-# flag combinations independently.
-CONTENT_VERBS: frozenset[str] = frozenset(
-    {
-        # Display / print
-        "echo",
-        "printf",
-        # Read & filter text
-        "cat",
-        "head",
-        "tail",
-        "grep",
-        "egrep",
-        "fgrep",
-        "zgrep",
-        "wc",
-        "sort",
-        "uniq",
-        "tr",
-        "cut",
-        "tac",
-        "paste",
-        # Script-arg text processors
-        "sed",
-        "awk",
-        # List / query filesystem & processes
-        "ls",
-        "find",
-        "ps",
-        "df",
-        "du",
-        "free",
-        "pwd",
-        # Inspect files
-        "stat",
-        "file",
-        "readlink",
-        "realpath",
-        # Resolve names
-        "which",
-        "type",
-        "command",
-        "whereis",
-        "basename",
-        "dirname",
-        # System info
-        "date",
-        "uname",
-        "uptime",
-        "whoami",
-        "hostname",
-        "id",
-        "groups",
-        # File ops — first positional is a path, not a subcommand. Adding these
-        # collapses ``rm /a`` / ``rm /b`` / ``rm /c`` into one shape keyed on
-        # (rm, None, flags) and lets the scope classifier see all paths.
-        "rm",
-        "mv",
-        "cp",
-        "ln",
-        "touch",
-        "mkdir",
-        "rmdir",
-        "chmod",
-        "chown",
-        "chgrp",
-        # Interactive DB clients — first positional is a DB file (path), not a subcommand.
-        "sqlite3",
-        # Navigation — first positional is a path, not a subcommand.
-        "cd",
-    }
-)
+
+@functools.lru_cache(maxsize=None)
+def _load_verb_categories() -> _VerbCategories:
+    """Load verb category data from the observations DB.
+
+    Returns a dict with four keys:
+      'content_verb'       : set[str]                    — single-word verbs
+      'script_runner'      : set[str]                    — single-word verbs
+      'task_runner_pairs'  : dict[tuple[str, ...], None] — keys (verb,) or (verb, second_word)
+      'two_word_subcommand': dict[tuple[str,str], None]  — keys (verb, second_word)
+
+    Returns empty collections when the DB is absent or the table does not exist,
+    so parse_command degrades gracefully rather than raising.
+    """
+    db = observations_db_path()
+    if not db.exists():
+        return _empty_verb_categories()
+    result = _empty_verb_categories()
+    try:
+        with _sqlite3.connect(str(db)) as conn:
+            rows = conn.execute(
+                "SELECT verb, category, second_word FROM verb_categories;"
+            ).fetchall()
+    except _sqlite3.OperationalError:
+        return result
+    for verb, category, second_word in rows:
+        if category == "content_verb":
+            result["content_verb"].add(verb)
+        elif category == "script_runner":
+            result["script_runner"].add(verb)
+        elif category == "task_runner":
+            key = (verb, second_word) if second_word else (verb,)
+            result["task_runner_pairs"][key] = None
+        elif category == "two_word_subcommand" and second_word:
+            result["two_word_subcommand"][(verb, second_word)] = None
+    return result
+
 
 # Redirections we consider uninteresting for deny-list evaluation.
 # "2>&1" has no file target; "> /dev/null" and ">> /dev/null" are harmless.
@@ -207,6 +149,7 @@ def _expand_tilde(s: str) -> str:
 _CTX_VAR_NAMES: dict[str, str] = {
     "project_root": "$PROJECT_ROOT",
     "cwd": "$CWD",
+    "claude_dir": "$CLAUDE_DIR",
     "home": "$HOME",
 }
 
@@ -214,7 +157,8 @@ _CTX_VAR_NAMES: dict[str, str] = {
 _CTX_PRIORITY: dict[str, int] = {
     "project_root": 0,
     "cwd": 1,
-    "home": 2,
+    "claude_dir": 2,
+    "home": 3,
 }
 
 
@@ -918,14 +862,15 @@ def _resolve_task_runner_subcommand(
     verb: str, words: list[bashlex.ast.node]
 ) -> tuple[str | None, int] | None:
     """Return (subcommand, positional_start) for task-runner verbs, or None if not a runner."""
+    task_runner_pairs = _load_verb_categories()["task_runner_pairs"]
     if len(words) >= 2:
         second = _word_literal(words[1])
-        if (verb, second) in TASK_RUNNERS and len(words) >= 3:
+        if (verb, second) in task_runner_pairs and len(words) >= 3:
             target = _word_literal(words[2])
             if _is_positional_subcommand(target):
                 return target, 3
             return None, 2
-    if (verb,) in TASK_RUNNERS and len(words) >= 2:
+    if (verb,) in task_runner_pairs and len(words) >= 2:
         target = _word_literal(words[1])
         if _is_positional_subcommand(target):
             return target, 2
@@ -938,15 +883,17 @@ def _resolve_two_word_subcommand(
 ) -> tuple[str, int] | None:
     """Return ``("<group> <action>", 3)`` for two-word subcommand verbs.
 
-    Returns ``None`` when the verb/group pair is not in
-    :data:`TWO_WORD_SUBCOMMAND_VERBS` or when the third token is not a real
-    positional (flag, substitution, or absent). The caller then falls through
-    to single-word subcommand resolution.
+    Returns ``None`` when the verb/group pair is not in the two_word_subcommand
+    DB category or when the third token is not a real positional (flag,
+    substitution, or absent). The caller then falls through to single-word
+    subcommand resolution.
     """
     if len(words) < 3:
         return None
     second = _word_literal(words[1])
-    if not second or (verb, second) not in TWO_WORD_SUBCOMMAND_VERBS:
+    if not second:
+        return None
+    if (verb, second) not in _load_verb_categories()["two_word_subcommand"]:
         return None
     third = _word_literal(words[2])
     if not _is_positional_subcommand(third):
@@ -964,15 +911,16 @@ def _resolve_subcommand(
     collection should begin (i.e. past the verb and any consumed runner
     prefix / subcommand slot).
     """
-    # Task-runner check: ("verb", "second_word") or ("verb",) in TASK_RUNNERS.
+    # Task-runner check: ("verb", "second_word") or ("verb",) in task_runner_pairs.
     runner_result = _resolve_task_runner_subcommand(verb, words)
     if runner_result is not None:
         return runner_result
 
-    # Content verbs: first positional is content (path/pattern/message/script),
-    # not a subcommand. Collapse all invocations into one shape by discarding
-    # the positional slot entirely.
-    if verb in CONTENT_VERBS:
+    # Content verbs and script runners: first positional is content
+    # (path/pattern/message/script), not a subcommand. Collapse all invocations
+    # into one shape by discarding the positional slot entirely.
+    cats = _load_verb_categories()
+    if verb in cats["content_verb"] or verb in cats["script_runner"]:
         return None, 1
 
     # Two-word subcommand verbs (vault, doppler) — group + action joined.

@@ -1,0 +1,3 @@
+# Python interpreters — positional-1 is a script path, not a subcommand.
+- {verb: python3, category: script_runner}
+- {verb: python,  category: script_runner}
