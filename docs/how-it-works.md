@@ -141,7 +141,7 @@ That file holds your asks, your candidates, and your rules. From those rules, ne
 
 The settings files are where Claude Code's built-in permission gate looks to decide whether to ask you. Nephoscope rewrites the relevant one every time you change a rule.
 
-When trusted directories are configured, nephoscope also writes a top-level `_nephoscopeAllowedTools` key into `~/.claude/settings.json`. This key holds the auto-generated `Write(<root>/**)`, `Edit(<root>/**)`, `Read(<root>/**)` entries for each trusted directory; the same entries are also appended to `permissions.allow`. The dedicated key exists so re-syncs replace rather than accumulate.
+When trusted directories are configured, nephoscope also writes a top-level `_nephoscopeAllowedTools` key into `~/.claude/settings.json`. This key holds the auto-generated `Write(<root>/**)`, `Edit(<root>/**)`, `MultiEdit(<root>/**)`, `NotebookEdit(<root>/**)`, `Read(<root>/**)` entries for each trusted directory; the same entries are also appended to `permissions.allow`. The dedicated key exists so re-syncs replace rather than accumulate.
 
 If you delete the database file, nephoscope forgets everything and starts from scratch. If you uninstall the plugin (`/plugin uninstall nephoscope@bedezign`), the hooks disappear but the settings entries remain unless you also remove them by hand.
 

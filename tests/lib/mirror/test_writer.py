@@ -1324,6 +1324,85 @@ def test_unrelated_edits_do_not_flip_hash(tmp_path, db_conn):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# _has_unresolved_token: boundary cases (false-positive guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path_spec,expected",
+    [
+        ("$HOMEUSER/**", False),      # prefix match but not a real token
+        ("$HOME/**", True),           # real token followed by /
+        ("$TRUSTED_DIR/**", True),    # real token followed by /
+        ("$TRUSTED_DIR", True),       # real token at end of string
+        ("/absolute/path", False),    # no token
+        (None, False),                # None input
+        ("", False),                  # empty string
+        ("$CWD/subdir", True),        # real token followed by /
+        ("$PROJECT_ROOT/src", True),  # real token followed by /
+        ("$HOMEUSER", False),         # non-token at end of string
+    ],
+)
+def test_has_unresolved_token_boundary(path_spec, expected):
+    """_has_unresolved_token must anchor token matches to / or end-of-string.
+
+    The key false-positive guard: $HOMEUSER/** must not match $HOME.
+    """
+    from nephoscope.lib.mirror.writer import _has_unresolved_token
+
+    assert _has_unresolved_token(path_spec) is expected
+
+
+# ---------------------------------------------------------------------------
+# Integration: $TRUSTED_DIR rows are skipped; their literal string must not
+# appear in the written settings.json allow list.
+# ---------------------------------------------------------------------------
+
+
+def test_trusted_dir_row_not_written_to_settings_json(tmp_path, db_conn):
+    """A permission row whose path_spec is '$TRUSTED_DIR/**' must be skipped by
+    _classify_permission_rows and must not appear in the written settings.json.
+
+    This is the regression guard for the _has_unresolved_token token-skip path.
+    The concrete resolved paths are injected by _generate_workspace_entries;
+    the raw template string must never reach the JSON mirror.
+    """
+    from nephoscope.lib.mirror.writer import sync_global
+
+    # Insert a rule shape whose path_spec is the $TRUSTED_DIR template.
+    shape_id = db_conn.execute(
+        "INSERT INTO rule_shapes (verb, path_spec, flags, first_seen, last_seen)"
+        " VALUES ('Write', '$TRUSTED_DIR/**', '[]', '2026-01-01Z', '2026-01-01Z');"
+    ).lastrowid
+    db_conn.execute(
+        "INSERT INTO permissions"
+        " (rule_shape_id, session_id, project_id, decision, source, decided_at)"
+        " VALUES (?, NULL, NULL, 'approved', 'seed', '2026-01-01Z');",
+        (shape_id,),
+    )
+
+    def serialize_stub(row):
+        # Simulate the serializer returning a string that includes path_spec.
+        path = row.get("path_spec") or ""
+        return f"Write({path})" if path else None
+
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize", side_effect=serialize_stub
+    ):
+        sync_global(db_conn)
+
+    target = Path(
+        db_conn.execute(
+            "SELECT settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+    )
+    content = target.read_text()
+    assert "$TRUSTED_DIR" not in content, (
+        "literal $TRUSTED_DIR must never appear in the written settings.json"
+    )
+
+
 def test_rename_failure_propagates_and_leaves_db_hash_unchanged(
     tmp_path, db_conn, monkeypatch
 ):

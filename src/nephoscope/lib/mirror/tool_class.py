@@ -83,6 +83,23 @@ _BASH_PREFIX = "Bash"
 
 
 # ---------------------------------------------------------------------------
+# Verb groups — named sets consumed by the file matcher for broad rules.
+# ---------------------------------------------------------------------------
+
+READING_VERBS: frozenset[str] = frozenset({"Read", "Glob", "Grep", "LSP"})
+WRITING_VERBS: frozenset[str] = frozenset(
+    {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+)
+FULL_ACCESS_VERBS: frozenset[str] = READING_VERBS | WRITING_VERBS
+
+VERB_GROUPS: dict[str, frozenset[str]] = {
+    "Reading": READING_VERBS,
+    "Writing": WRITING_VERBS,
+    "Full Access": FULL_ACCESS_VERBS,
+}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

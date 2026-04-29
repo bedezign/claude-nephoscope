@@ -1,8 +1,9 @@
-"""Tests for $TRUSTED_DIR placeholder in to_pattern_form."""
+"""Tests for $TRUSTED_DIR placeholder in to_pattern_form and _path_spec_matches."""
 
 from __future__ import annotations
 
 from nephoscope.learners.permission.canonicalize import parse_command, to_pattern_form
+from nephoscope.learners.permission.match.file import _path_spec_matches
 
 
 def _leaf(cmd: str):
@@ -84,3 +85,64 @@ def test_duplicate_trusted_dirs_produce_single_path_spec():
         leaf, {}, trusted_dirs=["/home/user/project", "/home/user/project"]
     )
     assert {v.path_spec for v in single} == {v.path_spec for v in duped}
+
+
+# ---------------------------------------------------------------------------
+# _path_spec_matches — $TRUSTED_DIR resolution at match time
+# ---------------------------------------------------------------------------
+
+
+class TestPathSpecMatchesTrustedDir:
+    def test_trusted_dir_glob_matches_file_under_dir(self) -> None:
+        """$TRUSTED_DIR/** matches /tmp/foo/bar.py when trusted_dirs=['/tmp/foo']."""
+        assert _path_spec_matches(
+            "$TRUSTED_DIR/**", "/tmp/foo/bar.py", {}, trusted_dirs=["/tmp/foo"]
+        )
+
+    def test_trusted_dir_glob_no_match_when_empty_trusted_dirs(self) -> None:
+        """$TRUSTED_DIR/** does NOT match when trusted_dirs=[]."""
+        assert not _path_spec_matches(
+            "$TRUSTED_DIR/**", "/tmp/foo/bar.py", {}, trusted_dirs=[]
+        )
+
+    def test_trusted_dir_glob_no_match_when_trusted_dirs_none(self) -> None:
+        """$TRUSTED_DIR/** does NOT match when trusted_dirs is None."""
+        assert not _path_spec_matches(
+            "$TRUSTED_DIR/**", "/tmp/foo/bar.py", {}, trusted_dirs=None
+        )
+
+    def test_trusted_dir_matches_any_of_multiple_dirs(self) -> None:
+        """$TRUSTED_DIR/** matches against any configured trusted dir."""
+        assert _path_spec_matches(
+            "$TRUSTED_DIR/**", "/a/x", {}, trusted_dirs=["/a", "/b"]
+        )
+        assert _path_spec_matches(
+            "$TRUSTED_DIR/**", "/b/x", {}, trusted_dirs=["/a", "/b"]
+        )
+
+    def test_non_trusted_dir_spec_ignores_trusted_dirs_param(self) -> None:
+        """A path_spec without $TRUSTED_DIR ignores the trusted_dirs parameter."""
+        assert _path_spec_matches(
+            "$HOME/**",
+            "/home/user/file.py",
+            {"home": "/home/user"},
+            trusted_dirs=["/some/other/dir"],
+        )
+
+    def test_trusted_dir_exact_file_deny_spec(self) -> None:
+        """$TRUSTED_DIR/.env exactly matches .env at the root of the trusted dir."""
+        assert _path_spec_matches(
+            "$TRUSTED_DIR/.env",
+            "/tmp/test-trusted/.env",
+            {},
+            trusted_dirs=["/tmp/test-trusted"],
+        )
+
+    def test_trusted_dir_exact_file_no_match_different_dir(self) -> None:
+        """$TRUSTED_DIR/.env does NOT match when the path is under a different dir."""
+        assert not _path_spec_matches(
+            "$TRUSTED_DIR/.env",
+            "/tmp/other/.env",
+            {},
+            trusted_dirs=["/tmp/test-trusted"],
+        )

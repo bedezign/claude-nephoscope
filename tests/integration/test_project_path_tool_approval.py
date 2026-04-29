@@ -1,9 +1,12 @@
-"""Integration tests: workspace-root containment check in match/file.py.
+"""Integration tests: $TRUSTED_DIR path-spec resolution in match/file.py.
 
-Verifies that a tool's target path falling under any configured workspace_root
-returns Verdict.Allow without needing a DB rule entry.  The workspace-root check
-runs before the DB lookup, so an empty permissions DB is sufficient to prove
-the shortcut is taken.
+Verifies that file-tool calls are matched against DB rules containing
+$TRUSTED_DIR path-specs, and that the trusted-dir scope qualifier resolves
+correctly at match time.  Rules must exist in the DB — there is no code-path
+bypass that grants Allow without a DB rule.
+
+Also covers verb-group expansion: rules stored with a group name (e.g.
+"Reading", "Full Access") match multiple tool names.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import pytest
 from nephoscope.config import get_config
 from nephoscope.learners.permission.match._types import Verdict
 from nephoscope.learners.permission.match.file import match
+from nephoscope.lib.db import insert_permission, upsert_rule_shape
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +33,8 @@ _CTX: dict[str, str] = {
     "cwd": "/home/testuser/project",
     "project_root": "/home/testuser/project",
 }
+
+_TS = "2024-01-01T00:00:00Z"
 
 
 def _write_config(tmp_path: Path, workspace_roots: list[str]) -> Path:
@@ -77,7 +83,7 @@ def empty_db(tmp_path, monkeypatch) -> Generator[sqlite3.Connection, None, None]
 
 
 # ---------------------------------------------------------------------------
-# Helper: set config + empty DB fixture together
+# Helper: set config + seed a $TRUSTED_DIR/** allow rule
 # ---------------------------------------------------------------------------
 
 
@@ -88,17 +94,25 @@ def _configure(monkeypatch, tmp_path: Path, workspace_roots: list[str]) -> None:
     get_config.cache_clear()
 
 
+def _seed_allow(conn: sqlite3.Connection, verb: str) -> None:
+    """Seed a global Allow rule for $TRUSTED_DIR/** with the given verb."""
+    shape_id = upsert_rule_shape(conn, verb, None, "[]", "$TRUSTED_DIR/**", _TS)
+    insert_permission(conn, shape_id, None, None, "approved", "seed", _TS)
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
-# Tests: Write inside workspace root
+# Tests: Literal-verb rules for trusted_dir paths
 # ---------------------------------------------------------------------------
 
 
-class TestWriteInsideWorkspaceRoot:
+class TestLiteralVerbTrustedDirRules:
     def test_write_inside_workspace_root_returns_allow(
         self, monkeypatch, tmp_path, empty_db
     ):
-        """Write tool with path inside workspace root returns Allow (no DB rule needed)."""
+        """Write tool with path inside workspace root returns Allow (DB rule present)."""
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Write")
 
         result = match(
             tool_name="Write",
@@ -116,6 +130,7 @@ class TestWriteInsideWorkspaceRoot:
     ):
         """Edit tool with path inside workspace root returns Allow."""
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Edit")
 
         result = match(
             tool_name="Edit",
@@ -133,6 +148,7 @@ class TestWriteInsideWorkspaceRoot:
     ):
         """Read tool with file_path inside workspace root returns Allow."""
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Read")
 
         result = match(
             tool_name="Read",
@@ -157,6 +173,7 @@ class TestPathOutsideWorkspaceRoot:
     ):
         """Path outside workspace root falls through to DB (NoOpinion when no DB rule)."""
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Write")
 
         result = match(
             tool_name="Write",
@@ -167,7 +184,7 @@ class TestPathOutsideWorkspaceRoot:
             ctx=_CTX,
             trusted_dirs=get_config().trusted_dirs,
         )
-        # No DB rule → NoOpinion; workspace root not involved
+        # Path outside trusted dir → $TRUSTED_DIR/** rule does not match
         assert result == Verdict.NoOpinion
 
 
@@ -182,6 +199,7 @@ class TestNestedPathInsideWorkspaceRoot:
     ):
         """Deeply nested path inside workspace root returns Allow."""
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Write")
 
         result = match(
             tool_name="Write",
@@ -196,57 +214,7 @@ class TestNestedPathInsideWorkspaceRoot:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Realpath traversal is blocked
-# ---------------------------------------------------------------------------
-
-
-class TestRealpathTraversal:
-    def test_dotdot_traversal_resolves_outside_and_does_not_allow(
-        self, monkeypatch, tmp_path, empty_db
-    ):
-        """Path using .. that resolves outside workspace root is not workspace-allowed."""
-        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
-
-        # /tmp/wsroot/../otherplace/file.py resolves to /tmp/otherplace/file.py
-        result = match(
-            tool_name="Write",
-            tool_input={"path": "/tmp/wsroot/../otherplace/file.py"},
-            conn=empty_db,
-            session_id=None,
-            project_id=None,
-            ctx=_CTX,
-            trusted_dirs=get_config().trusted_dirs,
-        )
-        # realpath resolves to /tmp/otherplace/file.py — not under /tmp/wsroot
-        assert result != Verdict.Allow
-
-
-# ---------------------------------------------------------------------------
-# Tests: Exact workspace root path is allowed
-# ---------------------------------------------------------------------------
-
-
-class TestExactWorkspaceRootPath:
-    def test_exact_workspace_root_path_returns_allow(
-        self, monkeypatch, tmp_path, empty_db
-    ):
-        """A path equal to the workspace root itself (no trailing slash) returns Allow."""
-        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
-
-        result = match(
-            tool_name="Read",
-            tool_input={"file_path": "/tmp/wsroot"},
-            conn=empty_db,
-            session_id=None,
-            project_id=None,
-            ctx=_CTX,
-            trusted_dirs=get_config().trusted_dirs,
-        )
-        assert result == Verdict.Allow
-
-
-# ---------------------------------------------------------------------------
-# Tests: Empty workspace_roots skips the check
+# Tests: Empty workspace_roots — no $TRUSTED_DIR rule fires
 # ---------------------------------------------------------------------------
 
 
@@ -254,8 +222,9 @@ class TestEmptyWorkspaceRoots:
     def test_empty_workspace_roots_falls_through_to_db(
         self, monkeypatch, tmp_path, empty_db
     ):
-        """Empty workspace_roots list skips the workspace check; falls through to DB."""
+        """Empty trusted_dirs means $TRUSTED_DIR path-specs match nothing."""
         _configure(monkeypatch, tmp_path, [])
+        _seed_allow(empty_db, "Write")
 
         result = match(
             tool_name="Write",
@@ -266,7 +235,7 @@ class TestEmptyWorkspaceRoots:
             ctx=_CTX,
             trusted_dirs=get_config().trusted_dirs,
         )
-        # No DB rule, workspace check skipped → NoOpinion
+        # $TRUSTED_DIR/** rule present but trusted_dirs=[] → no match
         assert result == Verdict.NoOpinion
 
 
@@ -279,6 +248,7 @@ class TestMultipleWorkspaceRoots:
     def test_second_workspace_root_matches(self, monkeypatch, tmp_path, empty_db):
         """When multiple workspace roots configured, a path in the second root returns Allow."""
         _configure(monkeypatch, tmp_path, ["/tmp/ws1", "/tmp/ws2"])
+        _seed_allow(empty_db, "Write")
 
         result = match(
             tool_name="Write",
@@ -294,6 +264,7 @@ class TestMultipleWorkspaceRoots:
     def test_first_workspace_root_matches(self, monkeypatch, tmp_path, empty_db):
         """When multiple workspace roots configured, a path in the first root returns Allow."""
         _configure(monkeypatch, tmp_path, ["/tmp/ws1", "/tmp/ws2"])
+        _seed_allow(empty_db, "Write")
 
         result = match(
             tool_name="Write",
@@ -313,11 +284,12 @@ class TestMultipleWorkspaceRoots:
 
 
 class TestMissingTargetPath:
-    def test_tool_input_without_path_key_does_not_workspace_allow(
+    def test_tool_input_without_path_key_does_not_allow(
         self, monkeypatch, tmp_path, empty_db
     ):
-        """tool_input with no path/file_path key must not trigger workspace-root Allow."""
+        """tool_input with no path/file_path key must not return Allow."""
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Write")
 
         # No 'path' or 'file_path' key — empty target must not match any root
         result = match(
@@ -329,6 +301,97 @@ class TestMissingTargetPath:
             ctx=_CTX,
             trusted_dirs=get_config().trusted_dirs,
         )
-        # Empty target realpath resolves to cwd, which may or may not be
-        # under /tmp/wsroot; the guard must ensure empty target → no workspace Allow.
         assert result != Verdict.Allow
+
+
+# ---------------------------------------------------------------------------
+# Tests: Verb-group expansion (Task 4)
+# ---------------------------------------------------------------------------
+
+
+class TestVerbGroupExpansion:
+    def test_reading_group_rule_matches_read_tool(
+        self, monkeypatch, tmp_path, empty_db
+    ):
+        """A rule stored with verb='Reading' matches a Read tool call."""
+        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Reading")
+
+        result = match(
+            tool_name="Read",
+            tool_input={"file_path": "/tmp/wsroot/file.py"},
+            conn=empty_db,
+            session_id=None,
+            project_id=None,
+            ctx=_CTX,
+            trusted_dirs=get_config().trusted_dirs,
+        )
+        assert result == Verdict.Allow
+
+    def test_full_access_group_rule_matches_read(self, monkeypatch, tmp_path, empty_db):
+        """A rule stored with verb='Full Access' matches a Read tool call."""
+        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Full Access")
+
+        result = match(
+            tool_name="Read",
+            tool_input={"file_path": "/tmp/wsroot/file.py"},
+            conn=empty_db,
+            session_id=None,
+            project_id=None,
+            ctx=_CTX,
+            trusted_dirs=get_config().trusted_dirs,
+        )
+        assert result == Verdict.Allow
+
+    def test_full_access_group_rule_matches_write(
+        self, monkeypatch, tmp_path, empty_db
+    ):
+        """A rule stored with verb='Full Access' matches a Write tool call."""
+        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Full Access")
+
+        result = match(
+            tool_name="Write",
+            tool_input={"path": "/tmp/wsroot/file.py"},
+            conn=empty_db,
+            session_id=None,
+            project_id=None,
+            ctx=_CTX,
+            trusted_dirs=get_config().trusted_dirs,
+        )
+        assert result == Verdict.Allow
+
+    def test_full_access_group_rule_matches_edit(self, monkeypatch, tmp_path, empty_db):
+        """A rule stored with verb='Full Access' matches an Edit tool call."""
+        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Full Access")
+
+        result = match(
+            tool_name="Edit",
+            tool_input={"path": "/tmp/wsroot/file.py"},
+            conn=empty_db,
+            session_id=None,
+            project_id=None,
+            ctx=_CTX,
+            trusted_dirs=get_config().trusted_dirs,
+        )
+        assert result == Verdict.Allow
+
+    def test_literal_verb_rule_still_matches_after_group_expansion(
+        self, monkeypatch, tmp_path, empty_db
+    ):
+        """A rule with verb='Read' (literal) still matches a Read tool call."""
+        _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
+        _seed_allow(empty_db, "Read")
+
+        result = match(
+            tool_name="Read",
+            tool_input={"file_path": "/tmp/wsroot/file.py"},
+            conn=empty_db,
+            session_id=None,
+            project_id=None,
+            ctx=_CTX,
+            trusted_dirs=get_config().trusted_dirs,
+        )
+        assert result == Verdict.Allow

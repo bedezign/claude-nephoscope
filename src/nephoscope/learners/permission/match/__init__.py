@@ -207,7 +207,7 @@ def dispatch(
 
         # additional_dirs is Bash-only by design (Bash-session extra dirs are
         # not meaningful for file-path matching).  trusted_dirs is passed
-        # through so the workspace fast-path runs from the caller's context.
+        # through for $TRUSTED_DIR path-spec resolution in match/file.py.
         return _run_tiers(
             _match,
             tool_name,

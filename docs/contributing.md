@@ -21,7 +21,7 @@ Installing the plugin registers four hooks, materialises a SQLite database in th
 - **Single flat schema.** `lib/schema.sql` holds every `CREATE TABLE` / `CREATE VIEW`. No migration system, no `vN.sql` sequence, no `PRAGMA user_version`. Schema changes edit that file and rebuild against it.
 - **Rule shapes carry patterns.** `rule_shapes` supports literal and pattern forms on every axis: `verb` may be a `$VAR/...` prefix or `"*"` (matches any verb), `flags` may be `"*"` (wildcard), `path_spec` may be a `$HOME` / `$CWD` / `$PROJECT_ROOT` glob or basename glob (`$VAR/**/<filename>`), and `context` may be `"any"`, `"toplevel"`, or `"substitution"` to scope a rule to where a command appears in the shell tree.
 - **Three-tier scope on one table.** `permissions(rule_shape_id, session_id?, project_id?, decision, source, reason, decided_at)` — at most one of `session_id` / `project_id` set; both NULL = global. Match priority: session → project → global.
-- **Tool-class-aware matching.** Bash, file tools (Read/Edit/Write/NotebookEdit), flat tools (Grep/Glob/WebSearch), MCP (`mcp__ns__tool`), and orchestration tools each dispatch to their own matcher under `src/nephoscope/learners/permission/match/`.
+- **Tool-class-aware matching.** Bash, file tools (Read/Edit/Write/MultiEdit/NotebookEdit), flat tools (Grep/Glob/WebSearch), MCP (`mcp__ns__tool`), and orchestration tools each dispatch to their own matcher under `src/nephoscope/learners/permission/match/`.
 
 ## Layout
 
@@ -74,7 +74,7 @@ nephoscope/
 
 The slice-only hash means edits to **non-permissions** parts of `settings.json` (hooks block, env, model, `permissions.defaultMode`, `permissions.additionalDirectories`) do not flip the stored hash to mismatch — only changes to the rule arrays themselves do. Malformed or non-UTF-8 content is treated as a mismatch (the writer raises `MirrorHashMismatch` with a "settings.json is malformed" message; `mirror-status` reports `mismatch`).
 
-When trusted directories are configured (global mirror only), the write flow also manages a top-level `_nephoscopeAllowedTools` key. The `_inject_permissions` entry point in `lib/mirror/writer.py` generates `Write(<root>/**)`, `Edit(<root>/**)`, `Read(<root>/**)` entries for each configured trusted directory and appends them to `permissions.allow`. The dedicated `_nephoscopeAllowedTools` key tracks exactly which entries nephoscope wrote, so re-syncs replace rather than accumulate. When `trusted_dirs` is empty, the key is removed.
+When trusted directories are configured (global mirror only), the write flow also manages a top-level `_nephoscopeAllowedTools` key. The `_inject_permissions` entry point in `lib/mirror/writer.py` generates `Write(<root>/**)`, `Edit(<root>/**)`, `MultiEdit(<root>/**)`, `NotebookEdit(<root>/**)`, `Read(<root>/**)` entries for each configured trusted directory and appends them to `permissions.allow`. The dedicated `_nephoscopeAllowedTools` key tracks exactly which entries nephoscope wrote, so re-syncs replace rather than accumulate. When `trusted_dirs` is empty, the key is removed.
 
 **Canonical forms** rendered by `serializer.py`:
 

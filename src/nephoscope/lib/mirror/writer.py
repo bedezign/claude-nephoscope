@@ -15,6 +15,7 @@ import datetime as _dt
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -161,21 +162,17 @@ def _stamp_cache(
 
 
 def _generate_workspace_entries(trusted_dirs: list[str]) -> list[str]:
-    """Return Write/Edit/Read allow entries for each workspace root.
+    """Return one allow entry per FILE_VERBS verb for each workspace root.
 
     Tilde-expands and realpath-resolves each root before formatting so the
     entries are always absolute, canonical paths.
     """
+    from nephoscope.lib.mirror.tool_class import FILE_VERBS
+
     entries: list[str] = []
     for root in trusted_dirs:
         resolved = os.path.realpath(os.path.expanduser(root))
-        entries.extend(
-            [
-                f"Write({resolved}/**)",
-                f"Edit({resolved}/**)",
-                f"Read({resolved}/**)",
-            ]
-        )
+        entries.extend(f"{verb}({resolved}/**)" for verb in FILE_VERBS)
     return entries
 
 
@@ -204,6 +201,26 @@ def _fetch_permission_rows(
     ).fetchall()
 
 
+_TOKEN_RE = re.compile(r"\$(?:TRUSTED_DIR|HOME|CWD|PROJECT_ROOT)(?:/|$)")
+
+
+def _has_unresolved_token(path_spec: str | None) -> bool:
+    """Return True when *path_spec* contains a ``$VAR`` placeholder.
+
+    Template rules (e.g. ``$TRUSTED_DIR/**``) are stored in the DB for the
+    in-process matcher only.  Their JSON representation is handled by
+    ``_generate_workspace_entries``; they must not be passed through the
+    serialiser, which expects fully-resolved absolute paths.
+
+    The token must be followed by ``/`` or end-of-string so that a legitimate
+    path like ``$HOMEUSER/**`` is not mistakenly matched by the ``$HOME``
+    prefix.
+    """
+    if not path_spec:
+        return False
+    return bool(_TOKEN_RE.search(path_spec))
+
+
 def _classify_permission_rows(
     rows: list,
 ) -> tuple[list[str], list[str], list[str]]:
@@ -211,6 +228,11 @@ def _classify_permission_rows(
 
     Rows that serialize to None (orchestration rules, default-allow) are
     skipped — they are never written to JSON.
+
+    Rows whose ``path_spec`` contains unresolved ``$VAR`` tokens are also
+    skipped: they are template rules used by the in-process matcher only.
+    Their concrete JSON entries are injected separately by
+    ``_generate_workspace_entries`` at sync time.
     """
     from nephoscope.lib.mirror import serializer  # late import: same package
 
@@ -232,6 +254,9 @@ def _classify_permission_rows(
             "session_id": r[9],
             "project_id": r[10],
         }
+        if _has_unresolved_token(row_dict["path_spec"]):
+            continue
+
         canonical = serializer.serialize(row_dict)
         if canonical is None:
             continue  # orchestration row — default-allow, never written to JSON

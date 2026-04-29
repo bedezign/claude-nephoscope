@@ -116,9 +116,9 @@ def test_empty_workspace_roots_produces_no_generated_entries(tmp_path, db_conn):
 # ---------------------------------------------------------------------------
 
 
-def test_single_workspace_root_generates_three_entries(tmp_path, db_conn):
-    """A single workspace root /tmp/myproject produces three allow entries:
-    Write, Edit, and Read for that path glob."""
+def test_single_workspace_root_generates_five_entries(tmp_path, db_conn):
+    """A single workspace root /tmp/myproject produces five allow entries:
+    Write, Edit, MultiEdit, NotebookEdit, and Read for that path glob."""
     from nephoscope.lib.mirror.writer import sync_global
 
     with (
@@ -136,6 +136,8 @@ def test_single_workspace_root_generates_three_entries(tmp_path, db_conn):
     allow = data["permissions"]["allow"]
     assert "Write(/tmp/myproject/**)" in allow
     assert "Edit(/tmp/myproject/**)" in allow
+    assert "MultiEdit(/tmp/myproject/**)" in allow
+    assert "NotebookEdit(/tmp/myproject/**)" in allow
     assert "Read(/tmp/myproject/**)" in allow
 
 
@@ -166,6 +168,8 @@ def test_tilde_expanded_and_realpathd(tmp_path, db_conn):
     allow = data["permissions"]["allow"]
     assert f"Write({expected}/**)" in allow
     assert f"Edit({expected}/**)" in allow
+    assert f"MultiEdit({expected}/**)" in allow
+    assert f"NotebookEdit({expected}/**)" in allow
     assert f"Read({expected}/**)" in allow
 
 
@@ -209,9 +213,13 @@ def test_resync_replaces_old_entries(tmp_path, db_conn):
     allow = data_after_second["permissions"]["allow"]
     assert "Write(/new/path/**)" in allow
     assert "Edit(/new/path/**)" in allow
+    assert "MultiEdit(/new/path/**)" in allow
+    assert "NotebookEdit(/new/path/**)" in allow
     assert "Read(/new/path/**)" in allow
     assert "Write(/old/path/**)" not in allow
     assert "Edit(/old/path/**)" not in allow
+    assert "MultiEdit(/old/path/**)" not in allow
+    assert "NotebookEdit(/old/path/**)" not in allow
     assert "Read(/old/path/**)" not in allow
 
 
@@ -260,6 +268,8 @@ def test_db_authoritative_preexisting_allow_entries_replaced(tmp_path, db_conn):
     assert "SomePreviousEntry(*)" not in allow
     assert "Write(/tmp/ws/**)" in allow
     assert "Edit(/tmp/ws/**)" in allow
+    assert "MultiEdit(/tmp/ws/**)" in allow
+    assert "NotebookEdit(/tmp/ws/**)" in allow
     assert "Read(/tmp/ws/**)" in allow
 
 
@@ -313,7 +323,7 @@ def test_non_permissions_keys_preserved(tmp_path, db_conn):
 
 
 def test_marker_key_records_generated_entries(tmp_path, db_conn):
-    """After sync, _nephoscopeAllowedTools contains exactly the three entries
+    """After sync, _nephoscopeAllowedTools contains exactly the five entries
     we generated — no user entries, no DB-derived entries."""
     from nephoscope.lib.mirror.writer import sync_global
 
@@ -334,6 +344,8 @@ def test_marker_key_records_generated_entries(tmp_path, db_conn):
         [
             "Write(/tmp/marker-test/**)",
             "Edit(/tmp/marker-test/**)",
+            "MultiEdit(/tmp/marker-test/**)",
+            "NotebookEdit(/tmp/marker-test/**)",
             "Read(/tmp/marker-test/**)",
         ]
     )
@@ -344,8 +356,8 @@ def test_marker_key_records_generated_entries(tmp_path, db_conn):
 # ---------------------------------------------------------------------------
 
 
-def test_multiple_workspace_roots_each_get_three_entries(tmp_path, db_conn):
-    """Two workspace roots produce six total generated entries (3 each)."""
+def test_multiple_workspace_roots_each_get_five_entries(tmp_path, db_conn):
+    """Two workspace roots produce ten total generated entries (5 each)."""
     from nephoscope.lib.mirror.writer import sync_global
 
     with (
@@ -364,9 +376,11 @@ def test_multiple_workspace_roots_each_get_three_entries(tmp_path, db_conn):
     for root in ["/tmp/proj-a", "/tmp/proj-b"]:
         assert f"Write({root}/**)" in allow
         assert f"Edit({root}/**)" in allow
+        assert f"MultiEdit({root}/**)" in allow
+        assert f"NotebookEdit({root}/**)" in allow
         assert f"Read({root}/**)" in allow
 
-    assert len(data["_nephoscopeAllowedTools"]) == 6
+    assert len(data["_nephoscopeAllowedTools"]) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +420,8 @@ def test_db_allow_entries_coexist_with_workspace_root_entries(tmp_path, db_conn)
     allow = data["permissions"]["allow"]
     assert "Bash(git *)" in allow
     assert "Write(/tmp/coexist/**)" in allow
+    assert "MultiEdit(/tmp/coexist/**)" in allow
+    assert "NotebookEdit(/tmp/coexist/**)" in allow
 
 
 # ---------------------------------------------------------------------------
@@ -452,4 +468,6 @@ def test_project_mirror_not_affected_by_workspace_roots(tmp_path, db_conn):
     allow = data["permissions"]["allow"]
     assert "Write(/tmp/ws/**)" not in allow
     assert "Edit(/tmp/ws/**)" not in allow
+    assert "MultiEdit(/tmp/ws/**)" not in allow
+    assert "NotebookEdit(/tmp/ws/**)" not in allow
     assert "Read(/tmp/ws/**)" not in allow

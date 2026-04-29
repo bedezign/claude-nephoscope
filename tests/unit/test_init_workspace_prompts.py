@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import tomllib
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
 import pytest
 
 from nephoscope.config import get_config
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_SCHEMA_PATH = _PROJECT_ROOT / "src" / "nephoscope" / "lib" / "schema.sql"
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +28,35 @@ def _clear_config_cache() -> Generator[None, None, None]:
     get_config.cache_clear()
     yield
     get_config.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Redirect OBSERVABILITY_DB to a temp file with global_mirror seeded.
+
+    _append_trusted_dirs now calls _seed_full_access_rules which dispatches
+    sync_affected → sync_global, requiring the global_mirror singleton row.
+    """
+    db_path = tmp_path / "test-observations.db"
+    monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
+    fake_settings = tmp_path / "settings.json"
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.executescript(_SCHEMA_PATH.read_text())
+    conn.execute(
+        "INSERT OR IGNORE INTO global_mirror"
+        " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+        " VALUES (1, ?, NULL, NULL);",
+        (str(fake_settings),),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO permission_modes (name)"
+        " VALUES ('default'),('acceptEdits'),('bypassPermissions'),('plan'),('auto');"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO call_statuses (name)"
+        " VALUES ('pending'),('ok'),('err'),('denied'),('orphan');"
+    )
+    conn.close()
 
 
 @pytest.fixture
@@ -372,3 +405,111 @@ class TestWriteConfigFileEscaping:
             loaded = tomllib.load(f)
 
         assert loaded["trusted_dirs"] == ["C:\\Projects\\app"]
+
+
+# ---------------------------------------------------------------------------
+# 11. Production-scenario regression: main() seeds global_mirror singleton
+#     so _append_trusted_dirs never crashes on a fresh DB (no pre-seeded row)
+# ---------------------------------------------------------------------------
+
+
+class TestMainSeedsGlobalMirrorSingleton:
+    """Regression guard: nephoscope-init must seed global_mirror (id=1) before
+    the workspace-roots phase runs, so _append_trusted_dirs never hits the
+    'global_mirror singleton missing' RuntimeError on a fresh installation.
+
+    These tests do NOT use _isolated_db (the autouse fixture pre-seeds the
+    singleton row, which would mask the failure). Instead each test builds an
+    isolated DB that has only the schema applied — no singleton — and invokes
+    main() or _seed_global_mirror_singleton() directly to verify the fix.
+    """
+
+    @pytest.fixture()
+    def fresh_db_no_singleton(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> Iterator[sqlite3.Connection]:
+        """Schema-only DB: tables exist but global_mirror row (id=1) absent."""
+        db_path = tmp_path / "fresh.db"
+        monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        conn.executescript(_SCHEMA_PATH.read_text())
+        conn.execute(
+            "INSERT OR IGNORE INTO permission_modes (name)"
+            " VALUES ('default'),('acceptEdits'),('bypassPermissions'),('plan'),('auto');"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO call_statuses (name)"
+            " VALUES ('pending'),('ok'),('err'),('denied'),('orphan');"
+        )
+        # Deliberately omit the global_mirror row.
+        yield conn
+        conn.close()
+
+    def test_seed_global_mirror_singleton_inserts_row(
+        self,
+        fresh_db_no_singleton: sqlite3.Connection,
+    ) -> None:
+        """_seed_global_mirror_singleton inserts the singleton on a fresh DB."""
+        from nephoscope.cli.init_cmd import _seed_global_mirror_singleton
+
+        conn = fresh_db_no_singleton
+        assert (
+            conn.execute("SELECT COUNT(*) FROM global_mirror WHERE id = 1;").fetchone()[
+                0
+            ]
+            == 0
+        ), "precondition: no singleton yet"
+
+        _seed_global_mirror_singleton(conn)
+
+        row = conn.execute(
+            "SELECT id, settings_json_path FROM global_mirror WHERE id = 1;"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1
+        assert row[1] is not None and len(row[1]) > 0
+
+    def test_seed_global_mirror_singleton_is_idempotent(
+        self,
+        fresh_db_no_singleton: sqlite3.Connection,
+    ) -> None:
+        """Calling _seed_global_mirror_singleton twice leaves exactly one row."""
+        from nephoscope.cli.init_cmd import _seed_global_mirror_singleton
+
+        conn = fresh_db_no_singleton
+        _seed_global_mirror_singleton(conn)
+        _seed_global_mirror_singleton(conn)  # second call must be a no-op
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM global_mirror WHERE id = 1;"
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_append_trusted_dirs_without_pre_seeded_singleton(
+        self,
+        fresh_db_no_singleton: sqlite3.Connection,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """_append_trusted_dirs must not raise when only _seed_global_mirror_singleton
+        has been called (no externally pre-seeded row), simulating production init flow.
+        """
+        from nephoscope.cli.init_cmd import (
+            _append_trusted_dirs,
+            _seed_global_mirror_singleton,
+        )
+
+        conn = fresh_db_no_singleton
+        # Seed the singleton as main() does — this is the fix under test.
+        _seed_global_mirror_singleton(conn)
+        conn.close()
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(cfg_path))
+        get_config.cache_clear()
+
+        valid_dir = tmp_path / "project"
+        valid_dir.mkdir()
+
+        # Must not raise RuntimeError: global_mirror singleton missing.
+        _append_trusted_dirs([str(valid_dir)])

@@ -22,9 +22,9 @@ Three keys are supported:
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `trusted_dirs` | list of strings | `[]` | Top-level project directories. Files under these paths are pre-approved for Read/Edit/Write via injection into the global mirror's `_nephoscopeAllowedTools` key. Also enables the `$TRUSTED_DIR` placeholder. |
+| `trusted_dirs` | list of strings | `[]` | Top-level project directories. Files under these paths are pre-approved for Read/Edit/Write/MultiEdit/NotebookEdit via injection into the global mirror's `_nephoscopeAllowedTools` key. Also enables the `$TRUSTED_DIR` placeholder. |
 | `auto_register_project_paths` | boolean | `false` | When true, `nephoscope-init` silently adds the current working directory to `trusted_dirs` instead of prompting. |
-| `non_bash_tool_matching` | boolean | `false` | Enables full DB matching for non-Bash tool classes (Write/Edit/Read). When false (default), non-Bash tool matching follows mirror-only behaviour. |
+| `non_bash_tool_matching` | boolean | `false` | Enables full DB matching for non-Bash tool classes (Write/Edit/MultiEdit/NotebookEdit/Read). When false (default), non-Bash tool matching follows mirror-only behaviour. |
 
 Example configuration file:
 
