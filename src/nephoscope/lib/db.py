@@ -17,6 +17,7 @@ from typing import Any
 from nephoscope.lib.paths import canonicalize, observations_db_path
 
 MAX_STR = 500
+_MAX_POSITIONAL_PATHS = 20
 
 # Numbered migrations applied by _apply_migrations().  Each entry is
 # (target_version, sql).  Version 1 is the baseline established by schema.sql.
@@ -216,6 +217,24 @@ def set_session_extra_dirs(
     )
 
 
+def _merge_paths(existing_json: str | None, new_paths: tuple[str, ...]) -> str | None:
+    """Merge new_paths into the existing JSON path set.
+
+    Returns the updated JSON string (sorted, capped at _MAX_POSITIONAL_PATHS)
+    when the kept set grows, or None when nothing new survives the cap (skip
+    the UPDATE).
+    """
+    try:
+        existing: set[str] = set(json.loads(existing_json)) if existing_json else set()
+    except (json.JSONDecodeError, TypeError):
+        existing = set()
+    merged = existing | set(new_paths)
+    capped = sorted(merged)[:_MAX_POSITIONAL_PATHS]
+    if set(capped) <= existing:  # nothing new survives the cap → skip UPDATE
+        return None
+    return json.dumps(capped, ensure_ascii=False, separators=(",", ":"))
+
+
 def upsert_candidate(
     conn: sqlite3.Connection,
     verb: str,
@@ -223,11 +242,13 @@ def upsert_candidate(
     flags_json: str,
     session_id: int,
     ts: str,
+    positional_paths: tuple[str, ...] = (),
 ) -> int:
-    """Insert-or-touch a permission candidate; track distinct sessions.
+    """Insert-or-touch a permission candidate; track distinct sessions and paths.
 
     Upserts permission_candidates row keyed by (verb, subcommand, flags).
-    On touch, bumps last_seen and increments observations.
+    On touch, bumps last_seen and increments observations. Merges any new
+    positional_paths into the stored set (capped at _MAX_POSITIONAL_PATHS).
     On first occurrence for a session, increments distinct_sessions and
     inserts a permission_candidate_sessions row.
 
@@ -240,10 +261,10 @@ def upsert_candidate(
         flags_json: minified JSON array of flags
         session_id: sessions.id (numeric)
         ts: ISO-8601 timestamp
+        positional_paths: path-looking positional arguments from the parsed leaf
     """
-    # Find or create the candidate row.
     row = conn.execute(
-        "SELECT id FROM permission_candidates"
+        "SELECT id, positional_paths FROM permission_candidates"
         " WHERE verb = ? AND IFNULL(subcommand, '') = IFNULL(?, '')"
         " AND flags = ?;",
         (verb, subcommand, flags_json),
@@ -251,25 +272,40 @@ def upsert_candidate(
 
     if row is not None:
         cand_id = int(row[0])
-        # Touch the row and increment observations.
         conn.execute(
             "UPDATE permission_candidates"
             " SET observations = observations + 1, last_seen = ?"
             " WHERE id = ?;",
             (ts, cand_id),
         )
+        if positional_paths:
+            merged_json = _merge_paths(row[1], positional_paths)
+            if merged_json is not None:
+                conn.execute(
+                    "UPDATE permission_candidates"
+                    " SET positional_paths = ?"
+                    " WHERE id = ?;",
+                    (merged_json, cand_id),
+                )
     else:
-        # New candidate.
+        paths_json = (
+            json.dumps(
+                sorted(set(positional_paths)),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if positional_paths
+            else None
+        )
         cur = conn.execute(
             "INSERT INTO permission_candidates"
             " (verb, subcommand, flags, observations, distinct_sessions,"
-            "  first_seen, last_seen)"
-            " VALUES (?, ?, ?, 1, 0, ?, ?);",
-            (verb, subcommand, flags_json, ts, ts),
+            "  first_seen, last_seen, positional_paths)"
+            " VALUES (?, ?, ?, 1, 0, ?, ?, ?);",
+            (verb, subcommand, flags_json, ts, ts, paths_json),
         )
         cand_id = int(cur.lastrowid or 0)
 
-    # Check if this session has seen this candidate before.
     existing_session = conn.execute(
         "SELECT 1 FROM permission_candidate_sessions"
         " WHERE candidate_id = ? AND session_id = ?;",
@@ -277,7 +313,6 @@ def upsert_candidate(
     ).fetchone()
 
     if existing_session is None:
-        # First occurrence for this session — bump distinct_sessions and insert tracking row.
         conn.execute(
             "UPDATE permission_candidates"
             " SET distinct_sessions = distinct_sessions + 1"
@@ -291,7 +326,6 @@ def upsert_candidate(
             (cand_id, session_id, ts),
         )
     else:
-        # Seen before in this session — just update last_seen.
         conn.execute(
             "UPDATE permission_candidate_sessions"
             " SET last_seen = ?"

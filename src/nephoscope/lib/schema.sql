@@ -149,7 +149,8 @@ CREATE TABLE permission_candidates (
   observations      INTEGER NOT NULL DEFAULT 0,
   distinct_sessions INTEGER NOT NULL DEFAULT 0,
   first_seen        TEXT    NOT NULL,
-  last_seen         TEXT    NOT NULL
+  last_seen         TEXT    NOT NULL,
+  positional_paths  TEXT
 );
 CREATE UNIQUE INDEX idx_permission_candidates_unique
   ON permission_candidates(verb, IFNULL(subcommand, ''), flags);
@@ -202,7 +203,8 @@ CREATE VIEW v_permissions AS
     JOIN rule_shapes rs ON rs.id = p.rule_shape_id;
 
 CREATE VIEW v_candidates AS
-  SELECT id, verb, subcommand, flags, observations, distinct_sessions, first_seen, last_seen
+  SELECT id, verb, subcommand, flags, observations, distinct_sessions, first_seen, last_seen,
+         positional_paths
     FROM permission_candidates;
 
 CREATE VIEW v_session_summary AS

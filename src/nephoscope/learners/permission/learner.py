@@ -25,6 +25,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -181,6 +182,7 @@ def scan_candidates(conn: sqlite3.Connection) -> int:
                 flags_json,
                 int(session_id),
                 now,
+                leaf.positional_paths,
             )
 
     _set_cursor(conn, max_id)
@@ -200,6 +202,7 @@ class Candidate:
     flags: frozenset[str]
     observations: int
     distinct_sessions: int
+    positional_paths: tuple[str, ...] = ()
 
 
 def _candidate_leaf(
@@ -237,7 +240,7 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
     rows = conn.execute(
         """
         SELECT c.id, c.verb, c.subcommand, c.flags,
-               c.observations, c.distinct_sessions
+               c.observations, c.distinct_sessions, c.positional_paths
           FROM permission_candidates c
          WHERE c.observations >= ?
            AND c.distinct_sessions >= ?
@@ -257,8 +260,7 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
     ).fetchall()
 
     out: list[Candidate] = []
-    for cand_id, verb, subcommand, flags_json, obs, sess in rows:
-        # Apply deny filter at propose time.
+    for cand_id, verb, subcommand, flags_json, obs, sess, raw_paths in rows:
         leaf = _candidate_leaf(verb, subcommand, flags_json)
         decision, _reason = evaluate(leaf)
         if decision is not None:
@@ -268,6 +270,11 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
             flag_list = json.loads(flags_json)
         except (json.JSONDecodeError, TypeError):
             flag_list = []
+        try:
+            decoded = json.loads(raw_paths) if raw_paths else []
+            paths: tuple[str, ...] = tuple(decoded) if isinstance(decoded, list) else ()
+        except (json.JSONDecodeError, TypeError):
+            paths = ()
         out.append(
             Candidate(
                 id=int(cand_id),
@@ -276,6 +283,7 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
                 flags=frozenset(flag_list),
                 observations=int(obs),
                 distinct_sessions=int(sess),
+                positional_paths=paths,
             )
         )
     return out
@@ -402,6 +410,13 @@ def _resolve_tier_ids(
 # ---------------------------------------------------------------------------
 
 
+def _format_paths_preview(paths: Sequence[str], limit: int = 3) -> str:
+    """Format a path list as a short preview string with an overflow suffix."""
+    if len(paths) > limit:
+        return ", ".join(paths[:limit]) + f", ... and {len(paths) - limit} more"
+    return ", ".join(paths[:limit])
+
+
 def _cmd_scan(_args: argparse.Namespace) -> int:
     try:
         conn = _connect()
@@ -432,6 +447,8 @@ def _cmd_scan(_args: argparse.Namespace) -> int:
             f"  — seen {c.observations} times across"
             f" {c.distinct_sessions} session(s)"
         )
+        if c.positional_paths:
+            print(f"    (paths seen: {_format_paths_preview(c.positional_paths)})")
     return 0
 
 
@@ -445,7 +462,7 @@ def _cmd_candidates(_args: argparse.Namespace) -> int:
         rows = conn.execute(
             """
             SELECT verb, subcommand, flags, observations, distinct_sessions,
-                   first_seen, last_seen
+                   first_seen, last_seen, positional_paths
               FROM v_candidates
              ORDER BY last_seen DESC;
             """
@@ -457,13 +474,30 @@ def _cmd_candidates(_args: argparse.Namespace) -> int:
         print("No command patterns have been noticed yet.")
         return 0
     print(f"{len(rows)} command pattern(s) noticed so far:")
-    for verb, subcommand, flags_json, obs, sess, first_seen, last_seen in rows:
+    for (
+        verb,
+        subcommand,
+        flags_json,
+        obs,
+        sess,
+        first_seen,
+        last_seen,
+        raw_paths,
+    ) in rows:
         description = _describe_rule(verb, subcommand, flags_json, None)
         print(
             f"  {description}"
             f"  — seen {obs} times across {sess} session(s),"
             f" first {first_seen}, last {last_seen}"
         )
+        if raw_paths:
+            try:
+                decoded = json.loads(raw_paths)
+                all_paths: list[str] = decoded if isinstance(decoded, list) else []
+            except (json.JSONDecodeError, TypeError):
+                all_paths = []
+            if all_paths:
+                print(f"    (paths seen: {_format_paths_preview(all_paths)})")
     return 0
 
 
