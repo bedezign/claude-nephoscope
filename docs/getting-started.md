@@ -60,6 +60,17 @@ claude --plugin-dir /absolute/path/to/nephoscope
 
 Marketplace submission is pending; the GitHub-hosted path above is the current primary option.
 
+### Standalone (no Claude Code yet)
+
+`install.py` at the repo root is a stdlib-only first-run installer. It creates a venv, installs nephoscope via pip, and runs `nephoscope-init` — no UV or external tools required.
+
+```bash
+python3 install.py              # install from PyPI (post-publish)
+python3 install.py --source .  # install from local repo clone
+```
+
+Use this when bootstrapping fresh environments where Claude Code isn't yet set up.
+
 ## First-run bootstrap
 
 The first time Claude Code loads the plugin, the `SessionStart` hook runs `hooks/bootstrap.sh`, which:
@@ -85,6 +96,14 @@ Use `--no-workspace-prompts` to suppress interactive prompts (trusted directorie
 After DB init, `nephoscope-init` may prompt for **trusted directories** — top-level project directories you want pre-approved for all file access — and then offer a numbered menu to apply optional permission profiles. Both prompts only run when stdin is a TTY, so they do not fire when bootstrap runs from Claude Code, in a pipe, or in CI. You can suppress them explicitly using `--no-workspace-prompts`.
 
 If you enter paths at the prompt, each is canonicalized (tilde-expanded and realpath-resolved) and written to `~/.config/nephoscope/config.toml` under the `trusted_dirs` key. Paths you add become eligible for the `$TRUSTED_DIR` placeholder in rules. Pressing Enter on a blank line ends the prompt; nothing is written if no paths are entered.
+
+**Available profiles:**
+
+- `dev-tools` — curl, wget, make, openssl, touch, man
+- `python-dev` — uv, ruff, pytest, pyright, mypy, pip (read-only subcommands)
+- `javascript` — node, npx, deno (scoped to trusted dirs), npm/yarn/pnpm subcommands, tsc, eslint, vite, vitest
+- `devops` — kubectl, helm, docker, terraform, ansible (read/inspect subcommands)
+- `project-dev` — full file read/write/edit access within trusted project directories, plus python3/python/bash script execution
 
 See [Configuration file](#configuration-file) in [Reference](reference.md) for environment variables and config options, and [Placeholders](how-it-works.md#placeholders) for how `$TRUSTED_DIR` works.
 

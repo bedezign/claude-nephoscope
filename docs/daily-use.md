@@ -107,6 +107,15 @@ After you run that command, two things happen:
 
 From the next prompt onward, `rm` inside the project just works — no popup.
 
+## Rule usage stats
+
+```bash
+nephoscope-permissions stats
+nephoscope-permissions stats --show-unused
+```
+
+Prints a summary of how often each permission rule has fired: total approved/rejected counts, total hits, top 10 rules by hit count, and the most recently matched rule. Pass `--show-unused` to list every rule with zero hits — useful for pruning stale entries.
+
 ## Undoing a rule
 
 If you promoted something by mistake, or you changed your mind:

@@ -45,6 +45,7 @@ Path-spec shortcuts that nephoscope expands at the time a rule is evaluated.
 | `$PROJECT_ROOT` | The project root — the nearest ancestor directory of `$CWD` that looks like a project (has a `.git`, `pyproject.toml`, `package.json`, or similar marker) | Set when a recognisable project is detected; otherwise falls back to `$CWD`. |
 | `$TRUSTED_DIR` | A trusted directory listed in `trusted_dirs` in the config file. | Set when at least one trusted directory is configured. |
 | `$ADDITIONAL_DIR` | An additional directory — listed in `permissions.additionalDirectories` in the settings file or passed via `claude --add-dir` at launch. | Set when at least one additional directory is registered. |
+| `$CLAUDE_DIR` | The Claude Code config directory (typically `~/.claude/`). | Always available. Use in rules for hook scripts and harness files, e.g. `path_spec: "$CLAUDE_DIR/hooks/**"`. |
 
 Use them inside `--path-spec` values. Examples:
 
