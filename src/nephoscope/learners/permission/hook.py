@@ -331,6 +331,32 @@ def _no_db_bash_ask(tool_input: dict[str, Any]) -> bool:
     return False
 
 
+def _increment_hit(conn: sqlite3.Connection, permission_id: int | None) -> None:
+    """Increment hit_count and set last_hit_at for the given permission row.
+
+    This is a best-effort fire-and-forget — it must never raise.  Any error
+    is written to stderr as a single WARNING line so silent data loss is
+    observable (per observability-hygiene rule).
+
+    ``permission_id=None`` is a no-op (no DB lookup, no error).
+    """
+    if permission_id is None:
+        return
+    try:
+        conn.execute(
+            "UPDATE permissions"
+            " SET hit_count = hit_count + 1, last_hit_at = ?"
+            " WHERE id = ?;",
+            (_now_iso(), permission_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        import sys
+
+        sys.stderr.write(
+            f"WARNING: nephoscope hit-counter update failed (id={permission_id}): {exc}\n"
+        )
+
+
 def _with_db_verdict(
     conn: sqlite3.Connection,
     tool: str,
@@ -345,7 +371,7 @@ def _with_db_verdict(
     if tool_use_id_str:
         session_id_int, project_id_int = _lookup_call_context(conn, tool_use_id_str)
 
-    verdict = dispatch(
+    verdict, permission_id = dispatch(
         tool,
         tool_input,
         conn,
@@ -353,6 +379,9 @@ def _with_db_verdict(
         project_id_int,
         cwd=payload_cwd or None,
     )
+    # Increment the hit counter for the decisive permission row.  This is
+    # best-effort — _increment_hit never raises; see its docstring.
+    _increment_hit(conn, permission_id)
     _emit_verdict(
         verdict,
         tool,

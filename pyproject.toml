@@ -45,6 +45,8 @@ where = ["src"]
 nephoscope = [
     "lib/schema.sql",
     "learners/permission/config/fixtures/*.yaml",
+    "learners/permission/config/fixtures/profiles/*.yaml",
+    "learners/permission/config/fixtures/optional/*.yaml",
 ]
 
 [tool.pytest.ini_options]

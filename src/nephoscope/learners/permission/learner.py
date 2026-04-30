@@ -658,6 +658,60 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_unpermit_by_id(args: argparse.Namespace) -> int:
+    """Delete a permission row by its primary key id.
+
+    Unlike ``unpermit`` (which matches by verb/flags/tier), this subcommand
+    targets a single row unambiguously.  Useful when two rows share the same
+    shape (e.g. after a duplicate was created before the UNIQUE index was
+    applied) and only one should be removed.
+    """
+    from nephoscope.lib.mirror.writer import (
+        MirrorHashMismatch,
+        sync_global,
+        sync_project,
+    )
+
+    conn = _connect()
+    try:
+        # Look up the row to determine scope before deleting.
+        row = conn.execute(
+            "SELECT project_id, session_id FROM permissions WHERE id = ?;",
+            (args.id,),
+        ).fetchone()
+        if row is None:
+            print(
+                f"No permission row with id={args.id}.",
+                file=sys.stderr,
+            )
+            return 1
+        project_id: int | None = row[0]
+        session_id: int | None = row[1]
+
+        conn.execute("DELETE FROM permissions WHERE id = ?;", (args.id,))
+
+        # Mirror sync (session-tier has no JSON mirror).
+        if getattr(args, "sync", False) and session_id is None:
+            try:
+                if project_id is None:
+                    sync_global(conn)
+                else:
+                    sync_project(conn, project_id)
+            except MirrorHashMismatch as exc:
+                path = str(exc).split(":")[0]
+                print(
+                    f"The settings file at {path} was edited externally — "
+                    f"run '/nephoscope:permissions reconcile' and retry.",
+                    file=sys.stderr,
+                )
+                return 1
+    finally:
+        conn.close()
+
+    print(f"Removed permission id={args.id}.")
+    return 0
+
+
 def _cmd_pattern_variants(args: argparse.Namespace) -> int:
     """Compute pattern variants for a single candidate and print them as JSON.
 
@@ -1234,6 +1288,26 @@ def main(argv: list[str] | None = None) -> int:
     _add_verb_sub_args(ss)
     _add_tier_args(ss)
 
+    uid = sub.add_parser(
+        "unpermit-by-id",
+        help="Remove a permission rule by its database primary key id.",
+        description=(
+            "Delete a single permission row identified by its integer primary key.\n"
+            "Use this when 'unpermit' is ambiguous (e.g. two rows share the same\n"
+            "shape) and you need to remove one specific row."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    uid.add_argument(
+        "id", type=int, help="permissions.id primary key of the row to delete"
+    )
+    uid.add_argument(
+        "--sync",
+        action="store_true",
+        default=False,
+        help="Sync the JSON mirror after deletion (skipped for session-tier rules).",
+    )
+
     args = parser.parse_args(argv)
 
     _cmd_map = {
@@ -1244,6 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
         "promote": _cmd_promote,
         "reject": _cmd_reject,
         "unpermit": _cmd_unpermit,
+        "unpermit-by-id": _cmd_unpermit_by_id,
         "pattern-variants": _cmd_pattern_variants,
         "context-ids": _cmd_context_ids,
         "count-concrete-siblings": _cmd_count_concrete_siblings,

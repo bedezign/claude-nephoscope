@@ -222,7 +222,7 @@ class TestSedIPriority:
         apply_fixtures(tmp_db, FIXTURE_PATH)
 
         # Match 'sed -i /tmp/testfile' through the real Bash dispatcher.
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "sed -i s/foo/bar/ /tmp/testfile"},
             conn=tmp_db,

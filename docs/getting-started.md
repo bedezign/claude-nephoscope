@@ -6,7 +6,6 @@ This page takes you from a fresh machine to a running install with your first ru
 
 - **Claude Code**, recent release — plugin support is required.
 - **Python 3.11 or newer**, available on your `PATH`. Check with `python3 --version`.
-- **[uv](https://docs.astral.sh/uv/)** for dependency management. The first-run bootstrap calls `uv venv` and `uv pip install -e`.
 - **SQLite CLI** (`sqlite3`), used by the `/nephoscope:permissions` slash command for ad-hoc queries.
 
 ## Install — three modes
@@ -79,11 +78,11 @@ The observations database is created lazily on first tool call. You can also for
 
 Pass `--db-path /some/other/path.db` to materialise the database at a non-default location (useful for tests or parallel consumers).
 
-Use `--no-workspace-prompts` to suppress the interactive workspace-roots prompt explicitly. This is useful when bootstrapping from a script or CI, where no terminal is available.
+Use `--no-workspace-prompts` to suppress interactive prompts (trusted directories and optional permission profiles) explicitly. This is useful when bootstrapping from a script or CI, where no terminal is available.
 
 ### Workspace-roots configuration
 
-After DB init, `nephoscope-init` may prompt for **trusted directories** — top-level project directories you want pre-approved for all file access. The prompt only runs when stdin is a TTY, so it does not fire when bootstrap runs from Claude Code, in a pipe, or in CI. You can suppress it explicitly using `--no-workspace-prompts`.
+After DB init, `nephoscope-init` may prompt for **trusted directories** — top-level project directories you want pre-approved for all file access — and then offer a numbered menu to apply optional permission profiles. Both prompts only run when stdin is a TTY, so they do not fire when bootstrap runs from Claude Code, in a pipe, or in CI. You can suppress them explicitly using `--no-workspace-prompts`.
 
 If you enter paths at the prompt, each is canonicalized (tilde-expanded and realpath-resolved) and written to `~/.config/nephoscope/config.toml` under the `trusted_dirs` key. Paths you add become eligible for the `$TRUSTED_DIR` placeholder in rules. Pressing Enter on a blank line ends the prompt; nothing is written if no paths are entered.
 

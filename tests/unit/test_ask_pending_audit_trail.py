@@ -1,8 +1,7 @@
-"""Tests for the session-ask audit trail (Finding 6).
+"""Tests for the session-ask audit trail.
 
 Coverage:
-  1. Schema migration v1→v2 adds permission_mode, resolved_at, outcome columns
-     to permission_ask_pending.  Existing v1 rows survive with NULL in new cols.
+  1. permission_ask_pending has permission_mode, resolved_at, outcome columns.
   2. _resolve_ask_pending sets outcome='approved' and resolved_at for a matching
      pending row; is a no-op when no row matches; does not re-resolve already-
      resolved rows.
@@ -12,122 +11,7 @@ Coverage:
 from __future__ import annotations
 
 import io
-import sqlite3
 import sys
-
-from nephoscope.lib.db import _apply_migrations
-
-
-# ---------------------------------------------------------------------------
-# Helpers — build a v1-shaped DB
-# ---------------------------------------------------------------------------
-
-_V1_SCHEMA_FRAGMENT = """
-CREATE TABLE IF NOT EXISTS projects (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  cwd        TEXT UNIQUE NOT NULL,
-  name       TEXT,
-  root       TEXT,
-  first_seen TEXT NOT NULL,
-  last_seen  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_uuid TEXT UNIQUE NOT NULL,
-  project_id   INTEGER,
-  started_at   TEXT NOT NULL,
-  last_activity TEXT NOT NULL,
-  transcript_path TEXT,
-  extra_dirs   TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS permission_ask_pending (
-  tool_use_id TEXT    PRIMARY KEY,
-  session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  verb        TEXT    NOT NULL,
-  subcommand  TEXT,
-  flags       TEXT    NOT NULL,
-  asked_at    TEXT    NOT NULL
-);
-PRAGMA user_version = 1;
-"""
-
-
-def _make_v1_db(tmp_path):
-    """Return a sqlite3 connection to an in-memory DB with v1 permission_ask_pending."""
-    db_path = tmp_path / "v1.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(_V1_SCHEMA_FRAGMENT)
-    # Insert a session so we can add a v1 pending row.
-    conn.execute(
-        "INSERT INTO sessions (session_uuid, started_at, last_activity)"
-        " VALUES ('sess-v1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');"
-    )
-    conn.commit()
-    return conn
-
-
-# ---------------------------------------------------------------------------
-# Migration v1 → v2
-# ---------------------------------------------------------------------------
-
-
-class TestMigrationV1ToV2:
-    def test_migration_adds_permission_mode_column(self, tmp_path) -> None:
-        conn = _make_v1_db(tmp_path)
-        _apply_migrations(conn)
-        cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(permission_ask_pending);")
-        }
-        assert "permission_mode" in cols
-
-    def test_migration_adds_resolved_at_column(self, tmp_path) -> None:
-        conn = _make_v1_db(tmp_path)
-        _apply_migrations(conn)
-        cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(permission_ask_pending);")
-        }
-        assert "resolved_at" in cols
-
-    def test_migration_adds_outcome_column(self, tmp_path) -> None:
-        conn = _make_v1_db(tmp_path)
-        _apply_migrations(conn)
-        cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(permission_ask_pending);")
-        }
-        assert "outcome" in cols
-
-    def test_migration_advances_user_version_to_2(self, tmp_path) -> None:
-        conn = _make_v1_db(tmp_path)
-        _apply_migrations(conn)
-        version = conn.execute("PRAGMA user_version;").fetchone()[0]
-        assert version == 2
-
-    def test_existing_v1_rows_survive_with_null_in_new_columns(self, tmp_path) -> None:
-        conn = _make_v1_db(tmp_path)
-        sess_id = conn.execute("SELECT id FROM sessions;").fetchone()[0]
-        conn.execute(
-            "INSERT INTO permission_ask_pending"
-            " (tool_use_id, session_id, verb, subcommand, flags, asked_at)"
-            " VALUES (?, ?, ?, ?, ?, ?);",
-            ("use-v1", sess_id, "git", "commit", "[]", "2026-01-01T00:00:00Z"),
-        )
-        conn.commit()
-        _apply_migrations(conn)
-        row = conn.execute(
-            "SELECT permission_mode, resolved_at, outcome"
-            " FROM permission_ask_pending WHERE tool_use_id = 'use-v1';"
-        ).fetchone()
-        assert row is not None
-        assert row[0] is None  # permission_mode
-        assert row[1] is None  # resolved_at
-        assert row[2] is None  # outcome
-
-    def test_migration_idempotent_on_v2_db(self, tmp_path, tmp_db) -> None:
-        """Running _apply_migrations on an already-v2 DB does nothing."""
-        version_before = tmp_db.execute("PRAGMA user_version;").fetchone()[0]
-        _apply_migrations(tmp_db)
-        version_after = tmp_db.execute("PRAGMA user_version;").fetchone()[0]
-        assert version_before == version_after
 
 
 # ---------------------------------------------------------------------------

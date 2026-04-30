@@ -341,6 +341,131 @@ def _print_workspace_coverage(settings_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+def _rule_label(verb: str, sub: str | None, path_spec: str | None) -> str:
+    label = verb
+    if sub:
+        label += f" {sub}"
+    if path_spec:
+        label += f" {path_spec}"
+    return label
+
+
+def _print_top_rules(top_rows: list[tuple]) -> None:
+    if not top_rows:
+        return
+    print("\nTop rules by hit count:")
+    for row in top_rows:
+        verb, sub, _flags, path_spec, decision, hits, _last_hit = row
+        print(f"  {hits:>6}  {decision:<10}  {_rule_label(verb, sub, path_spec)}")
+
+
+def _print_never_used(never_used_rows: list[tuple] | None) -> None:
+    if never_used_rows is None:
+        return
+    print("\nUnused rules:")
+    for row in never_used_rows:
+        verb, sub, _flags, path_spec, decision = row
+        print(f"  {decision:<10}  {_rule_label(verb, sub, path_spec)}")
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    """Print hit-count statistics for permission rules.
+
+    Prints:
+    - Total rules (approved vs rejected)
+    - Total hits across all rules
+    - Top 10 rules by hit count
+    - Rules with 0 hits (count + optional list with --show-unused)
+    - Most recently fired rule
+
+    Reads from the DB resolved via $OBSERVABILITY_DB / args.db if available.
+    When neither is set, uses the default observations DB path.
+    """
+    from nephoscope.lib.db import _open
+
+    # Resolve DB path: args.db (if set), else env, else default.
+    db_attr = getattr(args, "db", None)
+    if db_attr:
+        import os
+
+        os.environ.setdefault("OBSERVABILITY_DB", db_attr)
+
+    conn = _open()
+    try:
+        # Total counts
+        approved = conn.execute(
+            "SELECT COUNT(*) FROM permissions WHERE decision = 'approved';"
+        ).fetchone()[0]
+        rejected = conn.execute(
+            "SELECT COUNT(*) FROM permissions WHERE decision = 'rejected';"
+        ).fetchone()[0]
+        total = approved + rejected
+
+        # Total hits
+        total_hits = conn.execute(
+            "SELECT COALESCE(SUM(hit_count), 0) FROM permissions;"
+        ).fetchone()[0]
+
+        # Never-used count (hit_count = 0)
+        never_used = conn.execute(
+            "SELECT COUNT(*) FROM permissions WHERE hit_count = 0;"
+        ).fetchone()[0]
+
+        # Top 10 by hit count
+        top_rows = conn.execute(
+            "SELECT rs.verb, rs.subcommand, rs.flags, rs.path_spec,"
+            "       p.decision, p.hit_count, p.last_hit_at"
+            " FROM permissions p"
+            " JOIN rule_shapes rs ON rs.id = p.rule_shape_id"
+            " ORDER BY p.hit_count DESC, p.decided_at ASC"
+            " LIMIT 10;"
+        ).fetchall()
+
+        # Most recently fired rule
+        recent = conn.execute(
+            "SELECT rs.verb, p.hit_count, p.last_hit_at"
+            " FROM permissions p"
+            " JOIN rule_shapes rs ON rs.id = p.rule_shape_id"
+            " WHERE p.last_hit_at IS NOT NULL"
+            " ORDER BY p.last_hit_at DESC"
+            " LIMIT 1;"
+        ).fetchone()
+
+        # Never-used list (optional)
+        never_used_rows = None
+        if getattr(args, "show_unused", False):
+            never_used_rows = conn.execute(
+                "SELECT rs.verb, rs.subcommand, rs.flags, rs.path_spec, p.decision"
+                " FROM permissions p"
+                " JOIN rule_shapes rs ON rs.id = p.rule_shape_id"
+                " WHERE p.hit_count = 0"
+                " ORDER BY rs.verb, p.decided_at ASC;"
+            ).fetchall()
+    finally:
+        conn.close()
+
+    print(f"Rules:        {total} total ({approved} approved, {rejected} rejected)")
+    print(f"Total hits:   {total_hits}")
+    print(f"Never used:   {never_used}")
+
+    _print_top_rules(top_rows)
+
+    if recent:
+        verb, hits, last_hit = recent
+        print(f"\nLast fired:   {verb} ({hits} hits, at {last_hit})")
+    else:
+        print("\nLast fired:   (none)")
+
+    _print_never_used(never_used_rows)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -469,6 +594,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path of the settings.json file whose timestamp should be refreshed.",
     )
 
+    st = sub.add_parser(
+        "stats",
+        help="Show hit-count statistics for permission rules.",
+        description=(
+            "Print statistics about how often permission rules have been matched.\n"
+            "\n"
+            "Shows the total number of rules, total hits across all rules,\n"
+            "the top 10 most-matched rules, the number of rules that have\n"
+            "never been matched, and the most recently matched rule.\n"
+            "\n"
+            "Use --show-unused to list all rules with zero hits."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    _add_db_arg(st)
+    st.add_argument(
+        "--show-unused",
+        action="store_true",
+        default=False,
+        dest="show_unused",
+        help="List all rules that have never been matched (hit_count = 0).",
+    )
+
     return parser
 
 
@@ -527,6 +675,8 @@ def main(argv: list[str] | None = None) -> int:
             return mirror_dry_run_cmd(args.db, args.target_path)
         case "reload-hint":
             return reload_hint_cmd(args.settings_path)
+        case "stats":
+            return _cmd_stats(args)
         case _:
             return 0  # pragma: no cover
 

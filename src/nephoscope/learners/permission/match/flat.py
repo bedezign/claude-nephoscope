@@ -27,8 +27,12 @@ def match(
     project_id: int | None,
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,  # noqa: ARG001 — unused; Bash-only feature
-) -> Verdict:
-    """Presence check: any permission row for *tool_name* → return its decision."""
+) -> tuple[Verdict, int | None]:
+    """Presence check: any permission row for *tool_name* → return its decision.
+
+    Returns ``(Verdict, permission_id)`` where ``permission_id`` is the
+    ``permissions.id`` of the matched row, or ``None`` when no match was found.
+    """
     from nephoscope.lib.db import lookup_permissions  # type: ignore[import-untyped]
 
     rows = conn.execute(
@@ -41,10 +45,12 @@ def match(
         perms = lookup_permissions(conn, shape_id, session_id, project_id)
         if not perms:
             continue
-        decision = perms[0]["decision"]
+        perm = perms[0]
+        decision = perm["decision"]
+        perm_id: int = perm["id"]
         if decision == "approved":
-            return Verdict.Allow
+            return Verdict.Allow, perm_id
         if decision == "rejected":
-            return Verdict.Deny
+            return Verdict.Deny, perm_id
 
-    return Verdict.NoOpinion
+    return Verdict.NoOpinion, None

@@ -70,8 +70,8 @@ def _decision_for_leaf(
     project_id: int | None,
     additional_dirs: list[str] | None = None,
     trusted_dirs: list[str] | None = None,
-) -> str | None:
-    """Return the first permissions decision for *leaf*, or None."""
+) -> tuple[str | None, int | None]:
+    """Return (decision, permission_id) for *leaf*, or (None, None)."""
     from nephoscope.lib.db import lookup_permissions  # type: ignore[import-untyped]
 
     for variant in to_pattern_form(leaf, ctx, additional_dirs, trusted_dirs):
@@ -80,8 +80,8 @@ def _decision_for_leaf(
             continue
         rows = lookup_permissions(conn, shape_id, session_id, project_id)
         if rows:
-            return rows[0]["decision"]  # first = highest-priority tier
-    return None
+            return rows[0]["decision"], rows[0]["id"]  # first = highest-priority tier
+    return None, None
 
 
 def match(
@@ -93,8 +93,12 @@ def match(
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,
     trusted_dirs: list[str] | None = None,
-) -> Verdict:
+) -> tuple[Verdict, int | None]:
     """Match a Bash tool invocation against the permissions DB.
+
+    Returns ``(Verdict, permission_id)`` where ``permission_id`` is the
+    ``permissions.id`` of the decisive row (the first Deny row or the last
+    Allow row), or ``None`` when no row was matched.
 
     ``tool_name`` must be ``"Bash"`` (or the internal shell verb); callers
     should already have classified the tool before routing here.
@@ -110,34 +114,40 @@ def match(
     """
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command.strip():
-        return Verdict.NoOpinion
+        return Verdict.NoOpinion, None
 
     leaves = parse_command(command)
     if not leaves:
-        return Verdict.NoOpinion
+        return Verdict.NoOpinion, None
 
     # Resolve permissions for each leaf.
-    leaf_decisions: list[str | None] = [
+    leaf_results: list[tuple[str | None, int | None]] = [
         _decision_for_leaf(
             conn, leaf, ctx, session_id, project_id, additional_dirs, trusted_dirs
         )
         for leaf in leaves
     ]
+    leaf_decisions = [d for d, _ in leaf_results]
 
-    # Any rejected leaf → Deny.
-    if any(d == "rejected" for d in leaf_decisions):
-        return Verdict.Deny
+    # Any rejected leaf → Deny.  Return the first reject's perm_id.
+    for decision, perm_id in leaf_results:
+        if decision == "rejected":
+            return Verdict.Deny, perm_id
 
-    # All approved → Allow.
+    # All approved → Allow.  Return the last approved perm_id.
     if all(d == "approved" for d in leaf_decisions):
-        return Verdict.Allow
+        last_perm_id = next(
+            (perm_id for _, perm_id in reversed(leaf_results) if perm_id is not None),
+            None,
+        )
+        return Verdict.Allow, last_perm_id
 
     # Unresolved leaves: check ask tier.
-    for leaf, decision in zip(leaves, leaf_decisions):
+    for leaf, (decision, _perm_id) in zip(leaves, leaf_results):
         if decision is not None:
             continue  # already approved — no ask needed
         outcome, _reason = evaluate(leaf)
         if outcome == "ask":
-            return Verdict.Ask
+            return Verdict.Ask, None
 
-    return Verdict.NoOpinion
+    return Verdict.NoOpinion, None

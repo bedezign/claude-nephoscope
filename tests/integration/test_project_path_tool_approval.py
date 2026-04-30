@@ -114,7 +114,7 @@ class TestLiteralVerbTrustedDirRules:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Write")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/wsroot/src/main.py"},
             conn=empty_db,
@@ -132,7 +132,7 @@ class TestLiteralVerbTrustedDirRules:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Edit")
 
-        result = match(
+        result, _ = match(
             tool_name="Edit",
             tool_input={"path": "/tmp/wsroot/src/app.py"},
             conn=empty_db,
@@ -150,7 +150,7 @@ class TestLiteralVerbTrustedDirRules:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Read")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/wsroot/docs/README.md"},
             conn=empty_db,
@@ -175,7 +175,7 @@ class TestPathOutsideWorkspaceRoot:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Write")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/otherplace/file.py"},
             conn=empty_db,
@@ -201,7 +201,7 @@ class TestNestedPathInsideWorkspaceRoot:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Write")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/wsroot/a/b/c/deeply/nested/file.py"},
             conn=empty_db,
@@ -226,7 +226,7 @@ class TestEmptyWorkspaceRoots:
         _configure(monkeypatch, tmp_path, [])
         _seed_allow(empty_db, "Write")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/wsroot/src/main.py"},
             conn=empty_db,
@@ -250,7 +250,7 @@ class TestMultipleWorkspaceRoots:
         _configure(monkeypatch, tmp_path, ["/tmp/ws1", "/tmp/ws2"])
         _seed_allow(empty_db, "Write")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/ws2/project/file.py"},
             conn=empty_db,
@@ -266,7 +266,7 @@ class TestMultipleWorkspaceRoots:
         _configure(monkeypatch, tmp_path, ["/tmp/ws1", "/tmp/ws2"])
         _seed_allow(empty_db, "Write")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/ws1/project/file.py"},
             conn=empty_db,
@@ -292,7 +292,7 @@ class TestMissingTargetPath:
         _seed_allow(empty_db, "Write")
 
         # No 'path' or 'file_path' key — empty target must not match any root
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"content": "hello"},
             conn=empty_db,
@@ -317,7 +317,7 @@ class TestVerbGroupExpansion:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Reading")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/wsroot/file.py"},
             conn=empty_db,
@@ -333,7 +333,7 @@ class TestVerbGroupExpansion:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Full Access")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/wsroot/file.py"},
             conn=empty_db,
@@ -351,7 +351,7 @@ class TestVerbGroupExpansion:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Full Access")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"path": "/tmp/wsroot/file.py"},
             conn=empty_db,
@@ -367,7 +367,7 @@ class TestVerbGroupExpansion:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Full Access")
 
-        result = match(
+        result, _ = match(
             tool_name="Edit",
             tool_input={"path": "/tmp/wsroot/file.py"},
             conn=empty_db,
@@ -385,7 +385,7 @@ class TestVerbGroupExpansion:
         _configure(monkeypatch, tmp_path, ["/tmp/wsroot"])
         _seed_allow(empty_db, "Read")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/wsroot/file.py"},
             conn=empty_db,

@@ -1152,17 +1152,17 @@ def test_additional_dirs_inline_path_spec_round_trips_through_bash_match():
 
     def _lookup(c, sid, sess, proj):
         rows = c.execute(
-            "SELECT decision FROM permissions"
+            "SELECT id, decision FROM permissions"
             " WHERE rule_shape_id = ?"
             "   AND session_id IS ?"
             "   AND project_id IS ?;",
             (sid, sess, proj),
         ).fetchall()
-        return [{"decision": r[0]} for r in rows]
+        return [{"id": r[0], "decision": r[1]} for r in rows]
 
     _db.lookup_permissions = _lookup
     try:
-        verdict = _bash_match(
+        verdict, _ = _bash_match(
             "Bash",
             {"command": cmd},
             conn,

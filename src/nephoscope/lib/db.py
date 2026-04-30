@@ -1,9 +1,8 @@
 """Database helpers for the observations module.
 
-Versioned schema via PRAGMA user_version. Fresh DBs bootstrap from schema.sql
-(which sets user_version = 1). Older DBs are upgraded by _apply_migrations().
-Helpers for the permission tables (rule_shapes, permissions) and candidate
-tracking (permission_candidates, permission_candidate_sessions).
+Fresh DBs bootstrap from schema.sql (which sets user_version = 1). Helpers for
+the permission tables (rule_shapes, permissions) and candidate tracking
+(permission_candidates, permission_candidate_sessions).
 """
 
 from __future__ import annotations
@@ -18,56 +17,6 @@ from nephoscope.lib.paths import canonicalize, observations_db_path
 
 MAX_STR = 500
 _MAX_POSITIONAL_PATHS = 20
-
-# Numbered migrations applied by _apply_migrations().  Each entry is
-# (target_version, sql).  Version 1 is the baseline established by schema.sql.
-_MIGRATIONS: list[tuple[int, str]] = [
-    (
-        2,
-        # Add audit-trail columns to permission_ask_pending.
-        # permission_mode: carried from the PreToolUse payload.
-        # resolved_at / outcome: set by the recorder PostToolUse handler.
-        "ALTER TABLE permission_ask_pending ADD COLUMN permission_mode TEXT;\n"
-        "ALTER TABLE permission_ask_pending ADD COLUMN resolved_at TEXT;\n"
-        "ALTER TABLE permission_ask_pending ADD COLUMN outcome TEXT"
-        "  CHECK (outcome IN ('approved', 'denied'));",
-    ),
-]
-
-
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Advance the schema to the latest version by running pending migrations.
-
-    Reads PRAGMA user_version and applies every entry in _MIGRATIONS whose
-    target version is greater than the current version, in ascending order.
-    Each migration runs in its own transaction; user_version is updated inside
-    the same transaction so a crash mid-migration leaves the DB in a consistent
-    state.
-
-    Version-0 DBs (pre-migration-runner installs) are stamped to 1 (the
-    old _ensure_rule_shapes_context shim already applied the context column)
-    and then advanced to v2 by the v1→v2 migration in _MIGRATIONS.
-    """
-    current: int = conn.execute("PRAGMA user_version;").fetchone()[0]
-    if current == 0:
-        # Old install stamped by the shim.  Baseline is v1; no delta SQL needed.
-        conn.execute("PRAGMA user_version = 1;")
-        current = 1
-
-    for target_version, sql in sorted(_MIGRATIONS):
-        if target_version <= current:
-            continue
-        # executescript() issues an implicit COMMIT before running, so we
-        # cannot wrap it in a BEGIN/COMMIT pair via conn.execute().  Instead,
-        # prepend the transaction control directly into the script string so
-        # everything runs inside a single atomic executescript() call.
-        script = f"BEGIN EXCLUSIVE;\n{sql}\nPRAGMA user_version = {target_version};\nCOMMIT;\n"
-        try:
-            conn.executescript(script)
-        except Exception:
-            conn.executescript("ROLLBACK;")
-            raise
-        current = target_version
 
 
 def _db_path() -> Path:
@@ -101,11 +50,6 @@ def _open() -> sqlite3.Connection:
 
     If the DB file is empty, runs the schema.sql to bootstrap tables and views.
     Raises RuntimeError if schema.sql is missing when needed.
-
-    After loading or re-using the schema, runs :func:`_apply_migrations` to
-    advance the DB to the latest schema version.  Fresh DBs start at
-    user_version 2 (set by schema.sql).  Existing v0 installs are stamped
-    to 1 then advanced to 2 by the v1→v2 migration.
     """
     db_path = _db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,8 +65,6 @@ def _open() -> sqlite3.Connection:
             raise RuntimeError(f"schema.sql not found: {schema_path}")
         sql = schema_path.read_text(encoding="utf-8")
         conn.executescript(sql)
-
-    _apply_migrations(conn)
 
     return conn
 
@@ -147,36 +89,45 @@ def _resolve_project_root(cwd: str) -> str | None:
 def upsert_project(conn: sqlite3.Connection, cwd: str, now: str) -> int:
     """Insert-or-touch a project row keyed by cwd; return its id.
 
-    On first insertion, resolves and stores the project root.
-    On subsequent touches, updates last_seen and backfills root if missing.
+    On first insertion, resolves and stores the project root and
+    settings_json_path.  On subsequent touches, updates last_seen and
+    backfills root and settings_json_path when either is missing — this
+    ensures existing rows with NULL columns are repaired on the next
+    SessionStart.
 
     ``cwd`` and the derived ``root`` are canonicalized before write so
     tilde/symlink variants of the same logical path collapse to one row.
 
+    The ``settings_json_path`` is always ``<cwd>/.claude/settings.json``.
+    The file is not required to exist on disk — the path is recorded so
+    ``sync_project`` knows where to write if a project-tier rule is ever
+    promoted.
+
     Race-safety: the INSERT goes through ``ON CONFLICT(cwd) DO UPDATE``,
     so two connections racing to create the same project cannot produce
-    duplicate rows. The pre-check via SELECT is retained as a fast path
-    that avoids the cost of ``_resolve_project_root`` (which shells out
-    to ``git``) for the common "already exists" case.
+    duplicate rows.
     """
     cwd = canonicalize(cwd)
+    settings_path = canonicalize(str(Path(cwd) / ".claude" / "settings.json"))
+
     row = conn.execute(
-        "SELECT id, root FROM projects WHERE cwd = ?;", (cwd,)
+        "SELECT id, root, settings_json_path FROM projects WHERE cwd = ?;", (cwd,)
     ).fetchone()
-    if row is not None and row[1] is not None:
+    if row is not None and row[1] is not None and row[2] is not None:
         proj_id = int(row[0])
         conn.execute("UPDATE projects SET last_seen = ? WHERE id = ?;", (now, proj_id))
         return proj_id
 
     root = canonicalize(_resolve_project_root(cwd) or "") or None
     cur = conn.execute(
-        "INSERT INTO projects(cwd, name, root, first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO projects(cwd, name, root, settings_json_path, first_seen, last_seen)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(cwd) DO UPDATE SET"
         "   last_seen = excluded.last_seen,"
-        "   root = COALESCE(projects.root, excluded.root)"
+        "   root = COALESCE(projects.root, excluded.root),"
+        "   settings_json_path = COALESCE(projects.settings_json_path, excluded.settings_json_path)"
         " RETURNING id;",
-        (cwd, _project_name(cwd), root, now, now),
+        (cwd, _project_name(cwd), root, settings_path, now, now),
     )
     return int(cur.fetchone()[0])
 
@@ -421,10 +372,17 @@ def insert_permission(
         "INSERT INTO permissions"
         " (rule_shape_id, session_id, project_id, decision, source, reason,"
         "  decided_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        " VALUES (?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(rule_shape_id, IFNULL(session_id, 0), IFNULL(project_id, 0))"
+        " DO UPDATE SET"
+        "   decision = excluded.decision,"
+        "   source = excluded.source,"
+        "   reason = excluded.reason,"
+        "   decided_at = excluded.decided_at"
+        " RETURNING id;",
         (rule_shape_id, session_id, project_id, decision, source, reason, ts),
     )
-    return int(cur.lastrowid or 0)
+    return int(cur.fetchone()[0])
 
 
 def lookup_permissions(
@@ -479,9 +437,6 @@ def lookup_permissions(
         }
         for row in rows
     ]
-
-
-# --- Existing v5–v7 helpers (unchanged) -------------------------------------------
 
 
 def minify_json(obj: Any) -> str:

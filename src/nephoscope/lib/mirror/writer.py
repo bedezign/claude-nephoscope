@@ -472,12 +472,32 @@ def sync_global(conn: sqlite3.Connection) -> None:
 
 
 def sync_project(conn: sqlite3.Connection, project_id: int) -> None:
-    """Rebuild a project's settings.local.json from its permission rows.
+    """Rebuild a project's settings.json from its permission rows.
 
     Reads the target path from ``projects.settings_json_path``.
     Raises MirrorHashMismatch when the on-disk file was edited externally.
-    Raises ValueError when the project is unknown or has no path configured.
+    Raises ValueError when the project is unknown.
+
+    When ``settings_json_path`` is NULL the project has no settings file
+    configured yet (e.g. it only has global-tier rules, or the recorder
+    hasn't backfilled the column for that row yet).  In that case this
+    function is a silent no-op — no error, no traceback.
     """
+    row = conn.execute(
+        "SELECT settings_json_path FROM projects WHERE id = ?;",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"project {project_id} not found in DB")
+    if row[0] is None:
+        # No settings file configured — nothing to sync.
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "sync_project: project %d has no settings_json_path; skipping",
+            project_id,
+        )
+        return
     target, _ = _read_project_meta(conn, project_id)
     _atomic_write(conn, target, project_id=project_id)
 

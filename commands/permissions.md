@@ -103,9 +103,9 @@ END {
     }
     printf "\n"
     printf "  Try next:   /nephoscope:permissions scan \xe2\x86\x92 propose \xe2\x86\x92 review\n"
-    printf "  Or write a scoped rule directly, e.g. allow %s inside this project:\n", sample
+    printf "  Or write a scoped rule directly, e.g. allow %s inside any project root:\n", sample
     printf "    /nephoscope:permissions promote --verb %s --flags '"'"'*'"'"' \\\n", sample
-    printf "        --path-spec '"'"'$PROJECT_ROOT/**'"'"' --tier project\n"
+    printf "        --path-spec '"'"'$PROJECT_ROOT/**'"'"' --tier global\n"
   }
 }
 '

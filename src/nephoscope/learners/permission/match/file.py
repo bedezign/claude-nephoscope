@@ -144,15 +144,17 @@ def match(
     project_id: int | None,
     ctx: dict[str, str],
     trusted_dirs: list[str] | None = None,
-) -> Verdict:
+) -> tuple[Verdict, int | None]:
     """Match a file-tool invocation against path-glob permission rows.
 
     Applies specificity-first conflict resolution: among all matching rules,
     only those with the lowest wildcard count (most specific path_spec) vote.
     If any of the most-specific rules has a ``rejected`` decision, returns
-    ``Verdict.Deny`` (also used as deny-on-tie when counts are equal).
+    ``(Verdict.Deny, perm_id)`` (also used as deny-on-tie when counts are equal).
     If all most-specific rules have ``approved`` decisions, returns
-    ``Verdict.Allow``.  Otherwise returns ``Verdict.NoOpinion``.
+    ``(Verdict.Allow, perm_id)``.  Otherwise returns ``(Verdict.NoOpinion, None)``.
+
+    ``perm_id`` is the ``permissions.id`` of the decisive row.
     """
     from nephoscope.lib.db import lookup_permissions  # type: ignore[import-untyped]
     from nephoscope.lib.mirror.tool_class import VERB_GROUPS
@@ -175,24 +177,28 @@ def match(
         candidate_verbs,
     ).fetchall()
 
-    matched: list[tuple[str | None, str]] = []  # (path_spec, decision)
+    matched: list[tuple[str | None, str, int]] = []  # (path_spec, decision, perm_id)
     for shape_id_raw, path_spec in rows:
         if not _path_spec_matches(path_spec, file_path, ctx, trusted_dirs):
             continue
         perms = lookup_permissions(conn, int(shape_id_raw), session_id, project_id)
         if not perms:
             continue
-        matched.append((path_spec, perms[0]["decision"]))
+        matched.append((path_spec, perms[0]["decision"], perms[0]["id"]))
 
     if not matched:
-        return Verdict.NoOpinion
+        return Verdict.NoOpinion, None
 
-    with_wc = [(_wildcard_count(ps), d) for ps, d in matched]
-    min_wc = min(w for w, _ in with_wc)
-    specific = [d for w, d in with_wc if w == min_wc]
+    with_wc = [(_wildcard_count(ps), d, pid) for ps, d, pid in matched]
+    min_wc = min(w for w, _, _ in with_wc)
+    specific = [(d, pid) for w, d, pid in with_wc if w == min_wc]
 
-    if any(d == "rejected" for d in specific):
-        return Verdict.Deny
-    if all(d == "approved" for d in specific):
-        return Verdict.Allow
-    return Verdict.NoOpinion
+    if any(d == "rejected" for d, _ in specific):
+        # Return the first deny perm_id
+        deny_pid = next((pid for d, pid in specific if d == "rejected"), None)
+        return Verdict.Deny, deny_pid
+    if all(d == "approved" for d, _ in specific):
+        # Return the first approve perm_id
+        allow_pid = next((pid for d, pid in specific if d == "approved"), None)
+        return Verdict.Allow, allow_pid
+    return Verdict.NoOpinion, None

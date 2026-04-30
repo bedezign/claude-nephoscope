@@ -76,7 +76,7 @@ class TestRmInsideTrustedDir:
         _configure(monkeypatch, tmp_path, ["/trusted/dir"])
         apply_fixtures(tmp_db, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "rm -rf /trusted/dir/foo"},
             conn=tmp_db,
@@ -94,7 +94,7 @@ class TestRmInsideTrustedDir:
         _configure(monkeypatch, tmp_path, ["/trusted/dir"])
         apply_fixtures(tmp_db, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "rm -r /trusted/dir/subdir"},
             conn=tmp_db,
@@ -114,7 +114,7 @@ class TestRmOutsideTrustedDir:
         _configure(monkeypatch, tmp_path, ["/trusted/dir"])
         apply_fixtures(tmp_db, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "rm -rf /random/other/path"},
             conn=tmp_db,
@@ -132,7 +132,7 @@ class TestRmOutsideTrustedDir:
         _configure(monkeypatch, tmp_path, [])
         apply_fixtures(tmp_db, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "rm -rf /any/path"},
             conn=tmp_db,
@@ -164,7 +164,7 @@ class TestDenyInsideTrustedDir:
         _configure(monkeypatch, tmp_path, ["/tmp/test-trusted"])
         self._seed_rules(tmp_db)
 
-        verdict = file_match(
+        verdict, _ = file_match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/test-trusted/regular_file.py"},
             conn=tmp_db,
@@ -184,7 +184,7 @@ class TestDenyInsideTrustedDir:
         _configure(monkeypatch, tmp_path, ["/tmp/test-trusted"])
         self._seed_rules(tmp_db)
 
-        verdict = file_match(
+        verdict, _ = file_match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/test-trusted/.env"},
             conn=tmp_db,

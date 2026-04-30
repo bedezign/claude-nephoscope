@@ -22,7 +22,10 @@ def match(
     project_id: int | None,
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,  # noqa: ARG001 — unused; Bash-only feature
-) -> Verdict:
-    """Return :attr:`Verdict.Allow` unconditionally — orchestration tools are
-    default-allow."""
-    return Verdict.Allow
+) -> tuple[Verdict, int | None]:
+    """Return ``(Verdict.Allow, None)`` unconditionally.
+
+    Orchestration tools are default-allow and have no DB permission row to
+    track — no hit counter is incremented.
+    """
+    return Verdict.Allow, None

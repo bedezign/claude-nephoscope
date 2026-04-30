@@ -41,8 +41,8 @@ def _verdict_for_verb(
     conn: sqlite3.Connection,
     session_id: int | None,
     project_id: int | None,
-) -> Verdict:
-    """Look up permissions for *verb* and return a Verdict, or NoOpinion."""
+) -> tuple[Verdict, int | None]:
+    """Look up permissions for *verb* and return ``(Verdict, permission_id)``."""
     from nephoscope.lib.db import lookup_permissions  # type: ignore[import-untyped]
 
     row = conn.execute(
@@ -50,19 +50,21 @@ def _verdict_for_verb(
         (verb,),
     ).fetchone()
     if row is None:
-        return Verdict.NoOpinion
+        return Verdict.NoOpinion, None
 
     shape_id = int(row[0])
     perms = lookup_permissions(conn, shape_id, session_id, project_id)
     if not perms:
-        return Verdict.NoOpinion
+        return Verdict.NoOpinion, None
 
-    decision = perms[0]["decision"]
+    perm = perms[0]
+    decision = perm["decision"]
+    perm_id: int = perm["id"]
     if decision == "approved":
-        return Verdict.Allow
+        return Verdict.Allow, perm_id
     if decision == "rejected":
-        return Verdict.Deny
-    return Verdict.NoOpinion
+        return Verdict.Deny, perm_id
+    return Verdict.NoOpinion, None
 
 
 def match(
@@ -73,18 +75,22 @@ def match(
     project_id: int | None,
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,  # noqa: ARG001 — unused; Bash-only feature
-) -> Verdict:
-    """Match an MCP tool invocation against literal + wildcard permission rows."""
+) -> tuple[Verdict, int | None]:
+    """Match an MCP tool invocation against literal + wildcard permission rows.
+
+    Returns ``(Verdict, permission_id)`` where ``permission_id`` is the
+    ``permissions.id`` of the matched row, or ``None`` when no match was found.
+    """
     # 1. Literal match.
-    verdict = _verdict_for_verb(tool_name, conn, session_id, project_id)
+    verdict, perm_id = _verdict_for_verb(tool_name, conn, session_id, project_id)
     if verdict != Verdict.NoOpinion:
-        return verdict
+        return verdict, perm_id
 
     # 2. Namespace wildcard (mcp__<ns>__*).
     wildcard = _ns_wildcard(tool_name)
     if wildcard is not None and wildcard != tool_name:
-        verdict = _verdict_for_verb(wildcard, conn, session_id, project_id)
+        verdict, perm_id = _verdict_for_verb(wildcard, conn, session_id, project_id)
         if verdict != Verdict.NoOpinion:
-            return verdict
+            return verdict, perm_id
 
-    return Verdict.NoOpinion
+    return Verdict.NoOpinion, None

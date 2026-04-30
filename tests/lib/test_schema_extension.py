@@ -220,120 +220,19 @@ def test_idempotent_migration_already_migrated(tmp_path, monkeypatch):
 # ===========================================================================
 
 
-def test_fresh_db_has_user_version_2(tmp_path, monkeypatch):
-    """A DB opened via _open() on a brand-new file starts at user_version 2."""
+def test_fresh_db_has_user_version_1(tmp_path, monkeypatch):
+    """A DB opened via _open() on a brand-new file starts at user_version 1."""
     import nephoscope.lib.db as db_module
 
-    db_path = tmp_path / "fresh_v2.db"
+    db_path = tmp_path / "fresh_v1.db"
     monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
 
     conn = db_module._open()
     try:
         version = conn.execute("PRAGMA user_version;").fetchone()[0]
-        assert version == 2, f"Expected user_version=2 on fresh DB, got {version}"
+        assert version == 1, f"Expected user_version=1 on fresh DB, got {version}"
     finally:
         conn.close()
-
-
-def test_v0_db_advanced_to_v2_on_open(tmp_path, monkeypatch):
-    """A v0 DB (context column present, user_version=0) is advanced to v2 on _open().
-
-    Simulates an old install where: the context column was already applied by the
-    old _ensure_rule_shapes_context shim, permission_ask_pending is in its v1 shape
-    (no audit-trail columns), and user_version=0.  After _open(): stamps to 1, then
-    the v1→v2 migration adds the three audit columns.
-    """
-    import nephoscope.lib.db as db_module
-
-    schema_path = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "nephoscope"
-        / "lib"
-        / "schema.sql"
-    )
-    db_path = tmp_path / "v0.db"
-    monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
-
-    # Build the DB from current schema, then recreate permission_ask_pending in its
-    # v1 shape (no audit-trail columns) to faithfully simulate an old install, and
-    # force user_version back to 0.
-    with sqlite3.connect(db_path) as setup_conn:
-        setup_conn.executescript(schema_path.read_text())
-        setup_conn.executescript("""
-            PRAGMA foreign_keys = OFF;
-            DROP TABLE permission_ask_pending;
-            CREATE TABLE permission_ask_pending (
-              tool_use_id TEXT    PRIMARY KEY,
-              session_id  INTEGER NOT NULL,
-              verb        TEXT    NOT NULL,
-              subcommand  TEXT,
-              flags       TEXT    NOT NULL,
-              asked_at    TEXT    NOT NULL
-            );
-            PRAGMA foreign_keys = ON;
-            PRAGMA user_version = 0;
-        """)
-
-    # Verify the precondition.
-    with sqlite3.connect(db_path) as pre_conn:
-        pre_version = pre_conn.execute("PRAGMA user_version;").fetchone()[0]
-        assert pre_version == 0, "Setup error: user_version should be 0 before _open()"
-        assert "context" in _columns(pre_conn, "rule_shapes"), (
-            "Setup error: context column must be present to simulate a shim-migrated DB"
-        )
-        assert "permission_mode" not in _columns(pre_conn, "permission_ask_pending"), (
-            "Setup error: permission_mode should be absent in v1-shaped table"
-        )
-
-    conn = db_module._open()
-    try:
-        version = conn.execute("PRAGMA user_version;").fetchone()[0]
-        assert version == 2, (
-            f"Expected user_version=2 after _open() on v0 DB, got {version}"
-        )
-        assert "permission_mode" in _columns(conn, "permission_ask_pending"), (
-            "v1→v2 migration must add permission_mode column"
-        )
-    finally:
-        conn.close()
-
-
-def test_migration_runner_applies_deltas_in_order(tmp_path, monkeypatch):
-    """A fake v3 migration appended to _MIGRATIONS is applied to a v2 DB."""
-    import nephoscope.lib.db as db_module
-
-    db_path = tmp_path / "v2_to_v3.db"
-    monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
-
-    # Bootstrap a v2 DB (current baseline after all real migrations).
-    conn = db_module._open()
-    conn.close()
-
-    # Append a fake migration to version 3 without replacing existing migrations.
-    fake_migration = (3, "CREATE TABLE _test_migration (id INTEGER PRIMARY KEY);")
-    monkeypatch.setattr(
-        db_module, "_MIGRATIONS", db_module._MIGRATIONS + [fake_migration]
-    )
-
-    # Reopen — _apply_migrations should detect v2 < 3 and run the delta.
-    conn2 = db_module._open()
-    try:
-        version = conn2.execute("PRAGMA user_version;").fetchone()[0]
-        assert version == 3, (
-            f"Expected user_version=3 after fake migration, got {version}"
-        )
-        tables = {
-            row[0]
-            for row in conn2.execute(
-                "SELECT name FROM sqlite_master WHERE type='table';"
-            )
-        }
-        assert "_test_migration" in tables, (
-            "_test_migration table missing — migration delta was not applied"
-        )
-    finally:
-        conn2.close()
 
 
 def test_ensure_rule_shapes_context_removed():

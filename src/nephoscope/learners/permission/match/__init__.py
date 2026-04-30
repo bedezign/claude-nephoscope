@@ -2,10 +2,13 @@
 
 Public API
 ----------
-``dispatch(tool_name, tool_input, conn, session_id, project_id, cwd=None) -> Verdict``
+``dispatch(tool_name, tool_input, conn, session_id, project_id, cwd=None) -> (Verdict, int | None)``
 
     Routes to the appropriate per-class matcher and returns a
-    :class:`~learners.permission._types.Verdict`.
+    ``(Verdict, permission_id)`` pair.  ``permission_id`` is the
+    ``permissions.id`` of the decisive row, or ``None`` when no DB row was
+    matched.  The caller should increment ``permissions.hit_count`` for the
+    returned ``permission_id``.
 
 ``Verdict``
     Re-exported for convenience so callers only need to import from this
@@ -163,11 +166,13 @@ def dispatch(
     session_id: int | None,
     project_id: int | None,
     cwd: str | None = None,
-) -> Verdict:
-    """Route *tool_name* to the appropriate matcher and return a Verdict.
+) -> tuple[Verdict, int | None]:
+    """Route *tool_name* to the appropriate matcher and return ``(Verdict, perm_id)``.
 
     Tier priority (session → project → global) is enforced here: the
     dispatch iterates tiers and returns the first non-``NoOpinion`` result.
+    ``perm_id`` is the ``permissions.id`` of the decisive row, or ``None``
+    when no DB permission row was matched.
     """
     from nephoscope.lib.mirror.tool_class import classify  # type: ignore[import-untyped]
 
@@ -196,7 +201,7 @@ def dispatch(
     # unless the tool is in _FILE_CLASS_TOOLS and non_bash_tool_matching is on.
     file_promoted = tool_name in _FILE_CLASS_TOOLS and _file_tool_matching_enabled()
     if not _full_match_enabled() and not file_promoted:
-        return Verdict.NoOpinion
+        return Verdict.NoOpinion, None
 
     # HOOK_FULL_MATCH is ON — run full matching for remaining classes.
     if tool_cls == "orchestration":
@@ -235,7 +240,7 @@ def dispatch(
             _match, tool_name, tool_input, conn, session_id, project_id, ctx
         )
 
-    return Verdict.NoOpinion
+    return Verdict.NoOpinion, None
 
 
 def _run_tiers(
@@ -248,8 +253,11 @@ def _run_tiers(
     ctx: dict[str, str],
     additional_dirs: list[str] | None = None,
     trusted_dirs: list[str] | None = None,
-) -> Verdict:
+) -> tuple[Verdict, int | None]:
     """Iterate session → project → global tiers; return first non-NoOpinion.
+
+    Returns ``(Verdict, permission_id)`` where ``permission_id`` is the
+    ``permissions.id`` of the decisive row, or ``None`` when no row matched.
 
     Each tier passes a scoped (session_id, project_id) pair so that
     ``lookup_permissions`` only considers rows for that tier.
@@ -279,7 +287,7 @@ def _run_tiers(
             continue
         seen.add(key)
 
-        verdict = matcher(
+        verdict, perm_id = matcher(
             tool_name,
             tool_input,
             conn,
@@ -289,6 +297,6 @@ def _run_tiers(
             **extra_kwargs,
         )
         if verdict != Verdict.NoOpinion:
-            return verdict
+            return verdict, perm_id
 
-    return Verdict.NoOpinion
+    return Verdict.NoOpinion, None

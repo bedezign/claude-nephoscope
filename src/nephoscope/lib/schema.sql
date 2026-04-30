@@ -118,8 +118,12 @@ CREATE TABLE permissions (
   source        TEXT    NOT NULL,    -- 'session-ask', 'review', 'learner', 'seed', 'manual', 'migrated'
   reason        TEXT,
   decided_at    TEXT    NOT NULL,
+  hit_count     INTEGER NOT NULL DEFAULT 0,
+  last_hit_at   TEXT,               -- ISO-8601 UTC; NULL until the rule is first matched
   CHECK (NOT (session_id IS NOT NULL AND project_id IS NOT NULL))
 );
+CREATE UNIQUE INDEX idx_permissions_unique
+  ON permissions(rule_shape_id, IFNULL(session_id, 0), IFNULL(project_id, 0));
 CREATE INDEX idx_permissions_lookup  ON permissions(rule_shape_id, session_id, project_id);
 CREATE INDEX idx_permissions_session ON permissions(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX idx_permissions_project ON permissions(project_id) WHERE project_id IS NOT NULL;
@@ -198,7 +202,8 @@ CREATE VIEW v_permissions AS
          p.session_id, p.project_id,
          CASE WHEN p.session_id IS NOT NULL THEN 'session'
               WHEN p.project_id IS NOT NULL THEN 'project'
-              ELSE 'global' END AS tier
+              ELSE 'global' END AS tier,
+         p.hit_count, p.last_hit_at
     FROM permissions p
     JOIN rule_shapes rs ON rs.id = p.rule_shape_id;
 
@@ -228,4 +233,4 @@ INSERT OR IGNORE INTO permission_modes (name) VALUES
 INSERT OR IGNORE INTO call_statuses (name) VALUES
   ('pending'), ('ok'), ('err'), ('denied'), ('orphan');
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 1;

@@ -253,7 +253,7 @@ class TestDispatchWithEnvVarResolution:
         conn = tmp_db
         apply_fixtures(conn, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "sqlite3 /tmp/x.db .tables"},
             conn=conn,
@@ -286,14 +286,14 @@ class TestDispatchWithEnvVarResolution:
         conn = tmp_db
         apply_fixtures(conn, SAFE_SHAPES)
 
-        verdict_plain = dispatch(
+        verdict_plain, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "sqlite3 /tmp/x.db .tables"},
             conn=conn,
             session_id=None,
             project_id=None,
         )
-        verdict_var = dispatch(
+        verdict_var, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": 'sqlite3 "${DB:-/tmp/x.db}" .tables'},
             conn=conn,
@@ -319,7 +319,7 @@ class TestDispatchWithEnvVarResolution:
         conn = tmp_db
         apply_fixtures(conn, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": "cat /tmp/x"},
             conn=conn,
@@ -345,7 +345,7 @@ class TestDispatchWithEnvVarResolution:
         conn = tmp_db
         apply_fixtures(conn, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": 'cat "${HOME}/.claude/observations.db"'},
             conn=conn,
@@ -360,7 +360,7 @@ class TestDispatchWithEnvVarResolution:
         """Empty command input gives NoOpinion — not a crash."""
         from nephoscope.learners.permission.match import Verdict, dispatch
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": ""},
             conn=tmp_db,
@@ -391,7 +391,7 @@ class TestDispatchWithEnvVarResolution:
         conn = tmp_db
         apply_fixtures(conn, SAFE_SHAPES)
 
-        verdict = dispatch(
+        verdict, _ = dispatch(
             tool_name="Bash",
             tool_input={"command": 'sqlite3 "${DB}" .tables'},
             conn=conn,

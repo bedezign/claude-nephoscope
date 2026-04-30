@@ -64,7 +64,7 @@ class TestSpecificityResolution:
         _seed(tmp_db, "$TRUSTED_DIR/**", "rejected")  # wildcard count 1
         _seed(tmp_db, "$TRUSTED_DIR/.env", "approved")  # wildcard count 0
 
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/.env"},
             conn=tmp_db,
@@ -80,7 +80,7 @@ class TestSpecificityResolution:
         _seed(tmp_db, "$TRUSTED_DIR/**", "approved")  # wildcard count 1
         _seed(tmp_db, "$TRUSTED_DIR/.env", "rejected")  # wildcard count 0
 
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/.env"},
             conn=tmp_db,
@@ -105,7 +105,7 @@ class TestSpecificityResolution:
         # To create a genuine tie with conflict, use two distinct path_specs at the same wildcard count
         _seed(tmp_db, "$TRUSTED_DIR/sub/**", "rejected")  # wildcard count 1
 
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/sub/file.py"},
             conn=tmp_db,
@@ -121,7 +121,7 @@ class TestSpecificityResolution:
         _seed(tmp_db, "$TRUSTED_DIR/**", "approved")  # wildcard count 1
         _seed(tmp_db, "$TRUSTED_DIR/sub/**", "approved")  # wildcard count 1
 
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/sub/file.py"},
             conn=tmp_db,
@@ -134,7 +134,7 @@ class TestSpecificityResolution:
 
     def test_no_matching_rules_returns_no_opinion(self, tmp_db) -> None:
         """No rules in DB → Verdict.NoOpinion."""
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/file.py"},
             conn=tmp_db,
@@ -149,7 +149,7 @@ class TestSpecificityResolution:
         """Single matching Allow rule → Verdict.Allow."""
         _seed(tmp_db, "$TRUSTED_DIR/**", "approved")
 
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/file.py"},
             conn=tmp_db,
@@ -164,7 +164,7 @@ class TestSpecificityResolution:
         """Single matching Deny rule → Verdict.Deny."""
         _seed(tmp_db, "$TRUSTED_DIR/**", "rejected")
 
-        verdict = match(
+        verdict, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/tmp/trusted/file.py"},
             conn=tmp_db,

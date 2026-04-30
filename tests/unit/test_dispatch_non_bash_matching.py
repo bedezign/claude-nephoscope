@@ -118,7 +118,7 @@ class TestNonBashMatchingFlagOff:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -134,7 +134,7 @@ class TestNonBashMatchingFlagOff:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Edit", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Edit", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -151,7 +151,7 @@ class TestNonBashMatchingFlagOff:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Read", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Read", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -176,7 +176,7 @@ class TestNonBashMatchingFlagOn:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -192,7 +192,7 @@ class TestNonBashMatchingFlagOn:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Edit", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Edit", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -208,7 +208,7 @@ class TestNonBashMatchingFlagOn:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Read", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Read", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -225,7 +225,7 @@ class TestNonBashMatchingFlagOn:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -240,7 +240,7 @@ class TestNonBashMatchingFlagOn:
         # No permissions seeded for Write.
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch("Write", {"file_path": "/tmp/test.py"}, conn, None, None)
         finally:
             conn.close()
 
@@ -283,7 +283,7 @@ class TestBashUnaffectedByFlag:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Bash", {"command": "git status"}, conn, None, None)
+            v, _ = dispatch("Bash", {"command": "git status"}, conn, None, None)
         finally:
             conn.close()
 
@@ -314,7 +314,7 @@ class TestBashUnaffectedByFlag:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Bash", {"command": "git status"}, conn, None, None)
+            v, _ = dispatch("Bash", {"command": "git status"}, conn, None, None)
         finally:
             conn.close()
 
@@ -343,7 +343,7 @@ class TestNonFileClassToolsUnaffected:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Grep", {}, conn, None, None)
+            v, _ = dispatch("Grep", {}, conn, None, None)
         finally:
             conn.close()
 
@@ -359,7 +359,7 @@ class TestNonFileClassToolsUnaffected:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Glob", {}, conn, None, None)
+            v, _ = dispatch("Glob", {}, conn, None, None)
         finally:
             conn.close()
 
@@ -375,7 +375,7 @@ class TestNonFileClassToolsUnaffected:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("mcp__ns__tool", {}, conn, None, None)
+            v, _ = dispatch("mcp__ns__tool", {}, conn, None, None)
         finally:
             conn.close()
 
@@ -388,7 +388,7 @@ class TestNonFileClassToolsUnaffected:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("Agent", {}, conn, None, None)
+            v, _ = dispatch("Agent", {}, conn, None, None)
         finally:
             conn.close()
 
@@ -417,7 +417,9 @@ class TestFileClassNotInPromotedSet:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch("MultiEdit", {"file_path": "/tmp/test.py"}, conn, None, None)
+            v, _ = dispatch(
+                "MultiEdit", {"file_path": "/tmp/test.py"}, conn, None, None
+            )
         finally:
             conn.close()
 
@@ -433,7 +435,7 @@ class TestFileClassNotInPromotedSet:
 
         conn = _open_conn(_db_path_from(tmp_db))
         try:
-            v = dispatch(
+            v, _ = dispatch(
                 "NotebookEdit", {"file_path": "/tmp/test.ipynb"}, conn, None, None
             )
         finally:

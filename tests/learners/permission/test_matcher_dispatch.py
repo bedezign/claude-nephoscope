@@ -158,41 +158,45 @@ class TestBashMatcher:
     def test_approved_shape_returns_allow(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "git", "status")
         _insert_permission(tmp_db, shape_id, "approved")
-        v = bash_match("Bash", {"command": "git status"}, _conn(tmp_db), None, None, {})
+        v, _ = bash_match(
+            "Bash", {"command": "git status"}, _conn(tmp_db), None, None, {}
+        )
         assert v == Verdict.Allow
 
     def test_rejected_shape_returns_deny(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "git", "push")
         _insert_permission(tmp_db, shape_id, "rejected")
-        v = bash_match(
+        v, _ = bash_match(
             "Bash", {"command": "git push origin main"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Deny
 
     def test_ask_verb_returns_ask(self, tmp_db):
         # rm -r has no DB approval → falls to ask tier via ask_flag_patterns in deny.py
-        v = bash_match(
+        v, _ = bash_match(
             "Bash", {"command": "rm -r /tmp/file"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Ask
 
     def test_unknown_verb_returns_noop(self, tmp_db):
-        v = bash_match("Bash", {"command": "git log"}, _conn(tmp_db), None, None, {})
+        v, _ = bash_match("Bash", {"command": "git log"}, _conn(tmp_db), None, None, {})
         assert v == Verdict.NoOpinion
 
     def test_empty_command_returns_noop(self, tmp_db):
-        v = bash_match("Bash", {"command": ""}, _conn(tmp_db), None, None, {})
+        v, _ = bash_match("Bash", {"command": ""}, _conn(tmp_db), None, None, {})
         assert v == Verdict.NoOpinion
 
     def test_unparseable_command_returns_noop(self, tmp_db):
-        v = bash_match("Bash", {"command": ")(invalid("}, _conn(tmp_db), None, None, {})
+        v, _ = bash_match(
+            "Bash", {"command": ")(invalid("}, _conn(tmp_db), None, None, {}
+        )
         assert v == Verdict.NoOpinion
 
     def test_approved_beats_ask_tier(self, tmp_db):
         """An approved permission overrides the ask tier."""
         shape_id = _insert_rule_shape(tmp_db, "rm", None, '["-f"]')
         _insert_permission(tmp_db, shape_id, "approved")
-        v = bash_match(
+        v, _ = bash_match(
             "Bash", {"command": "rm -f /tmp/x"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Allow
@@ -200,7 +204,7 @@ class TestBashMatcher:
     def test_pipeline_one_rejected_returns_deny(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "git", "push")
         _insert_permission(tmp_db, shape_id, "rejected")
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "git log && git push origin main"},
             _conn(tmp_db),
@@ -213,7 +217,7 @@ class TestBashMatcher:
     def test_flags_wildcard_matches(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "pytest", None, "*")
         _insert_permission(tmp_db, shape_id, "approved")
-        v = bash_match(
+        v, _ = bash_match(
             "Bash", {"command": "pytest -q --tb=short"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Allow
@@ -229,7 +233,7 @@ class TestFileMatcher:
         """path_spec=NULL → matches any file_path."""
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec=None)
         _insert_permission(tmp_db, shape_id, "approved")
-        v = file_match(
+        v, _ = file_match(
             "Read", {"file_path": "/home/user/file.py"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Allow
@@ -239,10 +243,10 @@ class TestFileMatcher:
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec="")
         _insert_permission(tmp_db, shape_id, "approved")
         # No file path → matches.
-        v = file_match("Read", {}, _conn(tmp_db), None, None, {})
+        v, _ = file_match("Read", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.Allow
         # File path provided → no match.
-        v2 = file_match(
+        v2, _ = file_match(
             "Read", {"file_path": "/home/user/file.py"}, _conn(tmp_db), None, None, {}
         )
         assert v2 == Verdict.NoOpinion
@@ -254,7 +258,7 @@ class TestFileMatcher:
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec="$HOME/**")
         _insert_permission(tmp_db, shape_id, "approved")
         ctx = {"home": home}
-        v = file_match(
+        v, _ = file_match(
             "Read",
             {"file_path": f"{home}/projects/main.py"},
             _conn(tmp_db),
@@ -268,7 +272,7 @@ class TestFileMatcher:
         shape_id = _insert_rule_shape(tmp_db, "Edit", path_spec="$PROJECT_ROOT/**")
         _insert_permission(tmp_db, shape_id, "approved")
         ctx = {"project_root": "/home/user/myproject"}
-        v = file_match(
+        v, _ = file_match(
             "Edit",
             {"file_path": "/home/user/myproject/src/main.py"},
             _conn(tmp_db),
@@ -282,7 +286,7 @@ class TestFileMatcher:
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec="$HOME/.claude/**")
         _insert_permission(tmp_db, shape_id, "approved")
         ctx = {"home": "/home/user"}
-        v = file_match(
+        v, _ = file_match(
             "Read", {"file_path": "/tmp/unrelated.py"}, _conn(tmp_db), None, None, ctx
         )
         assert v == Verdict.NoOpinion
@@ -291,7 +295,7 @@ class TestFileMatcher:
         shape_id = _insert_rule_shape(tmp_db, "Write", path_spec="$HOME/.claude/**")
         _insert_permission(tmp_db, shape_id, "rejected")
         ctx = {"home": "/home/user"}
-        v = file_match(
+        v, _ = file_match(
             "Write",
             {"file_path": "/home/user/.claude/settings.json"},
             _conn(tmp_db),
@@ -302,7 +306,7 @@ class TestFileMatcher:
         assert v == Verdict.Deny
 
     def test_no_rule_shape_for_verb_returns_noop(self, tmp_db):
-        v = file_match(
+        v, _ = file_match(
             "Read", {"file_path": "/any/file.py"}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.NoOpinion
@@ -311,7 +315,9 @@ class TestFileMatcher:
         """Tool input with 'path' key (instead of 'file_path') is accepted."""
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec=None)
         _insert_permission(tmp_db, shape_id, "approved")
-        v = file_match("Read", {"path": "/some/file.py"}, _conn(tmp_db), None, None, {})
+        v, _ = file_match(
+            "Read", {"path": "/some/file.py"}, _conn(tmp_db), None, None, {}
+        )
         assert v == Verdict.Allow
 
 
@@ -324,24 +330,24 @@ class TestFlatMatcher:
     def test_approved_returns_allow(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "Grep")
         _insert_permission(tmp_db, shape_id, "approved")
-        v = flat_match("Grep", {}, _conn(tmp_db), None, None, {})
+        v, _ = flat_match("Grep", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.Allow
 
     def test_rejected_returns_deny(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "WebSearch")
         _insert_permission(tmp_db, shape_id, "rejected")
-        v = flat_match("WebSearch", {}, _conn(tmp_db), None, None, {})
+        v, _ = flat_match("WebSearch", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.Deny
 
     def test_no_row_returns_noop(self, tmp_db):
-        v = flat_match("Glob", {}, _conn(tmp_db), None, None, {})
+        v, _ = flat_match("Glob", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.NoOpinion
 
     def test_ignores_tool_input_content(self, tmp_db):
         """Flat matcher ignores tool_input; only verb matters."""
         shape_id = _insert_rule_shape(tmp_db, "Grep")
         _insert_permission(tmp_db, shape_id, "approved")
-        v = flat_match(
+        v, _ = flat_match(
             "Grep",
             {"pattern": "anything", "path": "/wherever"},
             _conn(tmp_db),
@@ -361,7 +367,7 @@ class TestMcpMatcher:
     def test_literal_match_approved(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "mcp__claude-peers__send_message")
         _insert_permission(tmp_db, shape_id, "approved")
-        v = mcp_match(
+        v, _ = mcp_match(
             "mcp__claude-peers__send_message", {}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Allow
@@ -369,14 +375,16 @@ class TestMcpMatcher:
     def test_literal_match_rejected(self, tmp_db):
         shape_id = _insert_rule_shape(tmp_db, "mcp__dangerous__delete_all")
         _insert_permission(tmp_db, shape_id, "rejected")
-        v = mcp_match("mcp__dangerous__delete_all", {}, _conn(tmp_db), None, None, {})
+        v, _ = mcp_match(
+            "mcp__dangerous__delete_all", {}, _conn(tmp_db), None, None, {}
+        )
         assert v == Verdict.Deny
 
     def test_wildcard_match(self, tmp_db):
         """mcp__ns__* wildcard covers any tool in that namespace."""
         shape_id = _insert_rule_shape(tmp_db, "mcp__claude-peers__*")
         _insert_permission(tmp_db, shape_id, "approved")
-        v = mcp_match(
+        v, _ = mcp_match(
             "mcp__claude-peers__list_peers", {}, _conn(tmp_db), None, None, {}
         )
         assert v == Verdict.Allow
@@ -388,11 +396,11 @@ class TestMcpMatcher:
         _insert_permission(tmp_db, lit_id, "rejected")
         wild_id = _insert_rule_shape(tmp_db, "mcp__ns__*")
         _insert_permission(tmp_db, wild_id, "approved")
-        v = mcp_match("mcp__ns__specific_tool", {}, _conn(tmp_db), None, None, {})
+        v, _ = mcp_match("mcp__ns__specific_tool", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.Deny
 
     def test_no_row_returns_noop(self, tmp_db):
-        v = mcp_match("mcp__unknown__tool", {}, _conn(tmp_db), None, None, {})
+        v, _ = mcp_match("mcp__unknown__tool", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.NoOpinion
 
 
@@ -403,12 +411,12 @@ class TestMcpMatcher:
 
 class TestOrchestrationMatcher:
     def test_always_allow(self, tmp_db):
-        v = orch_match("Agent", {}, _conn(tmp_db), None, None, {})
+        v, _ = orch_match("Agent", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.Allow
 
     def test_allow_without_any_db_rows(self, tmp_db):
         # No rule_shapes or permissions rows at all.
-        v = orch_match("TaskCreate", {}, _conn(tmp_db), None, None, {})
+        v, _ = orch_match("TaskCreate", {}, _conn(tmp_db), None, None, {})
         assert v == Verdict.Allow
 
 
@@ -439,7 +447,7 @@ class TestDispatchFullMatchOff:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Bash", {"command": "git status"}, conn, None, None)
+            v, _ = dispatch("Bash", {"command": "git status"}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -451,7 +459,7 @@ class TestDispatchFullMatchOff:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Read", {"file_path": "/some/file.py"}, conn, None, None)
+            v, _ = dispatch("Read", {"file_path": "/some/file.py"}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -463,7 +471,7 @@ class TestDispatchFullMatchOff:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Grep", {}, conn, None, None)
+            v, _ = dispatch("Grep", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -475,7 +483,7 @@ class TestDispatchFullMatchOff:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("mcp__ns__tool", {}, conn, None, None)
+            v, _ = dispatch("mcp__ns__tool", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -485,7 +493,7 @@ class TestDispatchFullMatchOff:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Agent", {}, conn, None, None)
+            v, _ = dispatch("Agent", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -506,7 +514,7 @@ class TestDispatchFullMatchOn:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Read", {"file_path": "/some/file.py"}, conn, None, None)
+            v, _ = dispatch("Read", {"file_path": "/some/file.py"}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -518,7 +526,7 @@ class TestDispatchFullMatchOn:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("WebSearch", {}, conn, None, None)
+            v, _ = dispatch("WebSearch", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Deny
@@ -530,7 +538,7 @@ class TestDispatchFullMatchOn:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("mcp__ns__tool", {}, conn, None, None)
+            v, _ = dispatch("mcp__ns__tool", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -540,7 +548,7 @@ class TestDispatchFullMatchOn:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Agent", {}, conn, None, None)
+            v, _ = dispatch("Agent", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -552,7 +560,7 @@ class TestDispatchFullMatchOn:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Grep", {}, conn, None, None)
+            v, _ = dispatch("Grep", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -564,7 +572,7 @@ class TestDispatchFullMatchOn:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Grep", {}, conn, None, None)
+            v, _ = dispatch("Grep", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -588,7 +596,7 @@ class TestDispatchTierPriority:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Bash", {"command": "git fetch"}, conn, sess_id, proj_id)
+            v, _ = dispatch("Bash", {"command": "git fetch"}, conn, sess_id, proj_id)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -602,7 +610,7 @@ class TestDispatchTierPriority:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Bash", {"command": "git fetch"}, conn, None, proj_id)
+            v, _ = dispatch("Bash", {"command": "git fetch"}, conn, None, proj_id)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -614,7 +622,7 @@ class TestDispatchTierPriority:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Bash", {"command": "git log"}, conn, None, None)
+            v, _ = dispatch("Bash", {"command": "git log"}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -632,7 +640,7 @@ class TestDispatchTierPriority:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch(
+            v, _ = dispatch(
                 "Read", {"file_path": f"{home}/project/main.py"}, conn, None, proj_id
             )
         finally:
@@ -660,7 +668,7 @@ class TestDispatchDoomPath:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Bash", {}, conn, None, None)
+            v, _ = dispatch("Bash", {}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -672,7 +680,7 @@ class TestDispatchDoomPath:
         conn = _open_conn(db_path)
         try:
             # session_id=None, project_id=None → global-only lookup
-            v = dispatch("Bash", {"command": "git log"}, conn, None, None)
+            v, _ = dispatch("Bash", {"command": "git log"}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.Allow
@@ -686,7 +694,7 @@ class TestDispatchDoomPath:
         try:
             # Classify: not file/flat/mcp/orchestration → bash default.
             # Bash matcher looks for rule_shape match via canonicalize (verb=my-custom-script).
-            v = dispatch(
+            v, _ = dispatch(
                 "Bash", {"command": "my-custom-script --run"}, conn, None, None
             )
         finally:
@@ -703,7 +711,7 @@ class TestDispatchDoomPath:
         db_path = Path(tmp_db.execute("PRAGMA database_list").fetchone()[2])
         conn = _open_conn(db_path)
         try:
-            v = dispatch("Read", {"file_path": "/some/file.py"}, conn, None, None)
+            v, _ = dispatch("Read", {"file_path": "/some/file.py"}, conn, None, None)
         finally:
             conn.close()
         assert v == Verdict.NoOpinion
@@ -832,7 +840,7 @@ class TestWildcardVerbRuleShape:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": f"cat {self._HOME}/.aws/credentials"},
             tmp_db,
@@ -853,7 +861,7 @@ class TestWildcardVerbRuleShape:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": f"grep aws {self._HOME}/.aws/credentials"},
             tmp_db,
@@ -874,7 +882,7 @@ class TestWildcardVerbRuleShape:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat /tmp/something-unrelated.txt"},
             tmp_db,
@@ -917,7 +925,7 @@ class TestWildcardVerbRuleShape:
         )
         _insert_permission(tmp_db, wildcard_shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": f"cat {self._HOME}/.aws/credentials"},
             tmp_db,
@@ -974,7 +982,7 @@ class TestContextAwareMatcher:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "op read 'op://Private/item/password'"},
             tmp_db,
@@ -1002,7 +1010,7 @@ class TestContextAwareMatcher:
         _insert_permission(tmp_db, shape_id, "rejected")
 
         # curl with op read inside command substitution.
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {
                 "command": "curl -H \"Authorization: Bearer $(op read 'op://Private/item/password')\""
@@ -1028,7 +1036,7 @@ class TestContextAwareMatcher:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "op read 'op://Private/item/password'"},
             tmp_db,
@@ -1054,7 +1062,7 @@ class TestContextAwareMatcher:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {
                 "command": "curl -H \"Authorization: Bearer $(op read 'op://Private/item/password')\""
@@ -1113,7 +1121,7 @@ class TestTwoWordSubcommandMatchEndToEnd:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "vault kv get secret/db-password"},
             tmp_db,
@@ -1135,7 +1143,7 @@ class TestTwoWordSubcommandMatchEndToEnd:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "doppler secrets get DATABASE_URL"},
             tmp_db,
@@ -1158,7 +1166,7 @@ class TestTwoWordSubcommandMatchEndToEnd:
         )
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {
                 "command": 'curl -H "Authorization: Bearer $(vault kv get -field=value secret/api-key)"'
@@ -1205,7 +1213,7 @@ class TestEnvFileSeedRuleMatching:
     def test_cat_env_in_cwd_is_denied(self, tmp_db):
         """cat .env (relative, resolved to $CWD/.env) → Deny."""
         self._seed_env_rule(tmp_db)
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat .env"},
             tmp_db,
@@ -1218,7 +1226,7 @@ class TestEnvFileSeedRuleMatching:
     def test_cat_env_in_subdirectory_is_denied(self, tmp_db):
         """cat src/.env (relative, resolved to $CWD/src/.env) → Deny."""
         self._seed_env_rule(tmp_db)
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat src/.env"},
             tmp_db,
@@ -1231,7 +1239,7 @@ class TestEnvFileSeedRuleMatching:
     def test_cat_env_deep_path_is_denied(self, tmp_db):
         """cat apps/web/.env (relative, deep) → Deny."""
         self._seed_env_rule(tmp_db)
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat apps/web/.env"},
             tmp_db,
@@ -1244,7 +1252,7 @@ class TestEnvFileSeedRuleMatching:
     def test_env_rule_does_not_match_different_basename(self, tmp_db):
         """$CWD/**/.env rule must NOT fire on cat src/foo.txt (different basename)."""
         self._seed_env_rule(tmp_db)
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat src/foo.txt"},
             tmp_db,
@@ -1259,7 +1267,7 @@ class TestEnvFileSeedRuleMatching:
     def test_env_rule_does_not_match_env_example(self, tmp_db):
         """$CWD/**/.env rule must NOT fire on .env.example (different basename)."""
         self._seed_env_rule(tmp_db)
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat .env.example"},
             tmp_db,
@@ -1272,7 +1280,7 @@ class TestEnvFileSeedRuleMatching:
     def test_env_rule_does_not_match_env_template(self, tmp_db):
         """$CWD/**/.env rule must NOT fire on .env.template."""
         self._seed_env_rule(tmp_db)
-        v = bash_match(
+        v, _ = bash_match(
             "Bash",
             {"command": "cat .env.template"},
             tmp_db,

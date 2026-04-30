@@ -67,6 +67,16 @@ _AUTO_LOAD_VERB_PROFILES: list[str] = [
     "shell-scripting.yaml",
 ]
 
+# Optional permission fixture profiles presented to the user during first-run.
+# Order is 1-indexed menu order — do not reorder without updating tests.
+_OPTIONAL_PROFILES: list[tuple[str, str]] = [
+    ("project-dev", "Full file + script access within trusted project directories"),
+    ("dev-tools", "Developer utilities (curl, make, openssl, …)"),
+    ("python-dev", "Python tooling (uv, ruff, pytest, …)"),
+    ("javascript", "JavaScript/TypeScript tooling (node, npm, vitest, …)"),
+    ("devops", "DevOps tools (kubectl, docker, terraform, ansible)"),
+]
+
 
 def _resolve_target(cli_path: str | None) -> Path:
     """Return the DB path honouring the CLI override first, then env/defaults."""
@@ -191,6 +201,87 @@ def _prompt_for_paths() -> list[str]:
     return roots
 
 
+def _prompt_for_profiles() -> list[Path]:
+    """Print a numbered menu of optional profiles and return the selected paths.
+
+    Reads a single line from stdin. Supported inputs:
+    - blank / empty → return []
+    - "all" → return all four profile paths in menu order
+    - digit string (e.g. "124") → return paths for each valid digit, deduplicated
+      in input order, one-indexed into _OPTIONAL_PROFILES
+    - invalid characters or out-of-range digits → print warning to stderr, return []
+    - EOFError → return []
+
+    No retry is performed — the function returns immediately after one input().
+    """
+    print("\nOptional permission profiles — select which to pre-approve:")
+    for i, (stem, desc) in enumerate(_OPTIONAL_PROFILES, start=1):
+        print(f"  {i}. {desc}")
+    print(
+        "\nEnter profile numbers (e.g. '12' or '124'), 'all', or press Enter to skip."
+    )
+
+    try:
+        raw = input("Selection: ").strip()
+    except EOFError:
+        return []
+
+    if not raw:
+        return []
+
+    if raw.lower() == "all":
+        return [
+            _FIXTURES_DIR / "optional" / f"{stem}.yaml"
+            for stem, _ in _OPTIONAL_PROFILES
+        ]
+
+    # Validate: must be a non-empty string of digits only
+    if not raw.isdigit():
+        print(
+            f"nephoscope-init: warning — invalid profile selection {raw!r}, skipping",
+            file=sys.stderr,
+        )
+        return []
+
+    n = len(_OPTIONAL_PROFILES)
+    seen: set[str] = set()
+    selected: list[Path] = []
+    for ch in raw:
+        idx = int(ch) - 1  # convert 1-indexed to 0-indexed
+        if idx < 0 or idx >= n:
+            print(
+                f"nephoscope-init: warning — profile digit {ch!r} out of range (1-{n}), skipping",
+                file=sys.stderr,
+            )
+            return []
+        stem = _OPTIONAL_PROFILES[idx][0]
+        if stem not in seen:
+            seen.add(stem)
+            selected.append(_FIXTURES_DIR / "optional" / f"{stem}.yaml")
+
+    return selected
+
+
+def _seed_optional_profiles(
+    conn: sqlite3.Connection, selected_paths: list[Path]
+) -> None:
+    """Apply each selected optional profile fixture to the DB.
+
+    Mirrors the _AUTO_LOAD_FIXTURES loop: apply_fixtures in try/except,
+    print warning to stderr on failure, never raise.
+    """
+    from nephoscope.learners.permission.seed import apply_fixtures
+
+    for path in selected_paths:
+        try:
+            apply_fixtures(conn, path)
+        except Exception as exc:  # noqa: BLE001 — optional profile load must not abort init
+            print(
+                f"nephoscope-init: warning — optional profile load failed ({path.name}): {exc}",
+                file=sys.stderr,
+            )
+
+
 def _seed_global_mirror_singleton(conn: sqlite3.Connection) -> None:
     """Ensure the global_mirror singleton row (id=1) exists.
 
@@ -311,6 +402,41 @@ def _configure_workspace_roots(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _seed_auto_fixtures(conn: sqlite3.Connection) -> None:
+    from nephoscope.learners.permission.seed import apply_fixtures, apply_verb_types
+
+    for fixture_name in _AUTO_LOAD_FIXTURES:
+        fixture_path = _FIXTURES_DIR / fixture_name
+        try:
+            apply_fixtures(conn, fixture_path)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"nephoscope-init: warning — fixture load failed ({fixture_name}): {exc}",
+                file=sys.stderr,
+            )
+
+    for profile_name in _AUTO_LOAD_VERB_PROFILES:
+        profile_path = _FIXTURES_DIR / "profiles" / profile_name
+        try:
+            apply_verb_types(conn, profile_path)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"nephoscope-init: warning — verb types load failed ({profile_name}): {exc}",
+                file=sys.stderr,
+            )
+
+
+def _prompt_and_seed_profiles() -> None:
+    selected = _prompt_for_profiles()
+    if selected:
+        profile_conn = _open()
+        try:
+            _seed_optional_profiles(profile_conn, selected)
+            profile_conn.commit()
+        finally:
+            profile_conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Bootstrap the nephoscope observations database.",
@@ -324,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         "--no-workspace-prompts",
         action="store_true",
         default=False,
-        help="Skip the interactive trusted directories configuration prompt.",
+        help="Skip interactive prompts (trusted directories and optional permission profiles).",
     )
     args = parser.parse_args(argv)
 
@@ -355,28 +481,7 @@ def main(argv: list[str] | None = None) -> int:
     _seed_global_mirror_singleton(conn)
 
     if not already_existed:
-        from nephoscope.learners.permission.seed import apply_fixtures, apply_verb_types
-
-        for fixture_name in _AUTO_LOAD_FIXTURES:
-            fixture_path = _FIXTURES_DIR / fixture_name
-            try:
-                apply_fixtures(conn, fixture_path)
-            except Exception as exc:  # noqa: BLE001 — fixture load failure must not abort init.
-                print(
-                    f"nephoscope-init: warning — fixture load failed ({fixture_name}): {exc}",
-                    file=sys.stderr,
-                )
-
-        for profile_name in _AUTO_LOAD_VERB_PROFILES:
-            profile_path = _FIXTURES_DIR / "profiles" / profile_name
-            try:
-                apply_verb_types(conn, profile_path)
-            except Exception as exc:  # noqa: BLE001 — verb-types seed must not abort init.
-                print(
-                    f"nephoscope-init: warning — verb types load failed ({profile_name}): {exc}",
-                    file=sys.stderr,
-                )
-
+        _seed_auto_fixtures(conn)
         conn.commit()
 
     conn.close()
@@ -385,6 +490,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"nephoscope-init: {state} at {target}")
 
     _configure_workspace_roots(args)
+
+    # Optional profile prompt — fresh DB only, TTY only, no-workspace-prompts suppresses.
+    if not already_existed and not args.no_workspace_prompts and sys.stdin.isatty():
+        _prompt_and_seed_profiles()
 
     return 0
 

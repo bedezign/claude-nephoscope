@@ -450,8 +450,12 @@ def test_sync_project_raises_for_unknown_project(tmp_path, db_conn):
             sync_project(db_conn, 9999)
 
 
-def test_sync_project_raises_when_no_path_configured(tmp_path, db_conn):
-    """sync_project raises ValueError when projects.settings_json_path IS NULL."""
+def test_sync_project_is_no_op_when_no_path_configured(tmp_path, db_conn):
+    """sync_project is a silent no-op when projects.settings_json_path IS NULL.
+
+    A project without a settings path is valid (e.g. only has global-tier
+    rules). sync_project must not raise; no file should be written to disk.
+    """
     from nephoscope.lib.mirror.writer import sync_project
 
     cur = db_conn.execute(
@@ -461,11 +465,14 @@ def test_sync_project_raises_when_no_path_configured(tmp_path, db_conn):
     )
     project_id = cur.lastrowid
 
-    with pytest.raises(ValueError, match="settings_json_path"):
-        with patch(
-            "nephoscope.lib.mirror.serializer.serialize", side_effect=_null_serialize
-        ):
-            sync_project(db_conn, project_id)
+    # Must not raise.
+    sync_project(db_conn, project_id)
+
+    # No settings file should appear on disk.
+    settings_file = tmp_path / "nopath" / ".claude" / "settings.json"
+    assert not settings_file.exists(), (
+        "sync_project must not create a file when path is NULL"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1332,16 +1339,16 @@ def test_unrelated_edits_do_not_flip_hash(tmp_path, db_conn):
 @pytest.mark.parametrize(
     "path_spec,expected",
     [
-        ("$HOMEUSER/**", False),      # prefix match but not a real token
-        ("$HOME/**", True),           # real token followed by /
-        ("$TRUSTED_DIR/**", True),    # real token followed by /
-        ("$TRUSTED_DIR", True),       # real token at end of string
-        ("/absolute/path", False),    # no token
-        (None, False),                # None input
-        ("", False),                  # empty string
-        ("$CWD/subdir", True),        # real token followed by /
+        ("$HOMEUSER/**", False),  # prefix match but not a real token
+        ("$HOME/**", True),  # real token followed by /
+        ("$TRUSTED_DIR/**", True),  # real token followed by /
+        ("$TRUSTED_DIR", True),  # real token at end of string
+        ("/absolute/path", False),  # no token
+        (None, False),  # None input
+        ("", False),  # empty string
+        ("$CWD/subdir", True),  # real token followed by /
         ("$PROJECT_ROOT/src", True),  # real token followed by /
-        ("$HOMEUSER", False),         # non-token at end of string
+        ("$HOMEUSER", False),  # non-token at end of string
     ],
 )
 def test_has_unresolved_token_boundary(path_spec, expected):

@@ -1,0 +1,100 @@
+# Python development tooling — opt-in permission fixture.
+#
+# Covers uv subcommands, common linting/testing/analysis tools,
+# and safe pip read-only subcommands. Apply on Python projects.
+
+# uv subcommands — project and environment management
+- verb: uv
+  subcommand: run
+  flags: []
+  decision: approved
+
+- verb: uv
+  subcommand: sync
+  flags: []
+  decision: approved
+
+- verb: uv
+  subcommand: lock
+  flags: []
+  decision: approved
+
+- verb: uv
+  subcommand: pip
+  flags: []
+  decision: approved
+
+- verb: uv
+  subcommand: tool
+  flags: []
+  decision: approved
+
+- verb: uv
+  subcommand: add
+  flags: []
+  decision: approved
+
+- verb: uv
+  subcommand: remove
+  flags: []
+  decision: approved
+
+# Top-level Python tooling (no subcommand)
+- verb: ruff
+  flags: []
+  decision: approved
+
+- verb: pyright
+  flags: []
+  decision: approved
+
+- verb: pytest
+  flags: []
+  decision: approved
+
+- verb: mypy
+  flags: []
+  decision: approved
+
+- verb: black
+  flags: []
+  decision: approved
+
+- verb: isort
+  flags: []
+  decision: approved
+
+- verb: coverage
+  flags: []
+  decision: approved
+
+- verb: bandit
+  flags: []
+  decision: approved
+
+# mutmut — mutation testing
+- verb: mutmut
+  subcommand: run
+  flags: []
+  decision: approved
+
+- verb: mutmut
+  subcommand: results
+  flags: []
+  decision: approved
+
+# pip read-only subcommands (no bare pip install)
+- verb: pip
+  subcommand: show
+  flags: []
+  decision: approved
+
+- verb: pip
+  subcommand: list
+  flags: []
+  decision: approved
+
+- verb: pip
+  subcommand: freeze
+  flags: []
+  decision: approved

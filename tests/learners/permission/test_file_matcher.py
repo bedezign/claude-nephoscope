@@ -226,7 +226,7 @@ class TestFileMatchNonDictInput:
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec=None)
         _insert_permission(tmp_db, shape_id, "approved")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input="not_a_dict",  # type: ignore[arg-type]
             conn=tmp_db,
@@ -241,7 +241,7 @@ class TestFileMatchNonDictInput:
         shape_id = _insert_rule_shape(tmp_db, "Read", path_spec=None)
         _insert_permission(tmp_db, shape_id, "approved")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": 12345},  # not a string
             conn=tmp_db,
@@ -263,7 +263,7 @@ class TestFileMatchNoPermissions:
         _insert_rule_shape(tmp_db, "Read", path_spec=None)
         # No permission inserted.
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/home/user/file.txt"},
             conn=tmp_db,
@@ -280,7 +280,7 @@ class TestFileMatchNoPermissions:
         shape2 = _insert_rule_shape(tmp_db, "Read", path_spec=None)
         _insert_permission(tmp_db, shape2, "approved")
 
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/home/user/file.txt"},
             conn=tmp_db,
@@ -301,7 +301,7 @@ class TestFileMatchDenyVerdict:
         shape_id = _insert_rule_shape(tmp_db, "Write", path_spec=None)
         _insert_permission(tmp_db, shape_id, "rejected")
 
-        result = match(
+        result, _ = match(
             tool_name="Write",
             tool_input={"file_path": "/home/user/output.txt"},
             conn=tmp_db,
@@ -319,7 +319,7 @@ class TestFileMatchDenyVerdict:
 
 class TestFileMatchNoRows:
     def test_no_rule_shapes_returns_noopinion(self, tmp_db):
-        result = match(
+        result, _ = match(
             tool_name="Read",
             tool_input={"file_path": "/home/user/file.txt"},
             conn=tmp_db,
