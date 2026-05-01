@@ -19,3 +19,7 @@ permissions:
     subcommand: show
     flags: []
     decision: approved
+
+verb_types:
+  - verb: git
+    category: task_runner

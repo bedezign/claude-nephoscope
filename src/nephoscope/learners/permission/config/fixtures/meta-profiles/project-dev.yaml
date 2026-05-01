@@ -64,3 +64,13 @@ permissions:
     path_spec: "$TRUSTED_DIR/**"
     decision: approved
     reason: "Run shell scripts within trusted project directories"
+
+verb_types:
+  # script_runner: sets subcommand: null, preventing script file paths from
+  # being misclassified as subcommands during canonicalization.
+  - verb: python3
+    category: script_runner
+  - verb: python
+    category: script_runner
+  - verb: bash
+    category: script_runner

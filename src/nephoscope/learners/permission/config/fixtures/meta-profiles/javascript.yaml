@@ -118,3 +118,19 @@ permissions:
   - verb: vitest
     flags: []
     decision: approved
+
+verb_types:
+  # task_runner: promotes first positional to subcommand (npm run, yarn test, etc.)
+  # npx is intentionally absent: its first positional is a package name, not a
+  # subcommand — task_runner would misclassify it.
+  - verb: npm
+    category: task_runner
+  - verb: yarn
+    category: task_runner
+  - verb: pnpm
+    category: task_runner
+  - verb: deno
+    category: task_runner
+  # script_runner: sets subcommand: null, so script file paths stay as args
+  - verb: node
+    category: script_runner

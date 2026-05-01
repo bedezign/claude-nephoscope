@@ -103,3 +103,15 @@ permissions:
     subcommand: freeze
     flags: []
     decision: approved
+
+verb_types:
+  # task_runner: promotes first positional to subcommand
+  # Safe for verbs whose rule_shapes already use explicit subcommands.
+  # ruff, coverage, pyright, pytest, mypy, etc. are stored as subcommand: null
+  # in rule_shapes — do NOT add them here.
+  - verb: uv
+    category: task_runner
+  - verb: mutmut
+    category: task_runner
+  - verb: pip
+    category: task_runner

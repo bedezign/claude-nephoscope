@@ -57,3 +57,10 @@ permissions:
     subcommand: s_client
     flags: []
     decision: approved
+
+verb_types:
+  # make is intentionally absent: its rule_shapes use subcommand: null (the
+  # target is a plain arg, not a subcommand), so adding task_runner would break
+  # existing permission matches.
+  - verb: openssl
+    category: task_runner

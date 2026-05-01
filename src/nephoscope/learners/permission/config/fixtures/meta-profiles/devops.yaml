@@ -169,3 +169,15 @@ permissions:
     flags:
       - "--list-hosts"
     decision: approved
+
+verb_types:
+  # ansible and ansible-inventory are intentionally absent: their invocations
+  # use flags (--list, --list-hosts), not positional subcommands.
+  - verb: kubectl
+    category: task_runner
+  - verb: helm
+    category: task_runner
+  - verb: docker
+    category: task_runner
+  - verb: terraform
+    category: task_runner
