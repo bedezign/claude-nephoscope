@@ -37,7 +37,18 @@ from nephoscope.learners.permission.match.file import match as file_match
 from nephoscope.learners.permission.match.flat import match as flat_match
 from nephoscope.learners.permission.match.mcp import match as mcp_match
 from nephoscope.learners.permission.match.orchestration import match as orch_match
+from nephoscope.learners.permission.seed import apply_fixtures
 from nephoscope.lib.db import set_session_extra_dirs
+
+_FIXTURES_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent
+    / "src"
+    / "nephoscope"
+    / "learners"
+    / "permission"
+    / "config"
+    / "fixtures"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1289,6 +1300,131 @@ class TestEnvFileSeedRuleMatching:
             self._ctx(),
         )
         assert v != Verdict.Deny, f'Unexpected Deny for ".env.template", got {v!r}'
+
+
+# ---------------------------------------------------------------------------
+# B15 — credential_leaks.yaml: 9 new Bash-level deny rules
+#
+# All tests seed the actual credential_leaks.yaml fixture so they are RED
+# until A2 adds the 9 rules.  Canonicalize extensions (A0) are already live.
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialLeaksYamlNewRules:
+    """credential_leaks.yaml → dispatch() denies all 9 new credential patterns.
+
+    Relies on the three new _match_ctx_prefix variant types (B15 / A0):
+    - extension-glob  ($VAR/**/*.ext)
+    - deep-path       ($VAR/**/<tail>)
+    - directory-glob  ($VAR/**/<parent>/**)
+    """
+
+    _CWD = "/work/proj"
+    _HOME = "/home/tester"
+
+    def _ctx(self):
+        return {"cwd": self._CWD, "home": self._HOME}
+
+    def _load(self, conn):
+        apply_fixtures(conn, _FIXTURES_DIR / "credential_leaks.yaml")
+
+    def test_dev_vars_is_denied(self, tmp_db):
+        """cat .dev.vars → Deny via $CWD/**/.dev.vars rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash", {"command": "cat .dev.vars"}, tmp_db, None, None, self._ctx()
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat .dev.vars", got {v!r}'
+
+    def test_dev_vars_local_is_denied(self, tmp_db):
+        """cat .dev.vars.local → Deny via $CWD/**/.dev.vars.local rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash", {"command": "cat .dev.vars.local"}, tmp_db, None, None, self._ctx()
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat .dev.vars.local", got {v!r}'
+
+    def test_pem_file_is_denied(self, tmp_db):
+        """cat project.pem → Deny via $CWD/**/*.pem extension-glob rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash", {"command": "cat project.pem"}, tmp_db, None, None, self._ctx()
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat project.pem", got {v!r}'
+
+    def test_key_file_is_denied(self, tmp_db):
+        """cat server.key → Deny via $CWD/**/*.key extension-glob rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash", {"command": "cat server.key"}, tmp_db, None, None, self._ctx()
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat server.key", got {v!r}'
+
+    def test_file_under_secrets_dir_is_denied(self, tmp_db):
+        """cat secrets/db.pass → Deny via $CWD/**/secrets/** directory-glob rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash", {"command": "cat secrets/db.pass"}, tmp_db, None, None, self._ctx()
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat secrets/db.pass", got {v!r}'
+
+    def test_file_under_credentials_dir_is_denied(self, tmp_db):
+        """cat credentials/api.json → Deny via $CWD/**/credentials/** directory-glob rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash",
+            {"command": "cat credentials/api.json"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, (
+            f'Expected Deny for "cat credentials/api.json", got {v!r}'
+        )
+
+    def test_config_database_yml_is_denied(self, tmp_db):
+        """cat config/database.yml → Deny via $CWD/**/config/database.yml deep-path rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash",
+            {"command": "cat config/database.yml"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, (
+            f'Expected Deny for "cat config/database.yml", got {v!r}'
+        )
+
+    def test_config_credentials_yml_enc_is_denied(self, tmp_db):
+        """cat config/credentials.yml.enc → Deny via $CWD/**/config/credentials.yml.enc deep-path rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash",
+            {"command": "cat config/credentials.yml.enc"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, (
+            f'Expected Deny for "cat config/credentials.yml.enc", got {v!r}'
+        )
+
+    def test_pypirc_is_denied(self, tmp_db):
+        """cat ~/.pypirc → Deny via $HOME/.pypirc rule."""
+        self._load(tmp_db)
+        v, _ = bash_match(
+            "Bash",
+            {"command": f"cat {self._HOME}/.pypirc"},
+            tmp_db,
+            None,
+            None,
+            self._ctx(),
+        )
+        assert v == Verdict.Deny, f'Expected Deny for "cat ~/.pypirc", got {v!r}'
 
 
 # ---------------------------------------------------------------------------

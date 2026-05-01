@@ -151,6 +151,7 @@ _CTX_VAR_NAMES: dict[str, str] = {
     "cwd": "$CWD",
     "claude_dir": "$CLAUDE_DIR",
     "home": "$HOME",
+    "junk_dir": "$JUNK_DIR",
 }
 
 # Priority order for ctx vars — lower number = checked first (most specific).
@@ -159,6 +160,7 @@ _CTX_PRIORITY: dict[str, int] = {
     "cwd": 1,
     "claude_dir": 2,
     "home": 3,
+    "junk_dir": 4,
 }
 
 
@@ -597,6 +599,19 @@ def _match_ctx_prefix(
             if basename:
                 basename_glob = var_name + "/**/" + basename
                 _emit_path_spec(basename_glob, None, seen, result)
+                # Extension-glob: matches any file with this extension at any depth.
+                suffix = Path(basename).suffix
+                if suffix:
+                    _emit_path_spec(var_name + "/**/*" + suffix, None, seen, result)
+            if "/" in tail:
+                # Deep-path: same relative path at any nesting depth.
+                _emit_path_spec(var_name + "/**/" + tail, None, seen, result)
+                # Directory-glob: any file under the immediate parent directory.
+                immediate_parent = tail.rsplit("/", 1)[0].rsplit("/", 1)[-1]
+                if immediate_parent:
+                    _emit_path_spec(
+                        var_name + "/**/" + immediate_parent + "/**", None, seen, result
+                    )
             matched = True
     return matched
 
@@ -662,9 +677,16 @@ def _path_specs_from_positionals(
 ) -> list[str]:
     """Derive ``path_spec`` strings from positional path arguments.
 
-    For each positional path that lies under a ctx variable, emit:
-      - ``"$VAR/**"``              — any path under that variable
-      - ``"$VAR/<tail>"``          — the specific subpath
+    For each positional path that lies under a ctx variable, emit (per matching
+    ctx-var — overlapping vars like ``$PROJECT_ROOT`` and ``$CWD`` both fire):
+      - ``"$VAR/**"``                  — any path under that variable
+      - ``"$VAR/<tail>"``              — the specific subpath
+      - ``"$VAR/**/<basename>"``       — any depth ending in this filename
+      - ``"$VAR/**/*<ext>"``           — any file with this extension (if any)
+      - ``"$VAR/**/<tail>"``           — same relative path at any nesting depth
+                                         (only when tail contains ``/``)
+      - ``"$VAR/**/<parent>/**"``      — any file under the immediate parent dir
+                                         (only when tail contains ``/``)
 
     For each positional path that lies under a trusted_dir (and did NOT match
     any ctx variable), emit the portable named forms:

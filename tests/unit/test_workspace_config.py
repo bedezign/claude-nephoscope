@@ -187,3 +187,26 @@ class TestWorkspaceRootsStoredAsStrings:
         isolated_config.write_text('trusted_dirs = ["~/projects"]\n')
         config = get_config()
         assert config.trusted_dirs == ["~/projects"]
+
+
+class TestJunkDir:
+    def test_default_is_tmp_claude(self, isolated_config: Path) -> None:
+        """Absent config → junk_dir defaults to <tempdir>/claude."""
+        import tempfile
+
+        config = get_config()
+        assert config.junk_dir == str(Path(tempfile.gettempdir()) / "claude")
+
+    def test_junk_dir_loaded_from_toml(self, isolated_config: Path) -> None:
+        isolated_config.write_text('junk_dir = "/scratch/workspace"\n')
+        config = get_config()
+        assert config.junk_dir == "/scratch/workspace"
+
+    def test_junk_dir_wrong_type_raises(self, isolated_config: Path) -> None:
+        isolated_config.write_text("junk_dir = 42\n")
+        with pytest.raises(TypeError, match="junk_dir"):
+            get_config()
+
+    def test_junk_dir_is_string_type(self, isolated_config: Path) -> None:
+        config = get_config()
+        assert isinstance(config.junk_dir, str)

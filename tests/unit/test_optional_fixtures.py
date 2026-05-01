@@ -178,9 +178,19 @@ class TestPythonDevFixture:
         tmp_db.commit()
         self._rows = _approved_rows(tmp_db)
 
+    def test_uv_run_approved_with_wildcard_flags(self):
+        # uv run uses flags="*": flags passed to the wrapped tool (e.g. pytest -q)
+        # get captured into the shape, so a zero-flags rule would never match.
+        assert _has_entry(
+            self._rows,
+            "uv",
+            subcommand="run",
+            flags="*",
+        ), "uv run approved entry with flags='*' missing"
+
     @pytest.mark.parametrize(
         "subcommand",
-        ["run", "sync", "lock", "pip", "tool", "add", "remove"],
+        ["sync", "lock", "pip", "tool", "add", "remove"],
     )
     def test_uv_subcommands_approved(self, subcommand):
         assert _has_entry(

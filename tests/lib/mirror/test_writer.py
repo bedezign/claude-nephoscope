@@ -289,11 +289,7 @@ def test_flock_contention_serializes_writers(tmp_path, db_conn):
         try:
             c = _open_thread_conn()
             barrier.wait()
-            with patch(
-                "nephoscope.lib.mirror.serializer.serialize",
-                side_effect=_null_serialize,
-            ):
-                sync_global(c)
+            sync_global(c)
             with results_lock:
                 results.append("done-1")
             c.close()
@@ -304,23 +300,26 @@ def test_flock_contention_serializes_writers(tmp_path, db_conn):
         try:
             c = _open_thread_conn()
             barrier.wait()
-            with patch(
-                "nephoscope.lib.mirror.serializer.serialize",
-                side_effect=_null_serialize,
-            ):
-                sync_global(c)
+            sync_global(c)
             with results_lock:
                 results.append("done-2")
             c.close()
         except Exception as exc:
             errors.append(exc)
 
-    t1 = threading.Thread(target=writer_one)
-    t2 = threading.Thread(target=writer_two)
-    t1.start()
-    t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
+    # Hoist the patch outside both threads so a single context-manager
+    # enter/exit controls it.  Two concurrent `with patch(...)` blocks race
+    # on `setattr` and can leave `serialize` permanently pointing at the mock.
+    with patch(
+        "nephoscope.lib.mirror.serializer.serialize",
+        side_effect=_null_serialize,
+    ):
+        t1 = threading.Thread(target=writer_one)
+        t2 = threading.Thread(target=writer_two)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
 
     assert not errors, f"Thread errors: {errors}"
     # Both writers must have completed without error.
@@ -1349,6 +1348,8 @@ def test_unrelated_edits_do_not_flip_hash(tmp_path, db_conn):
         ("$CWD/subdir", True),  # real token followed by /
         ("$PROJECT_ROOT/src", True),  # real token followed by /
         ("$HOMEUSER", False),  # non-token at end of string
+        ("$CLAUDE_DIR/**", True),  # real token followed by /
+        ("$JUNK_DIR/**", True),  # real token followed by /
     ],
 )
 def test_has_unresolved_token_boundary(path_spec, expected):
@@ -1481,3 +1482,117 @@ def test_rename_failure_propagates_and_leaves_db_hash_unchanged(
         "temp file should be left on disk as orphan after rename failure"
         " (cleanup_stale_tmp reaps these on a later sync)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase B3 — file-tool relative glob rows in deny list
+# ---------------------------------------------------------------------------
+
+
+class TestFileToolRelativeGlobInMirror:
+    """DB rows with tool='Read'/'Write'/'Edit' and relative glob path_specs
+    must appear in the deny list as Verb(glob) — e.g. Read(**/.env).
+
+    Tests use _fetch_permission_rows and _classify_permission_rows directly
+    to avoid depending on the `serialize` module-level function state that can
+    be affected by concurrent-patch tests earlier in this file.
+    """
+
+    def _insert_rule_and_permission(
+        self,
+        conn: sqlite3.Connection,
+        verb: str,
+        path_spec: str,
+        tool: str,
+        decision: str = "rejected",
+    ) -> None:
+        """Insert a rule_shape + permission row directly."""
+        cur = conn.execute(
+            "INSERT INTO rule_shapes"
+            " (verb, subcommand, flags, path_spec, context, tool, first_seen, last_seen)"
+            " VALUES (?, NULL, '[]', ?, 'any', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            (verb, path_spec, tool),
+        )
+        shape_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO permissions"
+            " (rule_shape_id, session_id, project_id, decision, source, decided_at)"
+            " VALUES (?, NULL, NULL, ?, 'seed', '2026-01-01T00:00:00Z');",
+            (shape_id, decision),
+        )
+
+    def test_read_glob_in_classify_output(self, db_conn):
+        """tool='Read', path_spec='**/.env' → classify produces 'Read(**/.env)' in deny."""
+        self._insert_rule_and_permission(
+            db_conn, verb="Read", path_spec="**/.env", tool="Read"
+        )
+
+        from nephoscope.lib.mirror.writer import (
+            _classify_permission_rows,
+            _fetch_permission_rows,
+        )
+
+        rows = _fetch_permission_rows(db_conn, project_id=None)
+        _allow, deny, _ask = _classify_permission_rows(rows)
+        assert "Read(**/.env)" in deny, f"Expected Read(**/.env) in deny: {deny}"
+
+    def test_write_glob_in_classify_output(self, db_conn):
+        """tool='Write', path_spec='**/.env' → classify produces 'Write(**/.env)' in deny."""
+        self._insert_rule_and_permission(
+            db_conn, verb="Write", path_spec="**/.env", tool="Write"
+        )
+
+        from nephoscope.lib.mirror.writer import (
+            _classify_permission_rows,
+            _fetch_permission_rows,
+        )
+
+        rows = _fetch_permission_rows(db_conn, project_id=None)
+        _allow, deny, _ask = _classify_permission_rows(rows)
+        assert "Write(**/.env)" in deny, f"Expected Write(**/.env) in deny: {deny}"
+
+    def test_edit_glob_in_classify_output(self, db_conn):
+        """tool='Edit', path_spec='**/secrets/**' → classify produces 'Edit(**/secrets/**)' in deny."""
+        self._insert_rule_and_permission(
+            db_conn, verb="Edit", path_spec="**/secrets/**", tool="Edit"
+        )
+
+        from nephoscope.lib.mirror.writer import (
+            _classify_permission_rows,
+            _fetch_permission_rows,
+        )
+
+        rows = _fetch_permission_rows(db_conn, project_id=None)
+        _allow, deny, _ask = _classify_permission_rows(rows)
+        assert "Edit(**/secrets/**)" in deny, (
+            f"Expected Edit(**/secrets/**) in deny: {deny}"
+        )
+
+    def test_bash_absolute_deny_coexists_with_file_tool_glob(self, db_conn):
+        """A Bash row and a Read row on the same path both appear in deny list."""
+        # Bash absolute-path row (simulates existing credential_leaks.yaml rows)
+        self._insert_rule_and_permission(
+            db_conn,
+            verb="cat",
+            path_spec="$CWD/**/.env",
+            tool="Bash",
+            decision="rejected",
+        )
+        # Read relative-glob row (new file-tool deny)
+        self._insert_rule_and_permission(
+            db_conn, verb="Read", path_spec="**/.env", tool="Read"
+        )
+
+        from nephoscope.lib.mirror.writer import (
+            _classify_permission_rows,
+            _fetch_permission_rows,
+        )
+
+        rows = _fetch_permission_rows(db_conn, project_id=None)
+        _allow, deny, _ask = _classify_permission_rows(rows)
+
+        assert "Read(**/.env)" in deny, f"Read(**/.env) missing from deny: {deny}"
+        # cat row has $CWD token → filtered out by _has_unresolved_token
+        assert not any("cat" in d for d in deny), (
+            f"Bash $CWD row should be filtered; deny={deny}"
+        )

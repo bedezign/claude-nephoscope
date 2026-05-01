@@ -421,6 +421,8 @@ CWD = "/home/alice/work/myproject"
 CTX_FULL = {"home": HOME, "project_root": PROJECT, "cwd": CWD}
 CTX_HOME_ONLY = {"home": HOME}
 CTX_EMPTY: dict[str, str] = {}
+JUNK_DIR = "/tmp/claude"
+CTX_WITH_JUNK = {**CTX_FULL, "junk_dir": JUNK_DIR}
 
 
 def _leaf(
@@ -1592,4 +1594,140 @@ def test_non_tilde_paths_unchanged():
     # The absolute path must still produce $HOME-prefixed path_specs.
     assert "$HOME/**" in path_specs, (
         f"Expected $HOME/** in path_specs for absolute path, got: {path_specs!r}"
+    )
+
+
+# ===========================================================================
+# B15 — extension-glob, deep-path, and directory-glob variants
+#
+# These three variant types extend _match_ctx_prefix to make credential-leak
+# YAML rules matchable.  All three tests are RED until the implementation lands.
+# ===========================================================================
+
+
+def test_extension_glob_variant_emitted_for_file_with_suffix():
+    """cat project.pem with cwd → $CWD/**/*.pem variant emitted.
+
+    Required so that a seed rule with path_spec='$CWD/**/*.pem' can block
+    reads of any PEM file without listing every possible filename.
+    """
+    leaf = _leaf("cat", positional_paths=("project.pem",))
+    variants = to_pattern_form(leaf, _CTX_B14_CWD_ONLY)
+    path_specs = {v.path_spec for v in variants}
+
+    assert "$CWD/**/*.pem" in path_specs, f"Expected $CWD/**/*.pem in {path_specs!r}"
+
+
+def test_multi_dot_extension_glob_uses_last_suffix_only():
+    """cat credentials.yml.enc emits $CWD/**/*.enc, not $CWD/**/*.yml.enc.
+
+    Path.suffix returns only the final component of a compound extension.
+    The extension-glob variant must use that single suffix so it matches
+    seed rules written as $CWD/**/*.enc.
+    """
+    leaf = _leaf("cat", positional_paths=("credentials.yml.enc",))
+    variants = to_pattern_form(leaf, _CTX_B14_CWD_ONLY)
+    path_specs = {v.path_spec for v in variants}
+
+    assert "$CWD/**/*.enc" in path_specs, f"Expected $CWD/**/*.enc in {path_specs!r}"
+    assert "$CWD/**/*.yml.enc" not in path_specs, (
+        f"$CWD/**/*.yml.enc must not appear (Path.suffix is last ext only): {path_specs!r}"
+    )
+
+
+def test_deep_path_variant_emitted_for_nested_file():
+    """cat config/database.yml with cwd → $CWD/**/config/database.yml variant emitted.
+
+    Required so that a seed rule with path_spec='$CWD/**/config/database.yml'
+    matches the file at any project depth, not just at the root.
+    """
+    leaf = _leaf("cat", positional_paths=("config/database.yml",))
+    variants = to_pattern_form(leaf, _CTX_B14_CWD_ONLY)
+    path_specs = {v.path_spec for v in variants}
+
+    assert "$CWD/**/config/database.yml" in path_specs, (
+        f"Expected $CWD/**/config/database.yml in {path_specs!r}"
+    )
+
+
+def test_directory_glob_variant_emitted_for_file_under_named_dir():
+    """cat secrets/db.pass with cwd → $CWD/**/secrets/** variant emitted.
+
+    Required so that a seed rule with path_spec='$CWD/**/secrets/**' blocks
+    reads of any file under a 'secrets/' directory at any project depth.
+    """
+    leaf = _leaf("cat", positional_paths=("secrets/db.pass",))
+    variants = to_pattern_form(leaf, _CTX_B14_CWD_ONLY)
+    path_specs = {v.path_spec for v in variants}
+
+    assert "$CWD/**/secrets/**" in path_specs, (
+        f"Expected $CWD/**/secrets/** in {path_specs!r}"
+    )
+
+
+# ===========================================================================
+# to_pattern_form — $JUNK_DIR context variable
+# ===========================================================================
+
+
+def test_path_under_junk_dir_emits_junk_dir_pattern():
+    path = f"{JUNK_DIR}/scratch/foo.sh"
+    leaf = _leaf("chmod", subcommand="+x", positional_paths=(path,))
+    variants = to_pattern_form(leaf, CTX_WITH_JUNK)
+    path_specs = {v.path_spec for v in variants}
+    assert "$JUNK_DIR/**" in path_specs
+
+
+def test_junk_dir_path_under_project_root_also_emits_project_root_pattern():
+    ctx = {**CTX_WITH_JUNK, "project_root": f"{JUNK_DIR}/project"}
+    path = f"{JUNK_DIR}/project/src/foo.py"
+    leaf = _leaf("rm", flags={"-r", "-f"}, positional_paths=(path,))
+    variants = to_pattern_form(leaf, ctx)
+    path_specs = {v.path_spec for v in variants}
+    # Both ctx-vars are prefixes of the path; _match_ctx_prefix fires for all
+    # matching vars, so both $PROJECT_ROOT and $JUNK_DIR variants must appear.
+    assert any(s is not None and s.startswith("$PROJECT_ROOT") for s in path_specs), (
+        f"Expected a $PROJECT_ROOT variant in {path_specs!r}"
+    )
+    assert any(s is not None and s.startswith("$JUNK_DIR") for s in path_specs), (
+        f"Expected a $JUNK_DIR variant in {path_specs!r}"
+    )
+
+
+def test_path_not_under_junk_dir_does_not_emit_junk_dir_pattern():
+    path = "/var/log/syslog"
+    leaf = _leaf("cat", subcommand=path, positional_paths=())
+    variants = to_pattern_form(leaf, CTX_WITH_JUNK)
+    path_specs = {v.path_spec for v in variants}
+    assert not any(s is not None and "$JUNK_DIR" in s for s in path_specs)
+
+
+def test_junk_dir_empty_value_emits_no_junk_dir_variants():
+    """junk_dir='' in ctx must not produce any $JUNK_DIR variants.
+
+    _ctx_pairs_ordered filters out ctx entries whose resolved path is falsy
+    (empty after rstrip('/')).  An empty string must never become a prefix match
+    that emits $JUNK_DIR patterns for every path.
+    """
+    ctx_with_empty_junk = {**CTX_FULL, "junk_dir": ""}
+    path = f"{HOME}/work/myproject/src/foo.py"
+    leaf = _leaf("cat", positional_paths=(path,))
+    variants = to_pattern_form(leaf, ctx_with_empty_junk)
+    path_specs = {v.path_spec for v in variants}
+    assert not any(s is not None and "$JUNK_DIR" in s for s in path_specs), (
+        f"junk_dir='' must not emit $JUNK_DIR variants, got: {path_specs!r}"
+    )
+
+
+def test_to_pattern_form_is_idempotent():
+    """Calling to_pattern_form twice with identical inputs returns identical results.
+
+    Idempotency confirms the function is pure and has no hidden mutable state
+    that could accumulate across calls.
+    """
+    leaf = _leaf("cat", positional_paths=(f"{CWD}/config/database.yml",))
+    first = to_pattern_form(leaf, CTX_FULL)
+    second = to_pattern_form(leaf, CTX_FULL)
+    assert first == second, (
+        f"to_pattern_form is not idempotent:\nfirst={first!r}\nsecond={second!r}"
     )

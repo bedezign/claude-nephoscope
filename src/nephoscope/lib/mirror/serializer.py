@@ -82,27 +82,31 @@ def _render_bash(row: Mapping[str, Any]) -> str:
 def _render_file(row: Mapping[str, Any]) -> str:
     """Render a file-tool rule row to its canonical string.
 
-    Path encoding uses a double-slash prefix: ``Read(//abs/path/**)``.
-    A bare tool (no path_spec, or empty path_spec) serialises to the
-    verb alone.
+    Two rendering forms exist:
 
-    Two storage conventions are accepted for ``path_spec``:
+    **Absolute-path form** (existing behaviour, unchanged):
+        ``Read(//abs/path/**)`` — path_spec starts with ``/`` or ``//``.
+        Two storage conventions are accepted:
 
-    - **Ingester-produced** (``//`` prefix already present): stored as
-      ``"//var/log/**"``.  The serialiser wraps it directly:
-      ``Read(//var/log/**)``.
-    - **DB-native** (single ``/`` absolute path): stored as
-      ``"/var/log/**"``.  The serialiser strips one ``/`` and
-      adds ``//``: ``Read(//var/log/**)``.
+        - *Ingester-produced* (``//`` prefix already present): stored as
+          ``"//var/log/**"``.  The serialiser wraps it directly.
+        - *DB-native* (single ``/`` absolute path): stored as ``"/var/log/**"``.
+          The serialiser strips one ``/`` and adds ``//``.
 
-    Both produce identical canonical output.
+    **Relative-glob form** (file-tool deny rules, Phase B):
+        ``Read(**/.env)`` — path_spec starts with ``*``.
+        Used for Claude Code's native Read/Write/Edit tool deny rules where
+        the path constraint is a portable glob (no ``$VAR`` prefix).  The
+        path_spec is emitted as-is inside the parens.
+
+    A bare tool (no path_spec, or empty path_spec) serialises to the verb alone.
 
     Raises
     ------
     ValueError
-        If path_spec is non-empty but does not start with ``/``.
-        Unresolved ``$VAR`` tokens must be expanded before calling this
-        function.
+        If path_spec is non-empty, does not start with ``/`` or ``//``, and is
+        not a relative glob (i.e. does not start with ``*``).  Unresolved
+        ``$VAR`` tokens or plain-word relative paths must not reach this function.
     """
     verb: str = row["verb"]
     path_spec: str | None = row.get("path_spec") or None
@@ -119,8 +123,14 @@ def _render_file(row: Mapping[str, Any]) -> str:
         # by replacing the leading / with //.
         return f"{verb}(//{path_spec[1:]})"
 
+    if path_spec.startswith("*"):
+        # Relative-glob form: portable glob pattern for file-tool deny rules.
+        # Emitted bare — no path prefix — so Claude Code matches it as a glob.
+        return f"{verb}({path_spec})"
+
     raise ValueError(
-        f"file tool path_spec must be an absolute path (starting with / or //), "
+        f"file tool path_spec must be an absolute path (starting with / or //) "
+        f"or a relative glob (starting with *), "
         f"got {path_spec!r} for verb {verb!r}.  Resolve $VAR tokens before serialising."
     )
 

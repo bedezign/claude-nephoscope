@@ -15,6 +15,7 @@ Fixture YAML schema:
       decision: str (required, one of: "approved", "rejected")
       reason: str? (optional)
       context: str? (optional, default "any", one of: "any", "toplevel", "substitution")
+      tool: str? (optional, default "Bash", one of: "Bash", "Read", "Write", "Edit")
 
 Round-trip idempotency: applying a fixture to an empty DB and exporting should
 yield equivalent YAML (field order may differ, but content is identical).
@@ -50,6 +51,7 @@ def _yaml_to_flags(flags: Any) -> str:
 
 
 _VALID_CONTEXTS: frozenset[str] = frozenset({"any", "toplevel", "substitution"})
+_VALID_TOOLS: frozenset[str] = frozenset({"Bash", "Read", "Write", "Edit"})
 _VALID_VERB_CATEGORIES: frozenset[str] = frozenset(
     {"task_runner", "two_word_subcommand", "content_verb", "script_runner"}
 )
@@ -57,10 +59,10 @@ _VALID_VERB_CATEGORIES: frozenset[str] = frozenset(
 
 def _validate_entry(
     idx: int, entry: Any
-) -> tuple[str, str, Any, str | None, str | None, str, str | None, str]:
+) -> tuple[str, str, Any, str | None, str | None, str, str | None, str, str]:
     """Validate a single fixture entry and return its fields.
 
-    Returns (verb, decision, flags_raw, subcommand, path_spec, tier, reason, context).
+    Returns (verb, decision, flags_raw, subcommand, path_spec, tier, reason, context, tool).
     Raises ValueError on invalid schema.
     """
     if not isinstance(entry, dict):
@@ -84,6 +86,7 @@ def _validate_entry(
     tier = entry.get("tier", "global")
     reason = entry.get("reason")
     context = entry.get("context", "any")
+    tool = entry.get("tool", "Bash")
 
     if tier not in ("session", "project", "global"):
         raise ValueError(f"entry {idx} invalid tier: {tier!r}")
@@ -94,7 +97,13 @@ def _validate_entry(
             f"(must be one of: {sorted(_VALID_CONTEXTS)})"
         )
 
-    return verb, decision, flags_raw, subcommand, path_spec, tier, reason, context
+    if tool not in _VALID_TOOLS:
+        raise ValueError(
+            f"entry {idx} invalid tool: {tool!r} "
+            f"(must be one of: {sorted(_VALID_TOOLS)})"
+        )
+
+    return verb, decision, flags_raw, subcommand, path_spec, tier, reason, context, tool
 
 
 def _apply_entry(
@@ -109,6 +118,7 @@ def _apply_entry(
     reason: str | None,
     now: str,
     context: str = "any",
+    tool: str = "Bash",
 ) -> None:
     """Upsert one rule_shape + permission row for a fixture entry."""
     if tier != "global":
@@ -126,6 +136,7 @@ def _apply_entry(
         path_spec=path_spec,
         ts=now,
         context=context,
+        tool=tool,
     )
     insert_permission(
         conn,
@@ -174,7 +185,7 @@ def _apply_permission_list(
     Raises: ValueError on invalid schema.
     """
     validated: list[
-        tuple[str, str, str, str | None, str | None, str, str | None, str | None]
+        tuple[str, str, Any, str | None, str | None, str, str | None, str, str]
     ] = []
     for idx, entry in enumerate(entries):
         validated.append(_validate_entry(idx, entry))
@@ -188,6 +199,7 @@ def _apply_permission_list(
         tier,
         reason,
         context,
+        tool,
     ) in enumerate(validated):
         _apply_entry(
             conn,
@@ -201,6 +213,7 @@ def _apply_permission_list(
             reason,
             now,
             context=context or "any",
+            tool=tool,
         )
 
     return len(validated)

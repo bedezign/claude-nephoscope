@@ -102,6 +102,8 @@ def _build_ctx(
     if project_root:
         ctx["project_root"] = project_root
 
+    ctx["junk_dir"] = get_config().junk_dir
+
     return ctx
 
 

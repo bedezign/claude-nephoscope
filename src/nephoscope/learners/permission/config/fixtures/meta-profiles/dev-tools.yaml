@@ -64,6 +64,71 @@ permissions:
     flags: []
     decision: approved
 
+  # find -- filesystem search, read-only
+  - verb: find
+    flags: "*"
+    decision: approved
+    reason: "find — read-only filesystem search"
+
+  # stat -- inspect file metadata, any path
+  - verb: stat
+    flags: "*"
+    decision: approved
+    reason: "stat — read-only file metadata inspection"
+
+  # tail -- read end of files or pipeline output
+  - verb: tail
+    flags: "*"
+    decision: approved
+    reason: "tail — read-only; numeric -N flags and --lines are passthrough"
+
+  # head -- read start of files or pipeline output
+  - verb: head
+    flags: "*"
+    decision: approved
+    reason: "head — read-only; numeric -N flags and --lines are passthrough"
+
+  # chmod +x -- make files executable within scratch/working directories
+  - verb: chmod
+    subcommand: "+x"
+    flags: []
+    path_spec: "$JUNK_DIR/**"
+    decision: approved
+    reason: "chmod +x within scratch dir"
+
+  - verb: chmod
+    subcommand: "+x"
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "chmod +x within trusted project dir"
+
+  - verb: chmod
+    subcommand: "+x"
+    flags: []
+    path_spec: "$PROJECT_ROOT/**"
+    decision: approved
+    reason: "chmod +x within project root"
+
+  # rm -rf -- remove files and directories within scratch/working directories
+  - verb: rm
+    flags: ["-f", "-r"]
+    path_spec: "$JUNK_DIR/**"
+    decision: approved
+    reason: "rm -rf within scratch dir"
+
+  - verb: rm
+    flags: ["-f", "-r"]
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "rm -rf within trusted project dir"
+
+  - verb: rm
+    flags: ["-f", "-r"]
+    path_spec: "$PROJECT_ROOT/**"
+    decision: approved
+    reason: "rm -rf within project root"
+
 verb_types:
   # make is intentionally absent: its rule_shapes use subcommand: null (the
   # target is a plain arg, not a subcommand), so adding task_runner would break

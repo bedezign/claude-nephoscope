@@ -615,6 +615,163 @@ class TestRoundTrip:
 
 
 # ===========================================================================
+# Phase B2 — tool field in seed fixtures
+# ===========================================================================
+
+
+class TestToolField:
+    """Seed YAML tool field: validate, apply, default to Bash."""
+
+    def test_apply_fixture_with_tool_read_stores_read(self, tmp_db, tmp_path):
+        """Fixture entry with tool='Read' stores tool='Read' in rule_shapes."""
+        fixture_file = tmp_path / "tool_read.yaml"
+        fixture_file.write_text(
+            __import__("yaml").dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "path_spec": "**/.env",
+                        "decision": "rejected",
+                        "tool": "Read",
+                        "reason": ".env — native Read blocked",
+                    }
+                ]
+            )
+        )
+
+        from nephoscope.learners.permission.seed import apply_fixtures
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        row = tmp_db.execute(
+            "SELECT tool FROM rule_shapes WHERE verb='Read' AND path_spec='**/.env';"
+        ).fetchone()
+        assert row is not None, "rule_shape row not found"
+        assert row[0] == "Read", f"expected tool='Read', got {row[0]!r}"
+
+    def test_apply_fixture_without_tool_defaults_to_bash(self, tmp_db, tmp_path):
+        """Fixture entry without a tool key defaults to tool='Bash' in rule_shapes."""
+        fixture_file = tmp_path / "no_tool.yaml"
+        fixture_file.write_text(
+            __import__("yaml").dump(
+                [
+                    {
+                        "verb": "cat",
+                        "flags": "*",
+                        "path_spec": "$CWD/**/.env",
+                        "decision": "rejected",
+                    }
+                ]
+            )
+        )
+
+        from nephoscope.learners.permission.seed import apply_fixtures
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        row = tmp_db.execute(
+            "SELECT tool FROM rule_shapes WHERE verb='cat';"
+        ).fetchone()
+        assert row is not None, "rule_shape row not found"
+        assert row[0] == "Bash", f"expected tool='Bash', got {row[0]!r}"
+
+    def test_apply_fixture_with_tool_write_stores_write(self, tmp_db, tmp_path):
+        """Fixture entry with tool='Write' stores tool='Write' in rule_shapes."""
+        fixture_file = tmp_path / "tool_write.yaml"
+        fixture_file.write_text(
+            __import__("yaml").dump(
+                [
+                    {
+                        "verb": "Write",
+                        "flags": [],
+                        "path_spec": "**/.env",
+                        "decision": "rejected",
+                        "tool": "Write",
+                    }
+                ]
+            )
+        )
+
+        from nephoscope.learners.permission.seed import apply_fixtures
+
+        apply_fixtures(tmp_db, fixture_file)
+
+        row = tmp_db.execute(
+            "SELECT tool FROM rule_shapes WHERE verb='Write' AND path_spec='**/.env';"
+        ).fetchone()
+        assert row is not None, "rule_shape row not found"
+        assert row[0] == "Write", f"expected tool='Write', got {row[0]!r}"
+
+    def test_apply_fixture_invalid_tool_raises(self, tmp_db, tmp_path):
+        """Fixture entry with invalid tool value raises ValueError."""
+        fixture_file = tmp_path / "bad_tool.yaml"
+        fixture_file.write_text(
+            __import__("yaml").dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "path_spec": "**/.env",
+                        "decision": "rejected",
+                        "tool": "Grep",
+                    }
+                ]
+            )
+        )
+
+        from nephoscope.learners.permission.seed import apply_fixtures
+        import pytest
+
+        with pytest.raises(ValueError, match="invalid tool"):
+            apply_fixtures(tmp_db, fixture_file)
+
+    def test_read_write_edit_same_path_spec_are_distinct_rows(self, tmp_db, tmp_path):
+        """Read, Write, Edit rules on the same path_spec produce three distinct rows."""
+        import yaml
+
+        fixture_file = tmp_path / "three_tools.yaml"
+        fixture_file.write_text(
+            yaml.dump(
+                [
+                    {
+                        "verb": "Read",
+                        "flags": [],
+                        "path_spec": "**/.env",
+                        "decision": "rejected",
+                        "tool": "Read",
+                    },
+                    {
+                        "verb": "Write",
+                        "flags": [],
+                        "path_spec": "**/.env",
+                        "decision": "rejected",
+                        "tool": "Write",
+                    },
+                    {
+                        "verb": "Edit",
+                        "flags": [],
+                        "path_spec": "**/.env",
+                        "decision": "rejected",
+                        "tool": "Edit",
+                    },
+                ]
+            )
+        )
+
+        from nephoscope.learners.permission.seed import apply_fixtures
+
+        count, _ = apply_fixtures(tmp_db, fixture_file)
+        assert count == 3, f"expected 3 entries, got {count}"
+
+        rows = tmp_db.execute(
+            "SELECT tool FROM rule_shapes WHERE path_spec='**/.env' ORDER BY tool;"
+        ).fetchall()
+        tools = [r[0] for r in rows]
+        assert tools == ["Edit", "Read", "Write"], f"unexpected tools: {tools}"
+
+
+# ===========================================================================
 # Phase 2 — context field in seed fixtures
 # ===========================================================================
 

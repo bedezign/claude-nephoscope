@@ -118,3 +118,93 @@ class TestMainProfileGating:
 
         assert rc == 0
         mock_prompt.assert_not_called()
+
+
+# ===========================================================================
+# Phase B5 — auto-load credential-file-tools meta-profile on init
+# ===========================================================================
+
+
+class TestAutoLoadCredentialFileTools:
+    """Fresh init must auto-load credential-file-tools profile so both Bash-level
+    (from credential_leaks.yaml) and file-tool-level (Read/Write/Edit) deny rules
+    appear in the settings.json deny list."""
+
+    def test_init_seeds_read_env_deny(self, tmp_path, monkeypatch):
+        """After fresh init, DB contains a Read/**/.env rejected rule."""
+        db_path = tmp_path / "observations.db"
+        monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
+
+        from nephoscope.cli import init_cmd
+
+        with (
+            patch.object(init_cmd.sys.stdin, "isatty", return_value=False),
+        ):
+            rc = init_cmd.main(["--no-workspace-prompts"])
+
+        assert rc == 0
+
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            row = conn.execute(
+                "SELECT rs.tool, rs.path_spec, p.decision"
+                " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+                " WHERE rs.verb = 'Read' AND rs.path_spec = '**/.env'"
+                " AND rs.tool = 'Read';",
+            ).fetchone()
+            assert row is not None, (
+                "No Read/**/.env deny rule after init — credential-file-tools not loaded"
+            )
+            assert row[2] == "rejected"
+        finally:
+            conn.close()
+
+    def test_init_seeds_write_env_deny(self, tmp_path, monkeypatch):
+        """After fresh init, DB contains a Write/**/.env rejected rule."""
+        db_path = tmp_path / "observations.db"
+        monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
+
+        from nephoscope.cli import init_cmd
+
+        with patch.object(init_cmd.sys.stdin, "isatty", return_value=False):
+            rc = init_cmd.main(["--no-workspace-prompts"])
+
+        assert rc == 0
+
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            row = conn.execute(
+                "SELECT rs.tool, p.decision"
+                " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+                " WHERE rs.verb = 'Write' AND rs.path_spec = '**/.env'"
+                " AND rs.tool = 'Write';",
+            ).fetchone()
+            assert row is not None, (
+                "No Write/**/.env deny rule after init — credential-file-tools not loaded"
+            )
+            assert row[1] == "rejected"
+        finally:
+            conn.close()
+
+    def test_init_bash_level_rules_still_present(self, tmp_path, monkeypatch):
+        """After fresh init, Bash-level credential_leaks rules are still present."""
+        db_path = tmp_path / "observations.db"
+        monkeypatch.setenv("OBSERVABILITY_DB", str(db_path))
+
+        from nephoscope.cli import init_cmd
+
+        with patch.object(init_cmd.sys.stdin, "isatty", return_value=False):
+            rc = init_cmd.main(["--no-workspace-prompts"])
+
+        assert rc == 0
+
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            # credential_leaks.yaml has verb='*', path_spec='$CWD/**/.env'
+            count = conn.execute(
+                "SELECT COUNT(*) FROM rule_shapes"
+                " WHERE verb = '*' AND path_spec = '$CWD/**/.env';",
+            ).fetchone()[0]
+            assert count >= 1, "Bash-level $CWD/**/.env deny rule missing after init"
+        finally:
+            conn.close()

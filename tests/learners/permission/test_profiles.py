@@ -283,7 +283,9 @@ class TestListProfiles:
         user.mkdir()
         profile_path = bundled / "foo.yaml"
         profile_path.write_text(
-            yaml.dump({"_meta": {"id": "foo", "order": "invalid", "description": "test"}}),
+            yaml.dump(
+                {"_meta": {"id": "foo", "order": "invalid", "description": "test"}}
+            ),
             encoding="utf-8",
         )
 
@@ -328,7 +330,7 @@ class TestCmdLoadMkdirFailure:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """When mkdir raises OSError, _cmd_load returns 1 and emits an error to stderr."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from nephoscope.learners.permission.profiles import _cmd_load
 
@@ -1171,3 +1173,384 @@ class TestApplyProfileDoomPath:
             assert bad_id in combined or "not found" in combined.lower(), (
                 f"Expected error message containing {bad_id!r}"
             )
+
+
+# ===========================================================================
+# Phase B4 — credential-file-tools meta-profile
+# ===========================================================================
+
+
+class TestCredentialFileToolsProfile:
+    """Integration tests for the credential-file-tools meta-profile fixture.
+
+    The profile must load via apply_profile and produce deny entries for
+    Read, Write, and Edit tools on credential file paths.  .env.example must
+    NOT appear.
+    """
+
+    def test_profile_file_exists(self):
+        """credential-file-tools.yaml must exist in the bundled meta-profiles dir."""
+        from nephoscope.learners.permission.profiles import _bundled_dir
+
+        profile_path = _bundled_dir() / "credential-file-tools.yaml"
+        assert profile_path.exists(), (
+            f"credential-file-tools.yaml not found at {profile_path}"
+        )
+
+    def test_apply_profile_loads_read_env_deny(self, tmp_db, tmp_path):
+        """apply_profile → DB contains a rejected rule for Read/**/.env."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "credential-file-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.tool, rs.path_spec, p.decision"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'Read' AND rs.path_spec = '**/.env' AND rs.tool = 'Read';"
+        ).fetchone()
+        assert row is not None, "No Read/**/.env rule found after loading profile"
+        assert row[0] == "Read"
+        assert row[1] == "**/.env"
+        assert row[2] == "rejected"
+
+    def test_apply_profile_loads_write_env_deny(self, tmp_db, tmp_path):
+        """apply_profile → DB contains a rejected rule for Write/**/.env."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "credential-file-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.tool, p.decision"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'Write' AND rs.path_spec = '**/.env' AND rs.tool = 'Write';"
+        ).fetchone()
+        assert row is not None, "No Write/**/.env rule found after loading profile"
+        assert row[0] == "Write"
+        assert row[1] == "rejected"
+
+    def test_apply_profile_loads_edit_env_deny(self, tmp_db, tmp_path):
+        """apply_profile → DB contains a rejected rule for Edit/**/.env."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "credential-file-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.tool, p.decision"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'Edit' AND rs.path_spec = '**/.env' AND rs.tool = 'Edit';"
+        ).fetchone()
+        assert row is not None, "No Edit/**/.env rule found after loading profile"
+        assert row[0] == "Edit"
+        assert row[1] == "rejected"
+
+    def test_env_example_not_in_deny_rules(self, tmp_db, tmp_path):
+        """After loading the profile, no rule matches .env.example path_specs."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "credential-file-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        # Check no path_spec contains .env.example or .env.template
+        rows = tmp_db.execute(
+            "SELECT path_spec FROM rule_shapes"
+            " WHERE path_spec LIKE '%.env.example%' OR path_spec LIKE '%.env.template%';"
+        ).fetchall()
+        assert rows == [], (
+            f".env.example or .env.template path_specs found: {[r[0] for r in rows]}"
+        )
+
+    def test_mirror_deny_list_contains_read_env(self, tmp_db, tmp_path):
+        """After loading and syncing, settings.json deny list contains Read(**/.env)."""
+        import json
+        from unittest.mock import patch
+
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+        from nephoscope.lib.mirror.writer import sync_global
+
+        profile_path = _bundled_dir() / "credential-file-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+
+        # Seed the global_mirror singleton pointing at a temp settings.json
+        fake_settings = tmp_path / "settings.json"
+        tmp_db.execute(
+            "INSERT OR REPLACE INTO global_mirror"
+            " (id, settings_json_path, settings_json_sha256, settings_json_last_synced)"
+            " VALUES (1, ?, NULL, NULL);",
+            (str(fake_settings),),
+        )
+        tmp_db.commit()
+
+        with patch("nephoscope.config.get_config") as mock_cfg:
+            mock_cfg.return_value.trusted_dirs = []
+            sync_global(tmp_db)
+
+        data = json.loads(fake_settings.read_text())
+        deny = data["permissions"]["deny"]
+        assert "Read(**/.env)" in deny, (
+            f"Expected Read(**/.env) in deny list, got: {deny}"
+        )
+        assert "Write(**/.env)" in deny, (
+            f"Expected Write(**/.env) in deny list, got: {deny}"
+        )
+        assert "Edit(**/.env)" in deny, (
+            f"Expected Edit(**/.env) in deny list, got: {deny}"
+        )
+
+
+# ===========================================================================
+# dev-tools meta-profile — new rules: stat, chmod +x, rm -rf
+# ===========================================================================
+
+
+class TestDevToolsNewRules:
+    """Integration tests for the stat, chmod +x, and rm -rf rules in dev-tools.yaml."""
+
+    @staticmethod
+    def _load_dev_tools_permissions() -> list[dict]:
+        """Load the permissions list from the bundled dev-tools.yaml."""
+        from nephoscope.learners.permission.profiles import _bundled_dir
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        import yaml
+
+        data = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+        return data.get("permissions", [])
+
+    # ------------------------------------------------------------------
+    # find
+    # ------------------------------------------------------------------
+
+    def test_find_rule_present_with_wildcard_flags(self) -> None:
+        """dev-tools profile contains a find rule with flags='*' and no path_spec."""
+        perms = self._load_dev_tools_permissions()
+        find_rules = [p for p in perms if p.get("verb") == "find"]
+        assert find_rules, "No find rule found in dev-tools.yaml"
+        rule = find_rules[0]
+        assert rule.get("flags") == "*"
+        assert rule.get("path_spec") is None
+        assert rule.get("decision") == "approved"
+
+    # ------------------------------------------------------------------
+    # stat
+    # ------------------------------------------------------------------
+
+    def test_stat_rule_present_with_wildcard_flags(self) -> None:
+        """dev-tools profile contains a stat rule with flags='*' and no path_spec."""
+        perms = self._load_dev_tools_permissions()
+        stat_rules = [p for p in perms if p.get("verb") == "stat"]
+        assert stat_rules, "No stat rule found in dev-tools.yaml"
+        rule = stat_rules[0]
+        assert rule.get("flags") == "*", (
+            f"Expected flags='*' for stat rule, got {rule.get('flags')!r}"
+        )
+        assert rule.get("path_spec") is None, (
+            f"Expected no path_spec for stat rule, got {rule.get('path_spec')!r}"
+        )
+        assert rule.get("decision") == "approved"
+
+    # ------------------------------------------------------------------
+    # chmod +x
+    # ------------------------------------------------------------------
+
+    def test_chmod_plus_x_rules_cover_three_path_specs(self) -> None:
+        """dev-tools profile has chmod +x rules for all three expected path_specs."""
+        perms = self._load_dev_tools_permissions()
+        chmod_rules = [
+            p for p in perms if p.get("verb") == "chmod" and p.get("subcommand") == "+x"
+        ]
+        actual_specs = {r.get("path_spec") for r in chmod_rules}
+        expected_specs = {
+            "$JUNK_DIR/**",
+            "$TRUSTED_DIR/**",
+            "$PROJECT_ROOT/**",
+        }
+        assert expected_specs == actual_specs, (
+            f"chmod +x path_specs mismatch: expected {expected_specs}, got {actual_specs}"
+        )
+
+    def test_chmod_plus_x_rules_all_approved(self) -> None:
+        """All chmod +x rules in dev-tools are approved."""
+        perms = self._load_dev_tools_permissions()
+        chmod_rules = [
+            p for p in perms if p.get("verb") == "chmod" and p.get("subcommand") == "+x"
+        ]
+        for rule in chmod_rules:
+            assert rule.get("decision") == "approved", (
+                f"chmod +x rule for {rule.get('path_spec')!r} is not approved"
+            )
+            assert rule.get("flags") == [], (
+                f"Expected flags=[] for chmod +x rule, got {rule.get('flags')!r}"
+            )
+
+    # ------------------------------------------------------------------
+    # rm -rf
+    # ------------------------------------------------------------------
+
+    def test_rm_rf_rules_cover_three_path_specs(self) -> None:
+        """dev-tools profile has rm -rf rules for all three expected path_specs."""
+        perms = self._load_dev_tools_permissions()
+        rm_rules = [p for p in perms if p.get("verb") == "rm"]
+        actual_specs = {r.get("path_spec") for r in rm_rules}
+        expected_specs = {
+            "$JUNK_DIR/**",
+            "$TRUSTED_DIR/**",
+            "$PROJECT_ROOT/**",
+        }
+        assert expected_specs == actual_specs, (
+            f"rm rules path_specs mismatch: expected {expected_specs}, got {actual_specs}"
+        )
+
+    def test_rm_rf_rules_all_approved_with_correct_flags(self) -> None:
+        """All rm rules in dev-tools are approved and carry [-f, -r] flags."""
+        perms = self._load_dev_tools_permissions()
+        rm_rules = [p for p in perms if p.get("verb") == "rm"]
+        for rule in rm_rules:
+            assert rule.get("decision") == "approved", (
+                f"rm rule for {rule.get('path_spec')!r} is not approved"
+            )
+            flags = rule.get("flags", [])
+            assert set(flags) == {"-f", "-r"}, (
+                f"rm rule for {rule.get('path_spec')!r} has unexpected flags: {flags!r}"
+            )
+
+    # ------------------------------------------------------------------
+    # DB round-trip: apply_profile inserts all nine new rules
+    # ------------------------------------------------------------------
+
+    def test_apply_dev_tools_inserts_stat_rule(self, tmp_db) -> None:
+        """apply_profile on dev-tools.yaml writes a stat/wildcard rule to the DB."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.flags, p.decision"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'stat';"
+        ).fetchone()
+        assert row is not None, (
+            "No stat rule found in DB after loading dev-tools profile"
+        )
+        assert row[0] == "*", f"Expected flags='*' for stat rule in DB, got {row[0]!r}"
+        assert row[1] == "approved"
+
+    def test_apply_dev_tools_inserts_chmod_rules(self, tmp_db) -> None:
+        """apply_profile on dev-tools.yaml writes all three chmod +x rules to the DB."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        rows = tmp_db.execute(
+            "SELECT rs.subcommand, rs.path_spec, p.decision"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'chmod';"
+        ).fetchall()
+        path_specs = {r[1] for r in rows}
+        expected = {
+            "$JUNK_DIR/**",
+            "$TRUSTED_DIR/**",
+            "$PROJECT_ROOT/**",
+        }
+        assert expected == path_specs, (
+            f"chmod path_specs in DB: expected {expected}, got {path_specs}"
+        )
+        for row in rows:
+            assert row[0] == "+x", f"Unexpected chmod subcommand in DB: {row[0]!r}"
+            assert row[2] == "approved"
+
+    def test_apply_dev_tools_inserts_rm_rules(self, tmp_db) -> None:
+        """apply_profile on dev-tools.yaml writes all three rm rules to the DB."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        rows = tmp_db.execute(
+            "SELECT rs.path_spec, rs.flags, p.decision"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'rm';"
+        ).fetchall()
+        path_specs = {r[0] for r in rows}
+        expected = {
+            "$JUNK_DIR/**",
+            "$TRUSTED_DIR/**",
+            "$PROJECT_ROOT/**",
+        }
+        assert expected == path_specs, (
+            f"rm path_specs in DB: expected {expected}, got {path_specs}"
+        )
+        for row in rows:
+            assert row[2] == "approved"
+
+    # ------------------------------------------------------------------
+    # tail / head
+    # ------------------------------------------------------------------
+
+    def test_tail_rule_present_with_wildcard_flags(self) -> None:
+        """dev-tools profile contains a tail rule with flags='*' and no path_spec."""
+        perms = self._load_dev_tools_permissions()
+        tail_rules = [p for p in perms if p.get("verb") == "tail"]
+        assert tail_rules, "No tail rule found in dev-tools.yaml"
+        rule = tail_rules[0]
+        assert rule.get("flags") == "*", (
+            f"Expected flags='*' for tail rule, got {rule.get('flags')!r}"
+        )
+        assert rule.get("path_spec") is None
+        assert rule.get("decision") == "approved"
+
+    def test_head_rule_present_with_wildcard_flags(self) -> None:
+        """dev-tools profile contains a head rule with flags='*' and no path_spec."""
+        perms = self._load_dev_tools_permissions()
+        head_rules = [p for p in perms if p.get("verb") == "head"]
+        assert head_rules, "No head rule found in dev-tools.yaml"
+        rule = head_rules[0]
+        assert rule.get("flags") == "*", (
+            f"Expected flags='*' for head rule, got {rule.get('flags')!r}"
+        )
+        assert rule.get("path_spec") is None
+        assert rule.get("decision") == "approved"
+
+
+# ===========================================================================
+# python-dev meta-profile — uv run uses flags="*"
+# ===========================================================================
+
+
+class TestPythonDevUvRunRule:
+    """The uv run rule in python-dev.yaml must use flags='*' so that flags
+    passed to the wrapped command (e.g. pytest -q) do not cause a mismatch."""
+
+    @staticmethod
+    def _load_python_dev_permissions() -> list[dict]:
+        from nephoscope.learners.permission.profiles import _bundled_dir
+
+        profile_path = _bundled_dir() / "python-dev.yaml"
+        import yaml
+
+        data = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+        return data.get("permissions", [])
+
+    def test_uv_run_rule_uses_wildcard_flags(self) -> None:
+        """uv run rule has flags='*' so pytest -q / mypy / etc. are covered."""
+        perms = self._load_python_dev_permissions()
+        uv_run_rules = [
+            p for p in perms if p.get("verb") == "uv" and p.get("subcommand") == "run"
+        ]
+        assert uv_run_rules, "No uv run rule found in python-dev.yaml"
+        rule = uv_run_rules[0]
+        assert rule.get("flags") == "*", (
+            f"uv run rule must have flags='*' (wrapped-tool flags leak into the shape); "
+            f"got {rule.get('flags')!r}"
+        )

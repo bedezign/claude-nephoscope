@@ -47,6 +47,7 @@ _TOKEN_MAP: dict[str, str] = {
     "$CWD": "cwd",
     "$PROJECT_ROOT": "project_root",
     "$CLAUDE_DIR": "claude_dir",
+    "$JUNK_DIR": "junk_dir",
 }
 
 _TRUSTED_DIR_TOKEN = "$TRUSTED_DIR"

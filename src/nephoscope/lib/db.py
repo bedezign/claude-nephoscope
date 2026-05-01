@@ -295,6 +295,7 @@ def upsert_rule_shape(
     path_spec: str | None,
     ts: str,
     context: str = "any",
+    tool: str = "Bash",
 ) -> int:
     """Insert-or-touch a rule shape; return its id.
 
@@ -305,11 +306,12 @@ def upsert_rule_shape(
     - context constrains which invocation contexts match:
       "any" (default) matches all; "toplevel" only matches top-level commands;
       "substitution" only matches commands inside $(...) or <(...).
+    - tool is the Claude Code tool class that owns this rule ('Bash', 'Read',
+      'Write', 'Edit'). Defaults to 'Bash' for backward compatibility.
 
-    The (verb, subcommand, flags, path_spec, context) tuple is the unique key.
-    Two rules that differ only in context can coexist — e.g. a global allow for
-    context='substitution' (safe inline form) alongside a global deny for
-    context='toplevel' (standalone leaks the secret).
+    The (verb, subcommand, flags, path_spec, context, tool) tuple is the unique key.
+    Two rules that differ only in context or tool can coexist — e.g. a Bash deny
+    and a Read deny for the same path_spec are stored as separate rows.
 
     Returns the rule_shapes.id.
     """
@@ -317,8 +319,8 @@ def upsert_rule_shape(
         "SELECT id FROM rule_shapes"
         " WHERE verb = ? AND IFNULL(subcommand, '') = IFNULL(?, '')"
         " AND flags = ? AND IFNULL(path_spec, '') = IFNULL(?, '')"
-        " AND context = ?;",
-        (verb, subcommand, flags_json, path_spec, context),
+        " AND context = ? AND tool = ?;",
+        (verb, subcommand, flags_json, path_spec, context, tool),
     ).fetchone()
 
     if row is not None:
@@ -330,10 +332,10 @@ def upsert_rule_shape(
         return shape_id
 
     cur = conn.execute(
-        "INSERT INTO rule_shapes(verb, subcommand, flags, path_spec, context,"
+        "INSERT INTO rule_shapes(verb, subcommand, flags, path_spec, context, tool,"
         "  first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?);",
-        (verb, subcommand, flags_json, path_spec, context, ts, ts),
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        (verb, subcommand, flags_json, path_spec, context, tool, ts, ts),
     )
     return int(cur.lastrowid or 0)
 

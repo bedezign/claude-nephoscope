@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import os
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,9 @@ class NephoscopeConfig:
     trusted_dirs: list[str] = field(default_factory=list)
     auto_register_project_paths: bool = False
     non_bash_tool_matching: bool = True
+    junk_dir: str = field(
+        default_factory=lambda: str(Path(tempfile.gettempdir()) / "claude")
+    )
 
 
 def _coerce_trusted_dirs(value: object) -> list[str]:
@@ -49,6 +53,14 @@ def _coerce_trusted_dirs(value: object) -> list[str]:
     raise TypeError(
         f"config: trusted_dirs must be a list of strings, got {type(value).__name__}"
     )
+
+
+def _coerce_junk_dir(value: object) -> str:
+    if value is None:
+        return str(Path(tempfile.gettempdir()) / "claude")
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"config: junk_dir must be a string, got {type(value).__name__}")
 
 
 def _config_path() -> Path:
@@ -77,4 +89,5 @@ def get_config() -> NephoscopeConfig:
             data.get("auto_register_project_paths", False)
         ),
         non_bash_tool_matching=bool(data.get("non_bash_tool_matching", True)),
+        junk_dir=_coerce_junk_dir(data.get("junk_dir")),
     )

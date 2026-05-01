@@ -11,8 +11,9 @@ permissions:
   # uv subcommands — project and environment management
   - verb: uv
     subcommand: run
-    flags: []
+    flags: "*"
     decision: approved
+    reason: "uv run — any flags belong to the wrapped tool, not uv itself"
 
   - verb: uv
     subcommand: sync

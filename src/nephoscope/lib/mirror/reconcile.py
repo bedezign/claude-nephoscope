@@ -417,16 +417,18 @@ def _upsert_rule_shape(
         " WHERE verb = ?"
         " AND IFNULL(subcommand, '') = IFNULL(?, '')"
         " AND flags = ?"
-        " AND IFNULL(path_spec, '') = IFNULL(?, '');",
-        (verb, subcommand, flags_stored, path_spec),
+        " AND IFNULL(path_spec, '') = IFNULL(?, '')"
+        " AND context = ? AND tool = ?;",
+        (verb, subcommand, flags_stored, path_spec, "any", "Bash"),
     ).fetchone()
     if row is not None:
         conn.execute("UPDATE rule_shapes SET last_seen = ? WHERE id = ?;", (ts, row[0]))
         return int(row[0])
     cur = conn.execute(
-        "INSERT INTO rule_shapes(verb, subcommand, flags, path_spec, first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?, ?);",
-        (verb, subcommand, flags_stored, path_spec, ts, ts),
+        "INSERT INTO rule_shapes(verb, subcommand, flags, path_spec, context, tool,"
+        "  first_seen, last_seen)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        (verb, subcommand, flags_stored, path_spec, "any", "Bash", ts, ts),
     )
     return int(cur.lastrowid or 0)
 

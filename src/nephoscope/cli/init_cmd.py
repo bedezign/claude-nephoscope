@@ -59,6 +59,13 @@ _AUTO_LOAD_FIXTURES: list[str] = [
     "secret_manager_standalones.yaml",
 ]
 
+# Meta-profiles loaded automatically on first install, in application order.
+# Each path is relative to _FIXTURES_DIR/meta-profiles/.
+# These are bundled security baselines — not opt-in, always applied on init.
+_AUTO_LOAD_META_PROFILES: list[str] = [
+    "credential-file-tools.yaml",
+]
+
 # Verb-category profiles applied automatically on first install.
 # Each path is relative to _FIXTURES_DIR/profiles/.
 # Other profiles (python, javascript, task-runners, secrets-management) are opt-in.
@@ -214,7 +221,7 @@ def _prompt_for_profiles() -> list[Path]:
         return []
     if not raw:
         return []
-    if raw.lower() == 'all':
+    if raw.lower() == "all":
         return [p.path for p in profiles]
     selected: list[Path] = []
     seen: set[Path] = set()
@@ -372,7 +379,17 @@ def _configure_workspace_roots(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _seed_auto_fixtures(conn: sqlite3.Connection) -> None:
+def _seed_auto_fixtures(conn: sqlite3.Connection) -> bool:
+    """Seed fixtures, meta-profiles, and verb-type profiles into the DB.
+
+    Optional fixtures (``_AUTO_LOAD_FIXTURES``) warn and continue on error.
+    Bundled security baselines (``_AUTO_LOAD_META_PROFILES``) print a fatal
+    message and return False so that ``main()`` can exit non-zero.
+    Verb-type profiles (``_AUTO_LOAD_VERB_PROFILES``) warn and continue.
+
+    Returns True when all mandatory baselines loaded successfully.
+    """
+    from nephoscope.learners.permission.profiles import apply_profile
     from nephoscope.learners.permission.seed import apply_fixtures, apply_verb_types
 
     for fixture_name in _AUTO_LOAD_FIXTURES:
@@ -385,6 +402,17 @@ def _seed_auto_fixtures(conn: sqlite3.Connection) -> None:
                 file=sys.stderr,
             )
 
+    for meta_name in _AUTO_LOAD_META_PROFILES:
+        meta_path = _FIXTURES_DIR / "meta-profiles" / meta_name
+        try:
+            apply_profile(conn, meta_path)
+        except Exception as exc:
+            print(
+                f"nephoscope-init: fatal — bundled security baseline failed ({meta_name}): {exc}",
+                file=sys.stderr,
+            )
+            return False
+
     for profile_name in _AUTO_LOAD_VERB_PROFILES:
         profile_path = _FIXTURES_DIR / "profiles" / profile_name
         try:
@@ -394,6 +422,8 @@ def _seed_auto_fixtures(conn: sqlite3.Connection) -> None:
                 f"nephoscope-init: warning — verb types load failed ({profile_name}): {exc}",
                 file=sys.stderr,
             )
+
+    return True
 
 
 def _prompt_and_seed_profiles() -> None:
@@ -451,7 +481,9 @@ def main(argv: list[str] | None = None) -> int:
     _seed_global_mirror_singleton(conn)
 
     if not already_existed:
-        _seed_auto_fixtures(conn)
+        if not _seed_auto_fixtures(conn):
+            conn.close()
+            return 1
         conn.commit()
 
     conn.close()

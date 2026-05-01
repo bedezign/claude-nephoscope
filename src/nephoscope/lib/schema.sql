@@ -102,11 +102,12 @@ CREATE TABLE rule_shapes (
   flags      TEXT    NOT NULL,        -- minified JSON array, OR literal "*"
   path_spec  TEXT,                    -- NULL=any, ""=no-paths, "$VAR/**"=glob
   context    TEXT    NOT NULL DEFAULT 'any' CHECK (context IN ('any', 'toplevel', 'substitution')),  -- rule constraint
+  tool       TEXT    NOT NULL DEFAULT 'Bash' CHECK (tool IN ('Bash', 'Read', 'Write', 'Edit')),  -- tool class for file-tool deny rules
   first_seen TEXT    NOT NULL,
   last_seen  TEXT    NOT NULL
 );
 CREATE UNIQUE INDEX idx_rule_shapes_unique
-  ON rule_shapes(verb, IFNULL(subcommand, ''), flags, IFNULL(path_spec, ''), context);
+  ON rule_shapes(verb, IFNULL(subcommand, ''), flags, IFNULL(path_spec, ''), context, tool);
 
 -- Consolidated permission decisions.
 CREATE TABLE permissions (

@@ -410,3 +410,69 @@ class TestSerializeErrors:
     def test_non_string_verb_raises(self):
         with pytest.raises(ValueError):
             serialize({"verb": 42})
+
+
+# ---------------------------------------------------------------------------
+# Phase B3 — file-tool relative glob serialization
+# ---------------------------------------------------------------------------
+
+
+class TestSerializeFileRelativeGlob:
+    """File-tool rows with relative glob path_specs serialize as Verb(glob)."""
+
+    def test_read_double_star_env_file(self):
+        """Read row with '**/.env' path_spec serializes as Read(**/.env)."""
+        assert serialize(row("Read", path_spec="**/.env")) == "Read(**/.env)"
+
+    def test_write_double_star_env_file(self):
+        """Write row with '**/.env' path_spec serializes as Write(**/.env)."""
+        assert serialize(row("Write", path_spec="**/.env")) == "Write(**/.env)"
+
+    def test_edit_double_star_env_file(self):
+        """Edit row with '**/.env' path_spec serializes as Edit(**/.env)."""
+        assert serialize(row("Edit", path_spec="**/.env")) == "Edit(**/.env)"
+
+    def test_read_double_star_env_local(self):
+        assert (
+            serialize(row("Read", path_spec="**/.env.local")) == "Read(**/.env.local)"
+        )
+
+    def test_read_extension_glob(self):
+        """Read row with '**/*.pem' extension glob serializes correctly."""
+        assert serialize(row("Read", path_spec="**/*.pem")) == "Read(**/*.pem)"
+
+    def test_read_directory_glob(self):
+        """Read row with '**/secrets/**' directory glob serializes correctly."""
+        assert (
+            serialize(row("Read", path_spec="**/secrets/**")) == "Read(**/secrets/**)"
+        )
+
+    def test_read_deep_path_glob(self):
+        """Read row with '**/config/database.yml' deep-path glob serializes correctly."""
+        assert serialize(row("Read", path_spec="**/config/database.yml")) == (
+            "Read(**/config/database.yml)"
+        )
+
+    def test_read_bare_star_path(self):
+        """Read row with '*' single-star glob serializes correctly."""
+        assert serialize(row("Read", path_spec="*")) == "Read(*)"
+
+    def test_existing_absolute_path_unaffected(self):
+        """Existing absolute path rendering is unchanged by the new code path."""
+        assert serialize(row("Read", path_spec="/abs/path/**")) == "Read(//abs/path/**)"
+
+    def test_existing_double_slash_unaffected(self):
+        """Existing //-prefixed path rendering is unchanged."""
+        assert (
+            serialize(row("Read", path_spec="//abs/path/**")) == "Read(//abs/path/**)"
+        )
+
+    def test_relative_non_glob_still_raises(self):
+        """Non-glob relative paths (no leading * or **) still raise ValueError."""
+        with pytest.raises(ValueError, match="absolute"):
+            serialize(row("Read", path_spec="relative/path"))
+
+    def test_relative_non_glob_plain_word_raises(self):
+        """Plain word path_spec (no glob chars) still raises ValueError."""
+        with pytest.raises(ValueError, match="absolute"):
+            serialize(row("Read", path_spec="somefile.env"))

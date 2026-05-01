@@ -71,6 +71,7 @@ def test_no_forbidden_substrings():
         "--exclude-dir=.venv-step4",
         "--exclude-dir=__pycache__",
         "--exclude-dir=.git",
+        "--exclude-dir=.codeatlas",
         str(repo_root),
     ]
 
@@ -123,6 +124,9 @@ def test_no_forbidden_substrings():
         "-not",
         "-path",
         "*/.git/*",
+        "-not",
+        "-path",
+        "*/.codeatlas/*",
     ]
     find_result = subprocess.run(find_cmd, capture_output=True, text=True)
     files_walked = len([f for f in find_result.stdout.strip().split("\n") if f])

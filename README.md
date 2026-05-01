@@ -16,7 +16,7 @@ Claude Code asks for permission before every shell command, file write, or web f
 - **Learns from your answers.** Every *Allow* or *Deny* you click is recorded, and recurring patterns surface as rules you can promote with one command.
 - **Scopes rules the way you work.** Allow a tool everywhere, or only inside one project, or just for this one chat — your choice, per rule.
 - **Stays out of the way.** Rules are written into your normal `settings.json`, so Claude Code's built-in permission gate handles them without any hook round-trip.
-- **Ships with credential-leak guards.** Out of the box, nephoscope denies reads of well-known credential files (`.env` files, `~/.aws/credentials`, `~/.kube/config`, `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, bash and zsh history) and blocks standalone secret-manager reads (`op read`, `vault kv get`, and others). The safe inline form — `$(op read 'op://...')` — is unaffected.
+- **Ships with credential-leak guards.** Out of the box, nephoscope blocks credential files at two levels: Bash commands and Claude Code's native Read, Write, and Edit tools are both denied access to `.env` files, `~/.aws/credentials`, `~/.kube/config`, `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, bash and zsh history, PEM and key files, and common secrets directories. Standalone secret-manager reads (`op read`, `vault kv get`, and others) are also blocked. The safe inline form — `$(op read 'op://...')` — is unaffected.
 
 ## Why nephoscope
 

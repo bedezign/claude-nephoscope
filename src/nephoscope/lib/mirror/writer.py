@@ -191,7 +191,7 @@ def _fetch_permission_rows(
         f"""
         SELECT p.id, p.decision, p.source, p.reason, p.decided_at,
                rs.verb, rs.subcommand, rs.flags, rs.path_spec,
-               p.session_id, p.project_id
+               p.session_id, p.project_id, rs.tool
           FROM permissions p
           JOIN rule_shapes rs ON rs.id = p.rule_shape_id
          WHERE {where}
@@ -201,7 +201,9 @@ def _fetch_permission_rows(
     ).fetchall()
 
 
-_TOKEN_RE = re.compile(r"\$(?:TRUSTED_DIR|HOME|CWD|PROJECT_ROOT)(?:/|$)")
+_TOKEN_RE = re.compile(
+    r"\$(?:TRUSTED_DIR|HOME|CWD|PROJECT_ROOT|CLAUDE_DIR|JUNK_DIR)(?:/|$)"
+)
 
 
 def _has_unresolved_token(path_spec: str | None) -> bool:
@@ -253,6 +255,7 @@ def _classify_permission_rows(
             "path_spec": r[8],
             "session_id": r[9],
             "project_id": r[10],
+            "tool": r[11],
         }
         if _has_unresolved_token(row_dict["path_spec"]):
             continue
