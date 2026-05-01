@@ -1,7 +1,7 @@
 _meta:
   id: dev-tools
   order: 4
-  description: "Developer utilities (curl, make, openssl, …)"
+  description: "Developer utilities (curl, make, openssl, sqlite3, …)"
 permissions:
   # Developer utilities — opt-in permission fixture.
   #
@@ -45,6 +45,12 @@ permissions:
   - verb: man
     flags: []
     decision: approved
+
+  # sqlite3 -- database inspection and querying
+  - verb: sqlite3
+    flags: "*"
+    decision: approved
+    reason: "sqlite3 — local DB inspection tool"
 
   # openssl -- certificate inspection
   - verb: openssl
