@@ -1310,7 +1310,7 @@ class TestCredentialFileToolsProfile:
 
 
 class TestDevToolsNewRules:
-    """Integration tests for the stat, chmod +x, and rm -rf rules in dev-tools.yaml."""
+    """Integration tests for dev-tools.yaml rules: stat, find, tail, head, chmod +x, and rm -rf."""
 
     @staticmethod
     def _load_dev_tools_permissions() -> list[dict]:
@@ -1421,7 +1421,7 @@ class TestDevToolsNewRules:
             )
 
     # ------------------------------------------------------------------
-    # DB round-trip: apply_profile inserts all nine new rules
+    # DB round-trip: apply_profile inserts selected new rules
     # ------------------------------------------------------------------
 
     def test_apply_dev_tools_inserts_stat_rule(self, tmp_db) -> None:
@@ -1493,6 +1493,66 @@ class TestDevToolsNewRules:
         )
         for row in rows:
             assert row[2] == "approved"
+
+    def test_apply_dev_tools_inserts_find_rule(self, tmp_db) -> None:
+        """apply_profile on dev-tools.yaml writes a find/wildcard rule to the DB."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.flags, p.decision, rs.path_spec"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'find';"
+        ).fetchone()
+        assert row is not None, (
+            "No find rule found in DB after loading dev-tools profile"
+        )
+        assert row[0] == "*", f"Expected flags='*' for find rule in DB, got {row[0]!r}"
+        assert row[1] == "approved"
+        assert row[2] is None, f"Expected no path_spec for find rule in DB, got {row[2]!r}"
+
+    def test_apply_dev_tools_inserts_tail_rule(self, tmp_db) -> None:
+        """apply_profile on dev-tools.yaml writes a tail/wildcard rule to the DB."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.flags, p.decision, rs.path_spec"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'tail';"
+        ).fetchone()
+        assert row is not None, (
+            "No tail rule found in DB after loading dev-tools profile"
+        )
+        assert row[0] == "*", f"Expected flags='*' for tail rule in DB, got {row[0]!r}"
+        assert row[1] == "approved"
+        assert row[2] is None, f"Expected no path_spec for tail rule in DB, got {row[2]!r}"
+
+    def test_apply_dev_tools_inserts_head_rule(self, tmp_db) -> None:
+        """apply_profile on dev-tools.yaml writes a head/wildcard rule to the DB."""
+        from nephoscope.learners.permission.profiles import _bundled_dir, apply_profile
+
+        profile_path = _bundled_dir() / "dev-tools.yaml"
+        apply_profile(tmp_db, profile_path)
+        tmp_db.commit()
+
+        row = tmp_db.execute(
+            "SELECT rs.flags, p.decision, rs.path_spec"
+            " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
+            " WHERE rs.verb = 'head';"
+        ).fetchone()
+        assert row is not None, (
+            "No head rule found in DB after loading dev-tools profile"
+        )
+        assert row[0] == "*", f"Expected flags='*' for head rule in DB, got {row[0]!r}"
+        assert row[1] == "approved"
+        assert row[2] is None, f"Expected no path_spec for head rule in DB, got {row[2]!r}"
 
     # ------------------------------------------------------------------
     # tail / head

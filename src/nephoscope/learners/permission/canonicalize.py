@@ -567,6 +567,71 @@ def _emit_path_spec(
         result.append(specific)
 
 
+def _emit_basename_variants(
+    var_name: str,
+    tail: str,
+    seen: set[str],
+    result: list[str],
+) -> None:
+    """Emit basename-glob and extension-glob variants for *tail* under *var_name*.
+
+    Basename-glob catches files with this exact name at any nesting depth.
+    Extension-glob catches any file sharing the same suffix at any depth.
+    """
+    basename = tail.rsplit("/", 1)[-1] if "/" in tail else tail
+    if not basename:
+        return
+    _emit_path_spec(var_name + "/**/" + basename, None, seen, result)
+    suffix = Path(basename).suffix
+    if suffix:
+        _emit_path_spec(var_name + "/**/*" + suffix, None, seen, result)
+
+
+def _emit_deep_path_variants(
+    var_name: str,
+    tail: str,
+    seen: set[str],
+    result: list[str],
+) -> None:
+    """Emit deep-path and directory-glob variants for *tail* under *var_name*.
+
+    Deep-path matches the same relative sub-path at any nesting depth.
+    Directory-glob catches any file under the immediate parent directory.
+    """
+    if "/" not in tail:
+        return
+    _emit_path_spec(var_name + "/**/" + tail, None, seen, result)
+    immediate_parent = tail.rsplit("/", 1)[0].rsplit("/", 1)[-1]
+    if immediate_parent:
+        _emit_path_spec(
+            var_name + "/**/" + immediate_parent + "/**", None, seen, result
+        )
+
+
+def _try_emit_prefix_variants(
+    path: str,
+    var_name: str,
+    base: str,
+    seen: set[str],
+    result: list[str],
+) -> bool:
+    """Emit all glob variants for *path* if it falls under the *base* prefix.
+
+    Returns True if *path* matched (equal to or under *base*), False otherwise.
+    """
+    glob = var_name + "/**"
+    if path == base:
+        _emit_path_spec(glob, None, seen, result)
+        return True
+    if not path.startswith(base + "/"):
+        return False
+    tail = path[len(base) + 1 :]
+    _emit_path_spec(glob, var_name + "/" + tail, seen, result)
+    _emit_basename_variants(var_name, tail, seen, result)
+    _emit_deep_path_variants(var_name, tail, seen, result)
+    return True
+
+
 def _match_ctx_prefix(
     path: str,
     ordered: list[tuple[str, str]],
@@ -585,33 +650,7 @@ def _match_ctx_prefix(
     """
     matched = False
     for var_name, base in ordered:
-        glob = var_name + "/**"
-        if path == base:
-            _emit_path_spec(glob, None, seen, result)
-            matched = True
-            continue
-        if path.startswith(base + "/"):
-            tail = path[len(base) + 1 :]
-            specific = var_name + "/" + tail
-            _emit_path_spec(glob, specific, seen, result)
-            # Basename-glob: matches any depth ending in this filename.
-            basename = tail.rsplit("/", 1)[-1] if "/" in tail else tail
-            if basename:
-                basename_glob = var_name + "/**/" + basename
-                _emit_path_spec(basename_glob, None, seen, result)
-                # Extension-glob: matches any file with this extension at any depth.
-                suffix = Path(basename).suffix
-                if suffix:
-                    _emit_path_spec(var_name + "/**/*" + suffix, None, seen, result)
-            if "/" in tail:
-                # Deep-path: same relative path at any nesting depth.
-                _emit_path_spec(var_name + "/**/" + tail, None, seen, result)
-                # Directory-glob: any file under the immediate parent directory.
-                immediate_parent = tail.rsplit("/", 1)[0].rsplit("/", 1)[-1]
-                if immediate_parent:
-                    _emit_path_spec(
-                        var_name + "/**/" + immediate_parent + "/**", None, seen, result
-                    )
+        if _try_emit_prefix_variants(path, var_name, base, seen, result):
             matched = True
     return matched
 
