@@ -1,9 +1,8 @@
-"""Tests for nephoscope-init optional profile prompt — Phase 2.
+"""Tests for nephoscope-init optional profile prompt.
 
 Covers:
-- _OPTIONAL_PROFILES ordering and stems
-- _prompt_for_profiles parser (all 7 input cases)
-- _seed_optional_profiles tolerates failures
+- _prompt_for_profiles: space-separated token parser (all cases)
+- _seed_optional_profiles: uses apply_profile, tolerates failures
 """
 
 from __future__ import annotations
@@ -11,74 +10,24 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 # Project root relative paths
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = PROJECT_ROOT / "src"
-FIXTURES_OPTIONAL = (
+FIXTURES_META = (
     SRC_ROOT
     / "nephoscope"
     / "learners"
     / "permission"
     / "config"
     / "fixtures"
-    / "optional"
+    / "meta-profiles"
 )
 
 
 # ---------------------------------------------------------------------------
-# Step 10 — _OPTIONAL_PROFILES ordering and stems
+# _prompt_for_profiles — space-separated token parser
 # ---------------------------------------------------------------------------
-
-
-class TestOptionalProfilesList:
-    """_OPTIONAL_PROFILES is a list[tuple[str,str]] with correct ordering and coverage."""
-
-    @pytest.fixture(autouse=True)
-    def _import(self):
-        from nephoscope.cli.init_cmd import _OPTIONAL_PROFILES, _FIXTURES_DIR
-
-        self._profiles = _OPTIONAL_PROFILES
-        self._fixtures_dir = _FIXTURES_DIR
-
-    def test_is_list_of_tuples(self):
-        assert isinstance(self._profiles, list)
-        for item in self._profiles:
-            assert isinstance(item, tuple) and len(item) == 2, (
-                f"Expected tuple[str,str], got {item!r}"
-            )
-
-    def test_has_five_entries(self):
-        assert len(self._profiles) == 5, (
-            f"Expected 5 profiles, got {len(self._profiles)}"
-        )
-
-    def test_ordering_matches_plan(self):
-        stems = [stem for stem, _ in self._profiles]
-        assert stems == [
-            "project-dev",
-            "dev-tools",
-            "python-dev",
-            "javascript",
-            "devops",
-        ], f"Order wrong: {stems}"
-
-    def test_each_stem_has_file(self):
-        for stem, _ in self._profiles:
-            path = self._fixtures_dir / "optional" / f"{stem}.yaml"
-            assert path.exists(), f"Missing file for stem {stem!r}: {path}"
-
-    def test_descriptions_non_empty(self):
-        for stem, desc in self._profiles:
-            assert desc and desc.strip(), f"Empty description for {stem!r}"
-
-
-# ---------------------------------------------------------------------------
-# Step 11 — _prompt_for_profiles parser
-# ---------------------------------------------------------------------------
-
-_ALL_STEMS = ["project-dev", "dev-tools", "python-dev", "javascript", "devops"]
 
 
 def _call_prompt(input_str: str) -> list[Path]:
@@ -90,53 +39,11 @@ def _call_prompt(input_str: str) -> list[Path]:
 
 
 class TestPromptForProfiles:
-    """_prompt_for_profiles input parser — all 7 cases."""
+    """_prompt_for_profiles input parser — all input cases."""
 
     def test_blank_returns_empty(self):
         result = _call_prompt("")
         assert result == [], f"Blank input should return [], got {result!r}"
-
-    def test_all_returns_all_five_paths(self):
-        result = _call_prompt("all")
-        stems = [p.stem for p in result]
-        assert sorted(stems) == sorted(_ALL_STEMS), (
-            f'"all" should return all stems, got {stems!r}'
-        )
-
-    def test_135_returns_three_paths(self):
-        # 1=project-dev, 3=python-dev, 5=devops
-        result = _call_prompt("135")
-        stems = [p.stem for p in result]
-        assert sorted(stems) == sorted(["project-dev", "python-dev", "devops"]), (
-            f'"135" should return project-dev, python-dev, devops — got {stems!r}'
-        )
-
-    def test_single_digit_four_returns_one_path(self):
-        # 4=javascript (was 3 before project-dev was inserted at position 1)
-        result = _call_prompt("4")
-        stems = [p.stem for p in result]
-        assert stems == ["javascript"], f'"4" should return [javascript], got {stems!r}'
-
-    def test_invalid_chars_returns_empty_with_warning(self, capsys):
-        result = _call_prompt("abc")
-        captured = capsys.readouterr()
-        assert result == [], f"Invalid chars should return [], got {result!r}"
-        assert captured.err, "Expected a warning on stderr for invalid chars"
-
-    def test_digit_out_of_range_returns_empty_with_warning(self, capsys):
-        result = _call_prompt("6")
-        captured = capsys.readouterr()
-        assert result == [], f"Out-of-range digit should return [], got {result!r}"
-        assert captured.err, "Expected a warning on stderr for out-of-range digit"
-
-    def test_mixed_valid_and_invalid_chars_returns_empty_with_warning(self, capsys):
-        # "1x2" has valid digits but also "x" — isdigit() rejects the whole string
-        # upfront, so the function returns [] without processing any digits.
-        # This documents the fail-whole-input contract for mixed inputs.
-        result = _call_prompt("1x2")
-        captured = capsys.readouterr()
-        assert result == [], f"Mixed-char input '1x2' should return [], got {result!r}"
-        assert captured.err, "Expected a warning on stderr for mixed valid+invalid input"
 
     def test_eoferror_returns_empty(self):
         from nephoscope.cli.init_cmd import _prompt_for_profiles
@@ -145,18 +52,103 @@ class TestPromptForProfiles:
             result = _prompt_for_profiles()
         assert result == [], f"EOFError should return [], got {result!r}"
 
-    def test_dedupe_in_input_order(self):
-        """Repeated digits are deduplicated; order preserved."""
-        result = _call_prompt("112")
-        stems = [p.stem for p in result]
-        # 1=project-dev, 2=dev-tools; 1 is repeated so only 2 unique entries
-        assert stems == ["project-dev", "dev-tools"], (
-            f'"112" should dedupe and preserve order, got {stems!r}'
+    def test_single_valid_token_returns_one_path(self):
+        result = _call_prompt("1")
+        assert len(result) == 1, (
+            f"Single valid token should return 1 path, got {result!r}"
         )
+        assert isinstance(result[0], Path)
+
+    def test_space_separated_tokens_returns_multiple_paths(self):
+        result = _call_prompt("1 2")
+        assert len(result) == 2, (
+            f"Two valid tokens should return 2 paths, got {result!r}"
+        )
+
+    def test_non_digit_token_warns_and_returns_empty(self, capsys):
+        # Non-digit tokens (e.g. "abc") are skipped with a warning on stderr.
+        result = _call_prompt("abc")
+        assert result == [], f"Non-digit token should return [], got {result!r}"
+        captured = capsys.readouterr()
+        assert captured.err, "Expected a warning on stderr for non-digit token 'abc'"
+        assert "abc" in captured.err
+
+    def test_out_of_range_digit_warns_and_returns_empty(self, capsys):
+        # A digit beyond the number of profiles emits a warning on stderr.
+        result = _call_prompt("999")
+        assert result == [], f"Out-of-range digit should return [], got {result!r}"
+        captured = capsys.readouterr()
+        assert captured.err, "Expected a warning on stderr for out-of-range digit '999'"
+        assert "999" in captured.err
+
+    def test_mixed_valid_and_invalid_tokens_returns_valid_only(self):
+        # "1 abc 2" — valid digits 1 and 2 return paths; "abc" is skipped.
+        result = _call_prompt("1 abc 2")
+        assert len(result) == 2, (
+            f"Mixed input '1 abc 2' should yield 2 paths, got {result!r}"
+        )
+
+    def test_paths_point_to_existing_yaml_files(self):
+        result = _call_prompt("1 2")
+        for p in result:
+            assert p.exists(), f"Returned path does not exist: {p}"
+            assert p.suffix == ".yaml", f"Returned path is not a YAML file: {p}"
+
+    def test_paths_are_in_meta_profiles_directory(self):
+        result = _call_prompt("1")
+        assert len(result) == 1
+        assert result[0].parent == FIXTURES_META, (
+            f"Expected path in meta-profiles dir, got {result[0].parent}"
+        )
+
+    def test_all_returns_all_paths(self):
+        from nephoscope.learners.permission.profiles import list_profiles
+
+        profiles = list_profiles()
+        result = _call_prompt("all")
+        assert len(result) == len(profiles), (
+            f"'all' should return all {len(profiles)} profiles, got {len(result)}"
+        )
+        assert result == [p.path for p in profiles]
+
+    def test_all_case_insensitive(self):
+        from nephoscope.learners.permission.profiles import list_profiles
+
+        profiles = list_profiles()
+        for variant in ("ALL", "All", "aLl"):
+            result = _call_prompt(variant)
+            assert len(result) == len(profiles), (
+                f"'{variant}' should return all profiles, got {len(result)}"
+            )
+
+    def test_duplicate_tokens_deduped(self):
+        result = _call_prompt("1 1")
+        assert len(result) == 1, (
+            f"Duplicate token '1 1' should return 1 path, not {len(result)}"
+        )
+
+    def test_unicode_digit_token_warns(self, capsys):
+        # U+00B2 SUPERSCRIPT TWO: isdigit()=True, isdecimal()=False
+        result = _call_prompt("²")
+        assert result == [], f"Unicode superscript digit should return [], got {result!r}"
+        captured = capsys.readouterr()
+        assert captured.err, "Expected a warning on stderr for unicode superscript digit"
+        assert "²" in captured.err
+
+    def test_compact_format_no_longer_supported(self, capsys):
+        # "135" is a single token with value 135, which exceeds len(profiles).
+        # It is treated as one out-of-range number, not three separate selections.
+        result = _call_prompt("135")
+        assert result == [], (
+            f"'135' should return [] (out-of-range warning), got {result!r}"
+        )
+        captured = capsys.readouterr()
+        assert captured.err, "Expected out-of-range warning for token '135'"
+        assert "135" in captured.err
 
 
 # ---------------------------------------------------------------------------
-# Step 13 — _seed_optional_profiles tolerates failures
+# _seed_optional_profiles — uses apply_profile, tolerates failures
 # ---------------------------------------------------------------------------
 
 
@@ -166,7 +158,7 @@ class TestSeedOptionalProfiles:
     def test_valid_path_seeds_entries(self, tmp_db):
         from nephoscope.cli.init_cmd import _seed_optional_profiles
 
-        dev_tools_path = FIXTURES_OPTIONAL / "dev-tools.yaml"
+        dev_tools_path = FIXTURES_META / "dev-tools.yaml"
         _seed_optional_profiles(tmp_db, [dev_tools_path])
         tmp_db.commit()
 
@@ -179,7 +171,8 @@ class TestSeedOptionalProfiles:
         from nephoscope.cli.init_cmd import _seed_optional_profiles
 
         bad = tmp_path / "bad.yaml"
-        bad.write_text("- verb: broken_entry\n  flags: []\n")  # missing decision
+        # Missing _meta — apply_profile will raise ValueError, which is caught.
+        bad.write_text("permissions:\n  - verb: broken_entry\n    flags: []\n")
 
         # Should not raise
         _seed_optional_profiles(tmp_db, [bad])
@@ -191,14 +184,14 @@ class TestSeedOptionalProfiles:
         from nephoscope.cli.init_cmd import _seed_optional_profiles
 
         bad = tmp_path / "bad.yaml"
-        bad.write_text("- verb: broken_entry\n  flags: []\n")  # missing decision
-        dev_tools_path = FIXTURES_OPTIONAL / "dev-tools.yaml"
+        bad.write_text("permissions:\n  - verb: broken_entry\n    flags: []\n")
+        dev_tools_path = FIXTURES_META / "dev-tools.yaml"
 
         _seed_optional_profiles(tmp_db, [dev_tools_path, bad])
         tmp_db.commit()
 
         captured = capsys.readouterr()
-        assert captured.err, "Expected warning for malformed yaml"
+        assert captured.err, "Expected warning on stderr for malformed yaml"
 
         # Valid entries from dev-tools should still be present
         rows = tmp_db.execute(
@@ -207,3 +200,11 @@ class TestSeedOptionalProfiles:
         assert rows[0] >= 1, (
             "curl entry should still land when malformed yaml is mixed in"
         )
+
+    def test_empty_paths_is_noop(self, tmp_db):
+        from nephoscope.cli.init_cmd import _seed_optional_profiles
+
+        before = tmp_db.execute("SELECT COUNT(*) FROM rule_shapes;").fetchone()[0]
+        _seed_optional_profiles(tmp_db, [])
+        after = tmp_db.execute("SELECT COUNT(*) FROM rule_shapes;").fetchone()[0]
+        assert before == after, "Empty paths should not insert any rows"

@@ -67,16 +67,6 @@ _AUTO_LOAD_VERB_PROFILES: list[str] = [
     "shell-scripting.yaml",
 ]
 
-# Optional permission fixture profiles presented to the user during first-run.
-# Order is 1-indexed menu order — do not reorder without updating tests.
-_OPTIONAL_PROFILES: list[tuple[str, str]] = [
-    ("project-dev", "Full file + script access within trusted project directories"),
-    ("dev-tools", "Developer utilities (curl, make, openssl, …)"),
-    ("python-dev", "Python tooling (uv, ruff, pytest, …)"),
-    ("javascript", "JavaScript/TypeScript tooling (node, npm, vitest, …)"),
-    ("devops", "DevOps tools (kubectl, docker, terraform, ansible)"),
-]
-
 
 def _resolve_target(cli_path: str | None) -> Path:
     """Return the DB path honouring the CLI override first, then env/defaults."""
@@ -202,84 +192,64 @@ def _prompt_for_paths() -> list[str]:
 
 
 def _prompt_for_profiles() -> list[Path]:
-    """Print a numbered menu of optional profiles and return the selected paths.
+    """Return selected optional profile paths from an interactive numbered menu.
 
-    Reads a single line from stdin. Supported inputs:
-    - blank / empty → return []
-    - "all" → return all four profile paths in menu order
-    - digit string (e.g. "124") → return paths for each valid digit, deduplicated
-      in input order, one-indexed into _OPTIONAL_PROFILES
-    - invalid characters or out-of-range digits → print warning to stderr, return []
-    - EOFError → return []
-
-    No retry is performed — the function returns immediately after one input().
+    Prints a numbered list of available profiles and prompts the user for
+    space-separated numbers. Returns an empty list when no profiles are
+    available or the user skips (blank input / EOF). Emits a warning to stderr
+    for each token that is not a valid number or is out of range.
     """
-    print("\nOptional permission profiles — select which to pre-approve:")
-    for i, (stem, desc) in enumerate(_OPTIONAL_PROFILES, start=1):
-        print(f"  {i}. {desc}")
-    print(
-        "\nEnter profile numbers (e.g. '12' or '124'), 'all', or press Enter to skip."
-    )
+    from nephoscope.learners.permission.profiles import list_profiles
 
+    profiles = list_profiles()
+    if not profiles:
+        return []
+    print("\nOptional permission profiles — select which to pre-approve:")
+    for i, entry in enumerate(profiles, start=1):
+        print(f"  {i}) {entry.id:<20} {entry.description}")
+    print()
     try:
-        raw = input("Selection: ").strip()
+        raw = input("Enter numbers separated by spaces (or Enter to skip): ").strip()
     except EOFError:
         return []
-
     if not raw:
         return []
-
-    if raw.lower() == "all":
-        return [
-            _FIXTURES_DIR / "optional" / f"{stem}.yaml"
-            for stem, _ in _OPTIONAL_PROFILES
-        ]
-
-    # Validate: must be a non-empty string of digits only
-    if not raw.isdigit():
-        print(
-            f"nephoscope-init: warning — invalid profile selection {raw!r}, skipping",
-            file=sys.stderr,
-        )
-        return []
-
-    n = len(_OPTIONAL_PROFILES)
-    seen: set[str] = set()
+    if raw.lower() == 'all':
+        return [p.path for p in profiles]
     selected: list[Path] = []
-    for ch in raw:
-        idx = int(ch) - 1  # convert 1-indexed to 0-indexed
-        if idx < 0 or idx >= n:
+    seen: set[Path] = set()
+    for token in raw.split():
+        if not token.isdecimal():
             print(
-                f"nephoscope-init: warning — profile digit {ch!r} out of range (1-{n}), skipping",
+                f"warning: '{token}' is not a number — enter numbers from 1 to {len(profiles)}",
                 file=sys.stderr,
             )
-            return []
-        stem = _OPTIONAL_PROFILES[idx][0]
-        if stem not in seen:
-            seen.add(stem)
-            selected.append(_FIXTURES_DIR / "optional" / f"{stem}.yaml")
-
+            continue
+        idx = int(token) - 1
+        if not (0 <= idx < len(profiles)):
+            print(
+                f"warning: {token} is out of range — enter numbers from 1 to {len(profiles)}",
+                file=sys.stderr,
+            )
+            continue
+        if profiles[idx].path not in seen:
+            seen.add(profiles[idx].path)
+            selected.append(profiles[idx].path)
     return selected
 
 
 def _seed_optional_profiles(
-    conn: sqlite3.Connection, selected_paths: list[Path]
+    conn: sqlite3.Connection,
+    paths: list[Path],
 ) -> None:
-    """Apply each selected optional profile fixture to the DB.
+    """Apply each selected optional profile to the DB."""
+    from nephoscope.learners.permission.profiles import apply_profile
 
-    Mirrors the _AUTO_LOAD_FIXTURES loop: apply_fixtures in try/except,
-    print warning to stderr on failure, never raise.
-    """
-    from nephoscope.learners.permission.seed import apply_fixtures
-
-    for path in selected_paths:
+    for path in paths:
         try:
-            apply_fixtures(conn, path)
+            apply_profile(conn, path)
         except Exception as exc:  # noqa: BLE001 — optional profile load must not abort init
-            print(
-                f"nephoscope-init: warning — optional profile load failed ({path.name}): {exc}",
-                file=sys.stderr,
-            )
+            print(f"  warning: could not load {path.name}: {exc}", file=sys.stderr)
 
 
 def _seed_global_mirror_singleton(conn: sqlite3.Connection) -> None:

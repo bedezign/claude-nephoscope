@@ -75,7 +75,7 @@ def _read_global_hash(conn: sqlite3.Connection) -> str | None:
 
 @contextmanager
 def _mock_connect(conn: sqlite3.Connection):
-    """Patch _connect() to return a non-closing wrapper around conn."""
+    """Patch connect() to return a non-closing wrapper around conn."""
 
     class _NonClose:
         def __init__(self, c: sqlite3.Connection) -> None:
@@ -88,7 +88,7 @@ def _mock_connect(conn: sqlite3.Connection):
             return getattr(self._c, name)
 
     with mock.patch(
-        "nephoscope.learners.permission.learner._connect",
+        "nephoscope.learners.permission.learner.connect",
         side_effect=lambda: _NonClose(conn),
     ):
         yield

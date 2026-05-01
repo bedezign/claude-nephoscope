@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -71,7 +72,7 @@ def load_thresholds() -> Thresholds:
 # ---------------------------------------------------------------------------
 
 
-def _lib_db():
+def lib_db():
     """Return the lib.db module.
 
     Kept behind a function so tests can reload lib.db under a patched
@@ -85,7 +86,7 @@ def _lib_db():
 
 def _now() -> str:
     """UTC timestamp — thin wrapper over lib.db._now()."""
-    return _lib_db()._now()
+    return lib_db()._now()
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,7 @@ def scan_candidates(conn: sqlite3.Connection) -> int:
 
     Returns the number of tool_calls rows processed this scan.
     """
-    db = _lib_db()
+    db = lib_db()
     cursor = _get_cursor(conn)
 
     rows = conn.execute(
@@ -203,6 +204,40 @@ class Candidate:
     observations: int
     distinct_sessions: int
     positional_paths: tuple[str, ...] = ()
+    suggested_path_spec: str | None = None
+
+
+def generalize_path_spec(
+    positional_paths: tuple[str, ...],
+    known_roots: frozenset[str],
+    home: str,
+) -> str | None:
+    """Suggest a generalized path spec from cross-project path evidence.
+
+    Returns '$PROJECT_ROOT/**' if ≥90% of stored paths fall under any single
+    known project root, '$HOME/**' if ≥90% fall under home, or None otherwise.
+    Requires at least 3 paths to produce a suggestion.
+    """
+    if len(positional_paths) < 3:
+        return None
+
+    total = len(positional_paths)
+
+    for root in known_roots:
+        root_path = Path(root)
+        count = sum(1 for p in positional_paths if Path(p).is_relative_to(root_path))
+        if count / total >= 0.9:
+            return "$PROJECT_ROOT/**"
+
+    if home:
+        home_path = Path(home)
+        home_count = sum(
+            1 for p in positional_paths if Path(p).is_relative_to(home_path)
+        )
+        if home_count / total >= 0.9:
+            return "$HOME/**"
+
+    return None
 
 
 def _candidate_leaf(
@@ -259,6 +294,14 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
         (thresholds.min_observations, thresholds.min_distinct_sessions),
     ).fetchall()
 
+    known_roots: frozenset[str] = frozenset(
+        r[0]
+        for r in conn.execute(
+            "SELECT root FROM projects WHERE root IS NOT NULL;"
+        ).fetchall()
+    )
+    home = os.environ.get("HOME", "")
+
     out: list[Candidate] = []
     for cand_id, verb, subcommand, flags_json, obs, sess, raw_paths in rows:
         leaf = _candidate_leaf(verb, subcommand, flags_json)
@@ -275,6 +318,7 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
             paths: tuple[str, ...] = tuple(decoded) if isinstance(decoded, list) else ()
         except (json.JSONDecodeError, TypeError):
             paths = ()
+        suggested = generalize_path_spec(paths, known_roots, home)
         out.append(
             Candidate(
                 id=int(cand_id),
@@ -284,6 +328,7 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
                 observations=int(obs),
                 distinct_sessions=int(sess),
                 positional_paths=paths,
+                suggested_path_spec=suggested,
             )
         )
     return out
@@ -294,9 +339,9 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
 # ---------------------------------------------------------------------------
 
 
-def _connect() -> sqlite3.Connection:
+def connect() -> sqlite3.Connection:
     """Open the observations DB — greenfield schema, no migration system."""
-    db = _lib_db()
+    db = lib_db()
     return db._open()
 
 
@@ -355,14 +400,14 @@ def _describe_rule(
     return f"{verb}{sub_part}{flags_part}{path_part}"
 
 
-def _parse_flags_arg(raw: str | None) -> str:
+def parse_flags_arg(raw: str | None) -> str:
     """Parse a --flags CLI argument into the stored flags-json form.
 
     The argument is a JSON array literal (e.g. '["-a","-l"]' or '[]'),
     or the wildcard sentinel ``"*"``.
     Missing/None is treated as [] (bare verb with no flags).
     """
-    db = _lib_db()
+    db = lib_db()
     if raw is None or raw == "":
         return db.minify_json([])
     if raw == "*":
@@ -379,7 +424,7 @@ def _parse_flags_arg(raw: str | None) -> str:
     return db.minify_json(sorted(str(x) for x in parsed))
 
 
-def _resolve_tier_ids(
+def resolve_tier_ids(
     tier: str,
     session_id_arg: int | None,
     project_id_arg: int | None,
@@ -419,7 +464,7 @@ def _format_paths_preview(paths: Sequence[str], limit: int = 3) -> str:
 
 def _cmd_scan(_args: argparse.Namespace) -> int:
     try:
-        conn = _connect()
+        conn = connect()
     except Exception as exc:  # noqa: BLE001
         print(f"scan: cannot open database: {exc}", file=sys.stderr)
         return 1
@@ -454,7 +499,7 @@ def _cmd_scan(_args: argparse.Namespace) -> int:
 
 def _cmd_candidates(_args: argparse.Namespace) -> int:
     try:
-        conn = _connect()
+        conn = connect()
     except Exception as exc:  # noqa: BLE001
         print(f"candidates: cannot open database: {exc}", file=sys.stderr)
         return 1
@@ -507,13 +552,13 @@ def _cmd_propose(_args: argparse.Namespace) -> int:
     One line per candidate: ``verb|subcommand-or-empty|flags-json|obs|sessions``.
     ``|`` separator avoids bash IFS issues with empty subcommand fields.
     """
-    conn = _connect()
+    conn = connect()
     try:
         proposals = propose_promotions(conn)
     finally:
         conn.close()
 
-    db = _lib_db()
+    db = lib_db()
     for c in proposals:
         sub = c.subcommand or ""
         flags_json = db.minify_json(sorted(c.flags))
@@ -525,14 +570,14 @@ def _cmd_write_permission(args: argparse.Namespace, decision: str) -> int:
     """Upsert a rule_shape and insert a permission row for the given decision."""
     from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_affected
 
-    flags_json = _parse_flags_arg(args.flags)
+    flags_json = parse_flags_arg(args.flags)
     path_spec: str | None = args.path_spec
-    conn = _connect()
+    conn = connect()
     try:
-        session_id, project_id = _resolve_tier_ids(
+        session_id, project_id = resolve_tier_ids(
             args.tier, args.session_id, args.project_id
         )
-        db = _lib_db()
+        db = lib_db()
         now = _now()
         shape_id = db.upsert_rule_shape(
             conn, args.verb, args.subcommand, flags_json, path_spec, now
@@ -594,11 +639,11 @@ def _cmd_unpermit(args: argparse.Namespace) -> int:
         sync_project,
     )
 
-    flags_json = _parse_flags_arg(args.flags)
+    flags_json = parse_flags_arg(args.flags)
     path_spec: str | None = args.path_spec
-    conn = _connect()
+    conn = connect()
     try:
-        session_id, project_id = _resolve_tier_ids(
+        session_id, project_id = resolve_tier_ids(
             args.tier, args.session_id, args.project_id
         )
         row = conn.execute(
@@ -672,7 +717,7 @@ def _cmd_unpermit_by_id(args: argparse.Namespace) -> int:
         sync_project,
     )
 
-    conn = _connect()
+    conn = connect()
     try:
         # Look up the row to determine scope before deleting.
         row = conn.execute(
@@ -732,7 +777,7 @@ def _cmd_pattern_variants(args: argparse.Namespace) -> int:
     """
     from .canonicalize import CanonicalLeaf, to_pattern_form  # noqa: PLC0415
 
-    flags_json = _parse_flags_arg(args.flags)
+    flags_json = parse_flags_arg(args.flags)
     if flags_json == "*":
         flags_list: list[str] = []
     else:
@@ -793,7 +838,7 @@ def _cmd_context_ids(args: argparse.Namespace) -> int:
     Prints empty-valued lines when the cwd is not found in the DB.
     """
     cwd = args.cwd or ""
-    conn = _connect()
+    conn = connect()
     try:
         p_row = conn.execute(
             "SELECT id FROM projects WHERE cwd = ?;", (cwd,)
@@ -824,9 +869,9 @@ def _cmd_count_concrete_siblings(args: argparse.Namespace) -> int:
     review.sh to decide whether to offer a subsume prompt after promoting a
     flags=``"*"`` rule.
     """
-    conn = _connect()
+    conn = connect()
     try:
-        session_id, project_id = _resolve_tier_ids(
+        session_id, project_id = resolve_tier_ids(
             args.tier, args.session_id, args.project_id
         )
         row = conn.execute(
@@ -866,9 +911,9 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
         sync_project,
     )
 
-    conn = _connect()
+    conn = connect()
     try:
-        session_id, project_id = _resolve_tier_ids(
+        session_id, project_id = resolve_tier_ids(
             args.tier, args.session_id, args.project_id
         )
         cur = conn.execute(
@@ -916,7 +961,7 @@ def _cmd_subsume_siblings(args: argparse.Namespace) -> int:
 def _cmd_permissions(_args: argparse.Namespace) -> int:
     """Dump all permission rows via the v_permissions view."""
     try:
-        conn = _connect()
+        conn = connect()
     except Exception as exc:  # noqa: BLE001
         print(f"permissions: cannot open database: {exc}", file=sys.stderr)
         return 1

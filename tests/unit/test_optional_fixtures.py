@@ -1,6 +1,6 @@
-"""Tests for optional permission fixture profiles.
+"""Tests for optional permission fixture profiles (meta-profile format).
 
-Loads each YAML via apply_fixtures against a fresh tmp_db and asserts
+Loads each YAML via apply_profile against a fresh tmp_db and asserts
 expected verb/subcommand/flags/decision triples are present in the DB.
 Also covers doom-paths: empty file, missing decision, malformed flags.
 """
@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-FIXTURES_OPTIONAL_DIR = Path(__file__).resolve().parents[2] / (
-    "src/nephoscope/learners/permission/config/fixtures/optional"
+FIXTURES_META_DIR = Path(__file__).resolve().parents[2] / (
+    "src/nephoscope/learners/permission/config/fixtures/meta-profiles"
 )
-DEV_TOOLS_PATH = FIXTURES_OPTIONAL_DIR / "dev-tools.yaml"
-PYTHON_DEV_PATH = FIXTURES_OPTIONAL_DIR / "python-dev.yaml"
-JAVASCRIPT_PATH = FIXTURES_OPTIONAL_DIR / "javascript.yaml"
-DEVOPS_PATH = FIXTURES_OPTIONAL_DIR / "devops.yaml"
-PROJECT_DEV_PATH = FIXTURES_OPTIONAL_DIR / "project-dev.yaml"
+DEV_TOOLS_PATH = FIXTURES_META_DIR / "dev-tools.yaml"
+PYTHON_DEV_PATH = FIXTURES_META_DIR / "python-dev.yaml"
+JAVASCRIPT_PATH = FIXTURES_META_DIR / "javascript.yaml"
+DEVOPS_PATH = FIXTURES_META_DIR / "devops.yaml"
+PROJECT_DEV_PATH = FIXTURES_META_DIR / "project-dev.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -61,18 +61,18 @@ def _has_entry(
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 Step 3 — dev-tools.yaml
+# dev-tools.yaml
 # ---------------------------------------------------------------------------
 
 
 class TestDevToolsFixture:
-    """apply_fixtures on optional/dev-tools.yaml lands expected entries."""
+    """apply_profile on meta-profiles/dev-tools.yaml lands expected entries."""
 
     @pytest.fixture(autouse=True)
     def _load(self, tmp_db):
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.profiles import apply_profile
 
-        apply_fixtures(tmp_db, DEV_TOOLS_PATH)
+        apply_profile(tmp_db, DEV_TOOLS_PATH)
         tmp_db.commit()
         self._rows = _approved_rows(tmp_db)
 
@@ -129,47 +129,52 @@ class TestDevToolsFixture:
 class TestDevToolsFixtureDoomPaths:
     """Doom-path coverage: malformed inputs must raise ValueError."""
 
-    def test_empty_file_is_harmless(self, tmp_db, tmp_path):
-        from nephoscope.learners.permission.seed import apply_fixtures
+    def test_empty_file_raises(self, tmp_db, tmp_path):
+        """A meta-profile with no permissions section is valid but empty."""
+        from nephoscope.learners.permission.profiles import apply_profile
 
         empty = tmp_path / "empty.yaml"
-        empty.write_text("")
-        shapes, perms = apply_fixtures(tmp_db, empty)
-        assert shapes == 0
-        assert perms == 0
+        empty.write_text("_meta:\n  id: test-empty\n  description: empty\n")
+        perms_count, verb_types_count = apply_profile(tmp_db, empty)
+        assert perms_count == 0
+        assert verb_types_count == 0
 
     def test_missing_decision_raises(self, tmp_db, tmp_path):
-        from nephoscope.learners.permission.seed import apply_fixtures
-
-        bad = tmp_path / "bad.yaml"
-        bad.write_text("- verb: curl\n  flags: []\n")  # decision missing
-        with pytest.raises(ValueError, match="missing"):
-            apply_fixtures(tmp_db, bad)
-
-    def test_malformed_flags_raises(self, tmp_db, tmp_path):
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.profiles import apply_profile
 
         bad = tmp_path / "bad.yaml"
         bad.write_text(
-            "- verb: curl\n  flags: 123\n  decision: approved\n"
+            "_meta:\n  id: bad\n  description: bad\npermissions:\n"
+            "  - verb: curl\n    flags: []\n"
+        )  # decision missing
+        with pytest.raises(ValueError, match="missing"):
+            apply_profile(tmp_db, bad)
+
+    def test_malformed_flags_raises(self, tmp_db, tmp_path):
+        from nephoscope.learners.permission.profiles import apply_profile
+
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(
+            "_meta:\n  id: bad\n  description: bad\npermissions:\n"
+            "  - verb: curl\n    flags: 123\n    decision: approved\n"
         )  # flags is an int, not list or "*"
         with pytest.raises((ValueError, TypeError)):
-            apply_fixtures(tmp_db, bad)
+            apply_profile(tmp_db, bad)
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 Step 5 — python-dev, javascript, devops
+# python-dev.yaml, javascript.yaml, devops.yaml
 # ---------------------------------------------------------------------------
 
 
 class TestPythonDevFixture:
-    """apply_fixtures on optional/python-dev.yaml lands expected entries."""
+    """apply_profile on meta-profiles/python-dev.yaml lands expected entries."""
 
     @pytest.fixture(autouse=True)
     def _load(self, tmp_db):
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.profiles import apply_profile
 
-        apply_fixtures(tmp_db, PYTHON_DEV_PATH)
+        apply_profile(tmp_db, PYTHON_DEV_PATH)
         tmp_db.commit()
         self._rows = _approved_rows(tmp_db)
 
@@ -207,13 +212,13 @@ class TestPythonDevFixture:
 
 
 class TestJavaScriptFixture:
-    """apply_fixtures on optional/javascript.yaml lands expected entries."""
+    """apply_profile on meta-profiles/javascript.yaml lands expected entries."""
 
     @pytest.fixture(autouse=True)
     def _load(self, tmp_db):
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.profiles import apply_profile
 
-        apply_fixtures(tmp_db, JAVASCRIPT_PATH)
+        apply_profile(tmp_db, JAVASCRIPT_PATH)
         tmp_db.commit()
         self._rows = _approved_rows(tmp_db)
 
@@ -257,7 +262,7 @@ class TestJavaScriptFixture:
 
 
 class TestDevOpsFixture:
-    """apply_fixtures on optional/devops.yaml lands expected entries.
+    """apply_profile on meta-profiles/devops.yaml lands expected entries.
 
     Explicitly asserts ansible entries use flags, not subcommand, because
     --list and --list-hosts are flags on a top-level invocation — not
@@ -266,9 +271,9 @@ class TestDevOpsFixture:
 
     @pytest.fixture(autouse=True)
     def _load(self, tmp_db):
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.profiles import apply_profile
 
-        apply_fixtures(tmp_db, DEVOPS_PATH)
+        apply_profile(tmp_db, DEVOPS_PATH)
         tmp_db.commit()
         self._rows = _approved_rows(tmp_db)
 
@@ -349,13 +354,13 @@ class TestDevOpsFixture:
 
 
 class TestProjectDevFixture:
-    """apply_fixtures on optional/project-dev.yaml lands expected entries."""
+    """apply_profile on meta-profiles/project-dev.yaml lands expected entries."""
 
     @pytest.fixture(autouse=True)
     def _load(self, tmp_db):
-        from nephoscope.learners.permission.seed import apply_fixtures
+        from nephoscope.learners.permission.profiles import apply_profile
 
-        apply_fixtures(tmp_db, PROJECT_DEV_PATH)
+        apply_profile(tmp_db, PROJECT_DEV_PATH)
         tmp_db.commit()
         self._rows = _approved_rows(tmp_db)
 

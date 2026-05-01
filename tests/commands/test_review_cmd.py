@@ -20,7 +20,7 @@ from unittest import mock
 
 import pytest
 
-from nephoscope.cli.review_cmd import main, _read_line
+from nephoscope.cli.review_cmd import main, _read_line, _build_path_opts
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +283,32 @@ def test_main_quit_at_tier_exits_loop(conn, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "quitting" in out.lower() or "quit" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# _build_path_opts — suggested kwarg
+# ---------------------------------------------------------------------------
+
+
+def test_build_path_opts_suggested_appears_at_position_zero():
+    """Suggested path spec is inserted at position 0."""
+    opts = _build_path_opts([], "/root", "/cwd", "/home", suggested="$PROJECT_ROOT/**")
+    assert opts[0] == "$PROJECT_ROOT/**"
+
+
+def test_build_path_opts_suggested_deduplicates_with_fallback():
+    """When suggested matches a fallback entry, it is not duplicated."""
+    opts = _build_path_opts([], "/root", "/cwd", "/home", suggested="$PROJECT_ROOT/**")
+    assert opts.count("$PROJECT_ROOT/**") == 1
+
+
+def test_build_path_opts_none_suggested_unchanged():
+    """No suggested → same output as before (fallbacks only)."""
+    opts = _build_path_opts([], "/root", "/cwd", "/home", suggested=None)
+    assert opts == ["$PROJECT_ROOT/**", "$CWD/**", "$HOME/**"]
+
+
+def test_build_path_opts_suggested_home_deduplicates_fallback():
+    """$HOME/** as suggested still produces only one entry."""
+    opts = _build_path_opts([], "", "", "/home", suggested="$HOME/**")
+    assert opts == ["$HOME/**"]

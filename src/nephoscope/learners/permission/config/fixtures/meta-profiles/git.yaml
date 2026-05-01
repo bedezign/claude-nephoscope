@@ -1,0 +1,21 @@
+_meta:
+  id: git
+  order: 3
+  description: Git version control — approve common read-only commands
+permissions:
+  - verb: git
+    subcommand: status
+    flags: []
+    decision: approved
+  - verb: git
+    subcommand: log
+    flags: []
+    decision: approved
+  - verb: git
+    subcommand: diff
+    flags: []
+    decision: approved
+  - verb: git
+    subcommand: show
+    flags: []
+    decision: approved

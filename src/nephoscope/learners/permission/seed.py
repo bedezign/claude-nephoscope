@@ -153,6 +153,59 @@ def _sync_global_mirror(conn: sqlite3.Connection) -> None:
         pass  # global_mirror singleton not configured — skip sync
 
 
+def _apply_permission_list(
+    conn: sqlite3.Connection,
+    entries: list[Any],
+    now: str,
+) -> int:
+    """Apply a list of raw permission dicts to the DB.
+
+    Inner loop extracted from ``apply_fixtures`` so ``profiles.py`` can call it
+    without going through a file path. Does NOT call ``_sync_global_mirror`` —
+    the caller decides.
+
+    Validates all entries first, then writes — so a bad entry never leaves the
+    DB in a half-applied state.
+
+    Each entry produces exactly one rule_shape upsert and one permission insert,
+    so only a single count is returned.
+
+    Returns: number of entries applied.
+    Raises: ValueError on invalid schema.
+    """
+    validated: list[
+        tuple[str, str, str, str | None, str | None, str, str | None, str | None]
+    ] = []
+    for idx, entry in enumerate(entries):
+        validated.append(_validate_entry(idx, entry))
+
+    for idx, (
+        verb,
+        decision,
+        flags_raw,
+        subcommand,
+        path_spec,
+        tier,
+        reason,
+        context,
+    ) in enumerate(validated):
+        _apply_entry(
+            conn,
+            idx,
+            verb,
+            decision,
+            flags_raw,
+            subcommand,
+            path_spec,
+            tier,
+            reason,
+            now,
+            context=context or "any",
+        )
+
+    return len(validated)
+
+
 def apply_fixtures(
     conn: sqlite3.Connection,
     fixture_path: str | Path,
@@ -183,34 +236,12 @@ def apply_fixtures(
     if not isinstance(entries, list):
         raise ValueError(f"fixture must be a YAML list, got {type(entries).__name__}")
 
-    now = _now()
-    shapes_created = 0
-    perms_created = 0
-
-    for idx, entry in enumerate(entries):
-        verb, decision, flags_raw, subcommand, path_spec, tier, reason, context = (
-            _validate_entry(idx, entry)
-        )
-        _apply_entry(
-            conn,
-            idx,
-            verb,
-            decision,
-            flags_raw,
-            subcommand,
-            path_spec,
-            tier,
-            reason,
-            now,
-            context=context,
-        )
-        shapes_created += 1
-        perms_created += 1
+    entries_count = _apply_permission_list(conn, entries, _now())
 
     if entries:
         _sync_global_mirror(conn)
 
-    return shapes_created, perms_created
+    return entries_count, entries_count
 
 
 def _build_entry(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -266,27 +297,19 @@ def export_permissions(
     return yaml_str
 
 
-def apply_verb_types(
+def _apply_verb_type_list(
     conn: sqlite3.Connection,
-    fixture_path: str | Path,
+    entries: list[Any],
 ) -> int:
-    """Load verb category entries from a YAML profile file and insert into verb_categories.
+    """Apply a list of raw verb-type dicts to the DB.
 
-    Each entry must have: verb (str), category (str). second_word (str) is optional.
-    Existing rows are left unchanged (INSERT OR IGNORE). Returns the number of rows
-    in the fixture (not the number actually inserted — duplicates are silently skipped).
+    Inner loop extracted from ``apply_verb_types`` so ``profiles.py`` can call it
+    without going through a file path. Validates all entries before touching the DB
+    to prevent partial writes on error.
 
-    Does NOT commit — the caller is responsible, matching apply_fixtures convention.
-
-    Raises ValueError on invalid entry shape or unknown category.
+    Returns: len(entries).
+    Raises: ValueError on invalid entry shape or unknown category.
     """
-    path = Path(fixture_path)
-    entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
-    if not isinstance(entries, list):
-        raise ValueError(
-            f"verb_types fixture must be a YAML list, got {type(entries).__name__}"
-        )
-    # Validate all entries before touching the DB to prevent partial writes on error.
     validated: list[tuple[str, str, str | None]] = []
     for idx, entry in enumerate(entries):
         if not isinstance(entry, dict):
@@ -307,3 +330,26 @@ def apply_verb_types(
             (verb, category, second_word),
         )
     return len(entries)
+
+
+def apply_verb_types(
+    conn: sqlite3.Connection,
+    fixture_path: str | Path,
+) -> int:
+    """Load verb category entries from a YAML profile file and insert into verb_categories.
+
+    Each entry must have: verb (str), category (str). second_word (str) is optional.
+    Existing rows are left unchanged (INSERT OR IGNORE). Returns the number of rows
+    in the fixture (not the number actually inserted — duplicates are silently skipped).
+
+    Does NOT commit — the caller is responsible, matching apply_fixtures convention.
+
+    Raises ValueError on invalid entry shape or unknown category.
+    """
+    path = Path(fixture_path)
+    entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    if not isinstance(entries, list):
+        raise ValueError(
+            f"verb_types fixture must be a YAML list, got {type(entries).__name__}"
+        )
+    return _apply_verb_type_list(conn, entries)

@@ -16,7 +16,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv}"
 if [ ! -d "$VENV_DIR" ]; then
   echo "Creating venv at $VENV_DIR..."
-  uv venv "$VENV_DIR"
+  uv venv --seed "$VENV_DIR"
 fi
 
 source "$VENV_DIR/bin/activate"

@@ -32,10 +32,10 @@ import sys
 
 from nephoscope.learners.permission.learner import (
     Candidate,
-    _connect,
-    _lib_db,
-    _parse_flags_arg,
-    _resolve_tier_ids,
+    connect,
+    lib_db,
+    parse_flags_arg,
+    resolve_tier_ids,
     propose_promotions,
     scan_candidates,
 )
@@ -87,7 +87,7 @@ def _resolve_context() -> tuple[str, str, str, int | None, int | None]:
     project_id: int | None = None
     session_id: int | None = None
     try:
-        conn = _connect()
+        conn = connect()
         try:
             p_row = conn.execute(
                 "SELECT id FROM projects WHERE cwd = ?;", (cwd,)
@@ -132,7 +132,7 @@ def _pattern_variants(
         to_pattern_form,
     )
 
-    flags_json = _lib_db().minify_json(sorted(candidate.flags))
+    flags_json = lib_db().minify_json(sorted(candidate.flags))
     flags_list = list(candidate.flags)
 
     leaf = CanonicalLeaf(
@@ -188,11 +188,11 @@ def _do_promote(
     """Insert the permission and sync the mirror; raises MirrorHashMismatch on conflict."""
     from nephoscope.lib.mirror.writer import sync_affected
 
-    flags_parsed = _parse_flags_arg(flags_json)
-    conn = _connect()
+    flags_parsed = parse_flags_arg(flags_json)
+    conn = connect()
     try:
-        sess_id, proj_id = _resolve_tier_ids(tier, session_id, project_id)
-        db = _lib_db()
+        sess_id, proj_id = resolve_tier_ids(tier, session_id, project_id)
+        db = lib_db()
         now = db._now()
         shape_id = db.upsert_rule_shape(
             conn, verb, subcommand, flags_parsed, path_spec, now
@@ -214,9 +214,9 @@ def _count_concrete_siblings(
     project_id: int | None,
 ) -> int:
     """Count concrete (non-wildcard) sibling permissions at the given tier."""
-    conn = _connect()
+    conn = connect()
     try:
-        sess_id, proj_id = _resolve_tier_ids(tier, session_id, project_id)
+        sess_id, proj_id = resolve_tier_ids(tier, session_id, project_id)
         row = conn.execute(
             """
             SELECT COUNT(*)
@@ -245,9 +245,9 @@ def _subsume_siblings(
     """Delete concrete sibling permissions, syncing the mirror. Returns count deleted."""
     from nephoscope.lib.mirror.writer import sync_global, sync_project
 
-    conn = _connect()
+    conn = connect()
     try:
-        sess_id, proj_id = _resolve_tier_ids(tier, session_id, project_id)
+        sess_id, proj_id = resolve_tier_ids(tier, session_id, project_id)
         cur = conn.execute(
             """
             DELETE FROM permissions
@@ -283,8 +283,15 @@ def _build_path_opts(
     project_root: str,
     cwd: str,
     home: str,
+    *,
+    suggested: str | None = None,
 ) -> list[str]:
-    """Build the ordered, deduplicated path option menu for Axis 2."""
+    """Build the ordered, deduplicated path option menu for Axis 2.
+
+    When ``suggested`` is set (a cross-project generalization from
+    ``generalize_path_spec``), it is inserted at position 0 so the reviewer
+    sees it first.
+    """
     seen_ps: set[str] = set()
     path_opts: list[str] = []
 
@@ -293,6 +300,8 @@ def _build_path_opts(
             seen_ps.add(opt)
             path_opts.append(opt)
 
+    if suggested:
+        _add_ps(suggested)
     for ps in path_specs:
         if ps:
             _add_ps(ps)
@@ -422,7 +431,7 @@ def _review_candidate(
     Returns 'promoted' | 'skipped' | 'quit'.
     """
     sub_disp = candidate.subcommand or "-"
-    flags_repr = _lib_db().minify_json(sorted(candidate.flags))
+    flags_repr = lib_db().minify_json(sorted(candidate.flags))
     print(
         f"\n--- {candidate.verb} {sub_disp}"
         f"  flags={flags_repr}"
@@ -432,7 +441,9 @@ def _review_candidate(
     variants = _pattern_variants(candidate, home, cwd, project_root)
     verb_pattern = variants["verb_pattern"]
     path_specs: list[str] = variants["path_specs"]
-    path_opts = _build_path_opts(path_specs, project_root, cwd, home)
+    path_opts = _build_path_opts(
+        path_specs, project_root, cwd, home, suggested=candidate.suggested_path_spec
+    )
 
     # Axis 1: Verb.
     chosen_verb = _prompt_axis_verb(candidate, verb_pattern)
@@ -494,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.parse_args(argv)  # currently no flags; parse for --help support
 
     # Refresh candidates first (mirrors review.sh behaviour).
-    conn = _connect()
+    conn = connect()
     try:
         scan_candidates(conn)
         candidates = propose_promotions(conn)

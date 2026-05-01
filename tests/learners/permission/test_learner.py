@@ -25,8 +25,8 @@ from nephoscope.learners.permission.learner import (
     _candidate_leaf,
     _describe_rule,
     _get_cursor,
-    _parse_flags_arg,
-    _resolve_tier_ids,
+    parse_flags_arg,
+    resolve_tier_ids,
     _set_cursor,
     _tier_phrase,
     main as learner_main,
@@ -548,62 +548,62 @@ class TestCandidateLeaf:
 
 
 # ===========================================================================
-# _resolve_tier_ids
+# resolve_tier_ids
 # ===========================================================================
 
 
 class TestResolveTierIds:
     def test_global_tier_returns_none_none(self):
-        assert _resolve_tier_ids("global", None, None) == (None, None)
+        assert resolve_tier_ids("global", None, None) == (None, None)
 
     def test_session_tier_returns_session_id(self):
-        assert _resolve_tier_ids("session", 42, None) == (42, None)
+        assert resolve_tier_ids("session", 42, None) == (42, None)
 
     def test_project_tier_returns_project_id(self):
-        assert _resolve_tier_ids("project", None, 7) == (None, 7)
+        assert resolve_tier_ids("project", None, 7) == (None, 7)
 
     def test_session_tier_without_session_id_raises(self):
         with pytest.raises(SystemExit, match="--session-id"):
-            _resolve_tier_ids("session", None, None)
+            resolve_tier_ids("session", None, None)
 
     def test_project_tier_without_project_id_raises(self):
         with pytest.raises(SystemExit, match="--project-id"):
-            _resolve_tier_ids("project", None, None)
+            resolve_tier_ids("project", None, None)
 
     def test_unknown_tier_raises(self):
         with pytest.raises(SystemExit, match="unknown tier"):
-            _resolve_tier_ids("superuser", None, None)
+            resolve_tier_ids("superuser", None, None)
 
 
 # ===========================================================================
-# _parse_flags_arg
+# parse_flags_arg
 # ===========================================================================
 
 
 class TestParseFlagsArg:
     def test_none_input_returns_empty_array_json(self):
-        result = _parse_flags_arg(None)
+        result = parse_flags_arg(None)
         assert json.loads(result) == []
 
     def test_empty_string_returns_empty_array_json(self):
-        result = _parse_flags_arg("")
+        result = parse_flags_arg("")
         assert json.loads(result) == []
 
     def test_json_array_is_sorted_and_minified(self):
-        result = _parse_flags_arg('["-z", "-a"]')
+        result = parse_flags_arg('["-z", "-a"]')
         assert result == '["-a","-z"]'
 
     def test_single_flag(self):
-        result = _parse_flags_arg('["-q"]')
+        result = parse_flags_arg('["-q"]')
         assert result == '["-q"]'
 
     def test_invalid_json_raises_system_exit(self):
         with pytest.raises(SystemExit, match="JSON array"):
-            _parse_flags_arg("not-json")
+            parse_flags_arg("not-json")
 
     def test_non_list_json_raises_system_exit(self):
         with pytest.raises(SystemExit, match="JSON array"):
-            _parse_flags_arg('{"flag": true}')
+            parse_flags_arg('{"flag": true}')
 
 
 # ===========================================================================
@@ -832,25 +832,25 @@ class TestCursorManagement:
 
 
 # ===========================================================================
-# _parse_flags_arg — wildcard extension
+# parse_flags_arg — wildcard extension
 # ===========================================================================
 
 
 class TestParseFlagsArgWildcard:
     def test_star_returns_sentinel(self):
-        result = _parse_flags_arg("*")
+        result = parse_flags_arg("*")
         assert result == "*"
 
     def test_empty_returns_empty_array(self):
-        result = _parse_flags_arg("")
+        result = parse_flags_arg("")
         assert result == "[]"
 
     def test_none_returns_empty_array(self):
-        result = _parse_flags_arg(None)
+        result = parse_flags_arg(None)
         assert result == "[]"
 
     def test_json_array_parsed_normally(self):
-        result = _parse_flags_arg('["-r","-f"]')
+        result = parse_flags_arg('["-r","-f"]')
         assert json.loads(result) == ["-f", "-r"]  # sorted
 
 
@@ -940,12 +940,12 @@ class TestPatternVariantsCommand:
 
 
 def _mock_connect(conn: sqlite3.Connection):
-    """Context manager that patches ``_connect()`` to return ``conn``.
+    """Context manager that patches ``connect()`` to return ``conn``.
 
     Suppresses the ``close()`` call so the test fixture connection stays open.
     """
     return mock.patch(
-        "nephoscope.learners.permission.learner._connect",
+        "nephoscope.learners.permission.learner.connect",
         side_effect=lambda: _NonClosingConn(conn),
     )
 

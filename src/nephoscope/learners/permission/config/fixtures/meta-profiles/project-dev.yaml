@@ -1,0 +1,66 @@
+_meta:
+  id: project-dev
+  order: 1
+  description: "Full file + script access within trusted project directories"
+permissions:
+  # Project-dev — broad file access and script execution within trusted project directories.
+  #
+  # Grants Claude Code the ability to read, edit, write, and run scripts freely
+  # inside directories the user has explicitly marked as trusted. The user never
+  # gets prompted for routine edits inside their own project.
+  #
+  # This is the "I trust Claude to work freely in my project" opt-in profile.
+  # Apply per-project when starting a new development workflow.
+
+  # Edit -- modify files within trusted project directories
+  - verb: Edit
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "Edit files within trusted project directories"
+
+  # Write -- create files within trusted project directories
+  - verb: Write
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "Write files within trusted project directories"
+
+  # Read -- read files within trusted project directories
+  - verb: Read
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "Read files within trusted project directories"
+
+  # MultiEdit -- batch-edit files within trusted project directories
+  - verb: MultiEdit
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+
+  # NotebookEdit -- edit Jupyter notebooks within trusted project directories
+  - verb: NotebookEdit
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+
+  # python3 -- run Python scripts within trusted project directories
+  - verb: python3
+    flags: "*"
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "Run Python scripts within trusted project directories"
+
+  # python -- run Python scripts via the unversioned interpreter
+  - verb: python
+    flags: "*"
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+
+  # bash -- run shell scripts within trusted project directories
+  - verb: bash
+    flags: []
+    path_spec: "$TRUSTED_DIR/**"
+    decision: approved
+    reason: "Run shell scripts within trusted project directories"

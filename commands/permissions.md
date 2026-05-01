@@ -1,6 +1,6 @@
 ---
 description: Manage permission rules and candidates learned by nephoscope
-argument-hint: "[status|review|scan|propose|list|promote|reject|unpermit|seed|prune|gc|sweep|reconcile|mirror-status|mirror-dry-run|reload-hint] [options]"
+argument-hint: "[status|review|scan|propose|list|promote|reject|unpermit|seed|profiles|prune|gc|sweep|reconcile|mirror-status|mirror-dry-run|reload-hint] [options]"
 allowed-tools: Bash(${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-*:*), Bash(${CLAUDE_PLUGIN_DATA}/.venv/bin/python:*), Bash(grep:*), Bash(cut:*), Bash(awk:*), Bash(sort:*), Bash(uniq:*), Bash(head:*), Bash(tail:*), Bash(sqlite3:*), Bash(pwd:*), Bash(cd:*), Bash(echo:*), Read
 ---
 
@@ -281,6 +281,70 @@ Seed fixture rules (load from YAML or export to YAML).
 
 After load, print one-line sync status: `sync: ok (N rules loaded)`.
 
+> **Migration note (v0.2.0):** The five optional fixture files previously located at
+> `config/fixtures/optional/` (`dev-tools`, `devops`, `javascript`, `project-dev`,
+> `python-dev`) have been consolidated into `config/fixtures/meta-profiles/` and are
+> no longer loaded via `seed`. Use `profiles load <id>` instead:
+>
+> ```
+> /nephoscope:permissions profiles load dev-tools
+> /nephoscope:permissions profiles load python-dev devops javascript project-dev
+> ```
+
+### `profiles list`
+
+List available meta-profiles (bundled and user-contributed) with their id and description.
+
+```bash
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-profiles" list
+```
+
+Profiles are discovered from two locations:
+- **Bundled**: shipped with the plugin at `config/fixtures/meta-profiles/`
+- **User**: `${CLAUDE_PLUGIN_DATA}/profiles/` (created automatically if absent)
+
+### `profiles load <id> [<id2> ...]`
+
+Interactively load one or more meta-profiles by id into the DB.
+
+**Usage:**
+```
+/nephoscope:permissions profiles load <id> [<id2> ...]
+```
+
+Ids may be space-separated (e.g. `profiles load git python-dev`) or comma-separated (e.g. `profiles load git,python-dev`).
+
+```bash
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-profiles" load "$PROFILE_IDS"
+```
+
+Prints a summary of what the profile(s) contain (permission count, verb_type count) and prompts
+`[Y/n]` before applying. On confirm, inserts the rules idempotently and syncs the global mirror.
+On `MirrorHashMismatch`: echo `"Settings file modified externally. Run '/nephoscope:permissions reconcile' and retry."`
+
+### User-contributed profiles
+
+Users can add their own profiles by dropping `.yaml` files into `${CLAUDE_PLUGIN_DATA}/profiles/` (created automatically on first `profiles list`).
+
+**YAML format:**
+
+```yaml
+_meta:
+  id: my-profile
+  description: Short description shown in profiles list
+permissions:          # optional
+  - verb: curl
+    flags: "*"
+    decision: approved
+verb_types:           # optional
+  - verb: make
+    category: task_runner
+```
+
+- Both `permissions` and `verb_types` sections are optional; a profile may contain either or both.
+- `id` must be unique; if it collides with a bundled profile id, the bundled one wins.
+- Fields under `permissions` follow the same schema as the built-in fixture files: `verb`, `flags`, `decision`, and optional: `subcommand`, `path_spec`, `tier`, `reason`, `context`.
+
 ### `prune`
 
 Delete stale candidates (older than threshold, no corresponding ask_pending row).
@@ -408,4 +472,10 @@ Touch `settings.json` mtime via `Path.touch()` to force Claude Code's settings r
 ```
 /nephoscope:permissions seed --export > my_rules.yaml
 /nephoscope:permissions seed            # reload from config/fixtures/safe_shapes.yaml
+```
+
+**Browse and load meta-profiles:**
+```
+/nephoscope:permissions profiles list           # see available profiles
+/nephoscope:permissions profiles load git python-dev  # load multiple profiles
 ```

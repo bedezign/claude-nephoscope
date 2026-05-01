@@ -33,6 +33,7 @@ nephoscope-permissions       = "nephoscope.cli.permissions_cmd:main"
 nephoscope-init              = "nephoscope.cli.init_cmd:main"
 nephoscope-review            = "nephoscope.cli.review_cmd:main"
 nephoscope-observer          = "nephoscope.cli.observer_cmd:main"
+nephoscope-profiles          = "nephoscope.learners.permission.profiles:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -44,9 +45,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 nephoscope = [
     "lib/schema.sql",
+    "learners/permission/config/*.toml",
+    "learners/permission/config/*.yaml",
     "learners/permission/config/fixtures/*.yaml",
     "learners/permission/config/fixtures/profiles/*.yaml",
-    "learners/permission/config/fixtures/optional/*.yaml",
+    "learners/permission/config/fixtures/meta-profiles/*.yaml",
 ]
 
 [tool.pytest.ini_options]
