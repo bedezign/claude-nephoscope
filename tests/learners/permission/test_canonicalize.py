@@ -177,10 +177,19 @@ def test_short_flag_cluster_ls_la_splits_into_l_and_a():
     assert leaves[0].flags == frozenset({"-l", "-a"})
 
 
-def test_short_flag_cluster_tar_xvf_splits_into_three_flags():
+def test_tar_dash_xvf_kept_as_single_token():
+    # 3-char cluster — only exactly-2-char clusters are split; -xvf stays whole.
     leaves = parse_command("tar -xvf archive.tgz")
     assert len(leaves) == 1
-    assert leaves[0].flags == frozenset({"-x", "-v", "-f"})
+    assert leaves[0].flags == frozenset({"-xvf"})
+
+
+def test_tar_posix_nodash_xvf_has_no_flags():
+    # POSIX/BSD style: `tar xvf archive.tgz` — xvf has no leading dash so it
+    # is a positional argument, not a flag.  Matches any flags-[] rule.
+    leaves = parse_command("tar xvf archive.tgz")
+    assert len(leaves) == 1
+    assert leaves[0].flags == frozenset()
 
 
 def test_numeric_dash_arg_is_not_split_into_per_digit_flags():

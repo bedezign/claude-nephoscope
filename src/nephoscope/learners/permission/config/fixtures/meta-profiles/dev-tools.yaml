@@ -69,6 +69,7 @@ permissions:
     flags: "*"
     decision: approved
     reason: "find — read-only filesystem search"
+    danger_accepted: wildcard_hides_dangerous_flag
 
   # stat -- inspect file metadata, any path
   - verb: stat

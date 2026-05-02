@@ -121,6 +121,7 @@ CREATE TABLE permissions (
   decided_at    TEXT    NOT NULL,
   hit_count     INTEGER NOT NULL DEFAULT 0,
   last_hit_at   TEXT,               -- ISO-8601 UTC; NULL until the rule is first matched
+  danger_accepted TEXT,             -- danger code (e.g. transparent_wrapper_wildcard) when user acknowledged DANGER at promotion time; NULL if no override
   CHECK (NOT (session_id IS NOT NULL AND project_id IS NOT NULL))
 );
 CREATE UNIQUE INDEX idx_permissions_unique

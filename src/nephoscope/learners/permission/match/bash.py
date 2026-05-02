@@ -29,37 +29,66 @@ from nephoscope.learners.permission.canonicalize import (  # type: ignore[import
 from nephoscope.learners.permission.deny import evaluate  # type: ignore[import-untyped]
 
 
-def _flags_key(flags: frozenset[str]) -> str:
-    return json.dumps(sorted(flags), ensure_ascii=False, separators=(",", ":"))
-
-
 def _lookup_rule_shape_id(
     conn: sqlite3.Connection, variant: PatternVariant
 ) -> int | None:
-    """Return the rule_shapes.id for a matching rule, or None.
+    """Return the rule_shapes.id for the best matching rule, or None.
 
     The ``context`` filter uses ``IN ('any', ?)`` so that rules with
-    ``context='any'`` match every leaf (regardless of whether the leaf is
-    top-level or inside a substitution), while rules with
-    ``context='toplevel'`` or ``context='substitution'`` only match the
+    ``context='any'`` match every leaf regardless of context, while
+    ``context='toplevel'`` / ``context='substitution'`` only match the
     corresponding leaf context.
+
+    For the flags-wildcard lookup variant (``variant.flags == '*'``), only
+    rules stored with ``flags='*'`` are considered — this is the step-4
+    fallback from ``to_pattern_form`` and preserves the original semantics.
+
+    For all other variants, the ``flags`` constraint uses **allowlist
+    (subset) semantics**: a rule matches when the actual flag set is a
+    subset of the rule's stored flag set.  Among matching rules the most
+    specific one wins (fewest extra flags beyond the actual set); wildcard
+    rules (``flags='*'``) are used only when no specific rule matches.
     """
-    row = conn.execute(
-        "SELECT id FROM rule_shapes"
+    if variant.flags == "*":
+        # Wildcard lookup variant: find only wildcard-stored rules.
+        row = conn.execute(
+            "SELECT id FROM rule_shapes"
+            " WHERE verb = ?"
+            "   AND IFNULL(subcommand, '') = IFNULL(?, '')"
+            "   AND flags = '*'"
+            "   AND IFNULL(path_spec, '') = IFNULL(?, '')"
+            "   AND context IN ('any', ?);",
+            (variant.verb, variant.subcommand, variant.path_spec, variant.context),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
+    rows = conn.execute(
+        "SELECT id, flags FROM rule_shapes"
         " WHERE verb = ?"
         "   AND IFNULL(subcommand, '') = IFNULL(?, '')"
-        "   AND flags = ?"
         "   AND IFNULL(path_spec, '') = IFNULL(?, '')"
         "   AND context IN ('any', ?);",
-        (
-            variant.verb,
-            variant.subcommand,
-            variant.flags,
-            variant.path_spec,
-            variant.context,
-        ),
-    ).fetchone()
-    return int(row[0]) if row is not None else None
+        (variant.verb, variant.subcommand, variant.path_spec, variant.context),
+    ).fetchall()
+
+    actual: set[str] = set(json.loads(variant.flags))
+    best_id: int | None = None
+    best_extra: int = 0x7FFF_FFFF
+    wildcard_id: int | None = None
+
+    for row_id, rule_flags in rows:
+        if rule_flags == "*":
+            wildcard_id = int(row_id)
+            continue
+        rule_set: set[str] = set(json.loads(rule_flags))
+        if not actual.issubset(rule_set):
+            continue
+        extra = len(rule_set) - len(actual)
+        if extra < best_extra:
+            best_id = int(row_id)
+            best_extra = extra
+
+    return best_id if best_id is not None else wildcard_id
 
 
 def _decision_for_leaf(

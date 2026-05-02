@@ -1503,7 +1503,7 @@ class TestDevToolsNewRules:
         tmp_db.commit()
 
         row = tmp_db.execute(
-            "SELECT rs.flags, p.decision, rs.path_spec"
+            "SELECT rs.flags, p.decision, rs.path_spec, p.danger_accepted"
             " FROM rule_shapes rs JOIN permissions p ON p.rule_shape_id = rs.id"
             " WHERE rs.verb = 'find';"
         ).fetchone()
@@ -1513,6 +1513,7 @@ class TestDevToolsNewRules:
         assert row[0] == "*", f"Expected flags='*' for find rule in DB, got {row[0]!r}"
         assert row[1] == "approved"
         assert row[2] is None, f"Expected no path_spec for find rule in DB, got {row[2]!r}"
+        assert row[3] == "wildcard_hides_dangerous_flag"
 
     def test_apply_dev_tools_inserts_tail_rule(self, tmp_db) -> None:
         """apply_profile on dev-tools.yaml writes a tail/wildcard rule to the DB."""

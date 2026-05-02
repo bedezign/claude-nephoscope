@@ -67,7 +67,7 @@ _NUMERIC_FLAG_RE = re.compile(r"^-\d+$")
 # shorts) and ``find`` (mixed, but ``find`` flags mostly don't cluster under a
 # single dash). Verbs like ``dd`` use ``if=``/``of=`` which never start with a
 # dash, so our flag detector skips them anyway.
-_SHORT_FLAG_CLUSTER_RE = re.compile(r"^-[A-Za-z]{2,}$")
+_SHORT_FLAG_CLUSTER_RE = re.compile(r"^-[A-Za-z]{2}$")
 
 # Process/command-substitution literal prefixes we never want to record as a
 # subcommand on the *outer* leaf. Recursion into the inner substitution still
@@ -1002,6 +1002,40 @@ def _resolve_subcommand(
                 return None, 2
             return candidate, 2
     return None, 1
+
+
+def normalize_flags(flags: Iterable[str]) -> list[str]:
+    """Normalize flag strings to canonical per-flag form.
+
+    Applies the same rules as ``_collect_flags`` but takes plain strings
+    instead of bashlex AST nodes — suitable for normalizing fixture YAML
+    and stored DB values before comparison or storage.
+
+    Rules:
+    - POSIX short-flag clusters (``-rf`` → ``['-f', '-r']``)
+    - Numeric flags (``-10`` → ``'-<N>'``)
+    - Value-bearing flags (``--file=foo`` → ``'--file'``)
+    - Long flags and mixed tokens (``--force``, ``-O3``) kept as-is
+    - Non-flag tokens (no leading dash) are silently dropped
+    """
+    out: set[str] = set()
+    for flag in flags:
+        if not (flag.startswith("-") and len(flag) > 1):
+            continue
+        if any(ch.isspace() for ch in flag):
+            continue
+        if "=" in flag:
+            out.add(flag.split("=", 1)[0])
+            continue
+        if _NUMERIC_FLAG_RE.match(flag):
+            out.add("-<N>")
+            continue
+        if _SHORT_FLAG_CLUSTER_RE.match(flag):
+            for ch in flag[1:]:
+                out.add(f"-{ch}")
+            continue
+        out.add(flag)
+    return sorted(out)
 
 
 def _collect_flags(words: Iterable[bashlex.ast.node]) -> frozenset[str]:

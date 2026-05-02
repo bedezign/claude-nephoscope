@@ -30,6 +30,9 @@ from typing import Any
 
 import yaml
 
+import sys
+
+from nephoscope.learners.permission.evaluate import evaluate
 from nephoscope.lib.db import _now, insert_permission, minify_json, upsert_rule_shape
 from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_global
 
@@ -46,7 +49,9 @@ def _yaml_to_flags(flags: Any) -> str:
     if isinstance(flags, str) and flags == "*":
         return "*"
     if isinstance(flags, list):
-        return minify_json(sorted(flags))
+        from nephoscope.learners.permission.canonicalize import normalize_flags
+
+        return minify_json(normalize_flags(flags))
     raise ValueError(f"invalid flags: {flags!r}")
 
 
@@ -59,10 +64,13 @@ _VALID_VERB_CATEGORIES: frozenset[str] = frozenset(
 
 def _validate_entry(
     idx: int, entry: Any
-) -> tuple[str, str, Any, str | None, str | None, str, str | None, str, str]:
+) -> tuple[
+    str, str, Any, str | None, str | None, str, str | None, str, str, str | None
+]:
     """Validate a single fixture entry and return its fields.
 
-    Returns (verb, decision, flags_raw, subcommand, path_spec, tier, reason, context, tool).
+    Returns (verb, decision, flags_raw, subcommand, path_spec, tier, reason,
+    context, tool, danger_accepted).
     Raises ValueError on invalid schema.
     """
     if not isinstance(entry, dict):
@@ -87,6 +95,7 @@ def _validate_entry(
     reason = entry.get("reason")
     context = entry.get("context", "any")
     tool = entry.get("tool", "Bash")
+    danger_accepted: str | None = entry.get("danger_accepted")
 
     if tier not in ("session", "project", "global"):
         raise ValueError(f"entry {idx} invalid tier: {tier!r}")
@@ -103,7 +112,18 @@ def _validate_entry(
             f"(must be one of: {sorted(_VALID_TOOLS)})"
         )
 
-    return verb, decision, flags_raw, subcommand, path_spec, tier, reason, context, tool
+    return (
+        verb,
+        decision,
+        flags_raw,
+        subcommand,
+        path_spec,
+        tier,
+        reason,
+        context,
+        tool,
+        danger_accepted,
+    )
 
 
 def _apply_entry(
@@ -119,6 +139,7 @@ def _apply_entry(
     now: str,
     context: str = "any",
     tool: str = "Bash",
+    danger_accepted: str | None = None,
 ) -> None:
     """Upsert one rule_shape + permission row for a fixture entry."""
     if tier != "global":
@@ -128,6 +149,31 @@ def _apply_entry(
         )
 
     flags_json = _yaml_to_flags(flags_raw)
+    findings = evaluate(verb, flags_json, subcommand, path_spec)
+    danger_codes = {f.code for f in findings if f.severity == "DANGER"}
+
+    if danger_codes:
+        if danger_accepted not in danger_codes:
+            for f in findings:
+                if f.severity == "DANGER":
+                    print(f"DANGER [{f.code}]: {f.message}", file=sys.stderr)
+                    print(f"See: {f.guide_anchor}", file=sys.stderr)
+            n = len(danger_codes)
+            print(
+                f"Skipping entry {idx} (verb={verb!r}): {n} DANGER finding(s). "
+                f"Set danger_accepted: <code> in the fixture to override.",
+                file=sys.stderr,
+            )
+            return
+        print(
+            f"Accepted DANGER [{danger_accepted}] for verb={verb!r} — writing anyway.",
+            file=sys.stderr,
+        )
+
+    for f in findings:
+        if f.severity == "WARN":
+            print(f"WARN [{f.code}]: {f.message}", file=sys.stderr)
+
     shape_id = upsert_rule_shape(
         conn,
         verb=verb,
@@ -147,6 +193,7 @@ def _apply_entry(
         source="seed",
         ts=now,
         reason=reason,
+        danger_accepted=danger_accepted,
     )
 
 
@@ -185,7 +232,9 @@ def _apply_permission_list(
     Raises: ValueError on invalid schema.
     """
     validated: list[
-        tuple[str, str, Any, str | None, str | None, str, str | None, str, str]
+        tuple[
+            str, str, Any, str | None, str | None, str, str | None, str, str, str | None
+        ]
     ] = []
     for idx, entry in enumerate(entries):
         validated.append(_validate_entry(idx, entry))
@@ -200,6 +249,7 @@ def _apply_permission_list(
         reason,
         context,
         tool,
+        danger_accepted,
     ) in enumerate(validated):
         _apply_entry(
             conn,
@@ -214,6 +264,7 @@ def _apply_permission_list(
             now,
             context=context or "any",
             tool=tool,
+            danger_accepted=danger_accepted,
         )
 
     return len(validated)

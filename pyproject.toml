@@ -1,6 +1,6 @@
 [project]
 name = "nephoscope"
-version = "0.2.0"
+version = "0.2.1"
 description = "Cloud-observation instrument for Claude Code — session recording, permission learning, and behavioural pattern extraction"
 requires-python = ">=3.11"
 dependencies = ["bashlex", "pyyaml"]
@@ -34,6 +34,7 @@ nephoscope-init              = "nephoscope.cli.init_cmd:main"
 nephoscope-review            = "nephoscope.cli.review_cmd:main"
 nephoscope-observer          = "nephoscope.cli.observer_cmd:main"
 nephoscope-profiles          = "nephoscope.learners.permission.profiles:main"
+nephoscope-migrate           = "nephoscope.cli.migrate_cmd:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

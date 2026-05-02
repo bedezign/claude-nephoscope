@@ -19,6 +19,24 @@ Files blocked:
 
 **Example:** `cat ~/.aws/credentials` is blocked. So is `grep AKIAIOSFODNN7EXAMPLE ~/.aws/credentials`. The rule does not distinguish between them — it matches based on the file path, not the command verb.
 
+### Credential file reads — native file tools
+
+Claude Code's native Read, Write, and Edit tools are blocked for the same credential paths. This means even if no shell command is run, attempting to open a `.env` file or `~/.aws/credentials` via the Read tool will be denied.
+
+The `credential-file-tools` meta-profile (loaded automatically by `nephoscope-init`) adds deny rules for Read, Write, and Edit covering:
+
+- `.env`, `.env.local`, `.env.development`, `.env.production`, `.env.staging`, `.env.test`
+- `~/.aws/credentials`
+- `~/.kube/config`
+- `~/.docker/config.json`
+- `~/.npmrc`, `~/.netrc`
+- `~/.bash_history`, `~/.zsh_history`
+- `.dev.vars`, `.dev.vars.local`
+- `*.pem`, `*.key`, `.pypirc`
+- `secrets/**`, `credentials/**`, `config/database.yml`, `config/credentials.yml.enc`
+
+Write and Edit denies cover the same paths — a write to a credential file is equally dangerous (overwriting a key file is not a step nephoscope should allow silently).
+
 ### Secret-manager standalone reads
 
 Secret-manager CLIs like `1Password`, `Vault`, `Bitwarden`, `Doppler`, and `pass` are blocked when run standalone, because they print the secret value to stdout — which becomes part of the conversation transcript.

@@ -38,6 +38,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from nephoscope.learners.permission.canonicalize import CanonicalLeaf, parse_command
 from nephoscope.learners.permission.deny import evaluate
+from nephoscope.learners.permission.evaluate import evaluate as evaluate_safety
 
 CONSUMER_NAME = "permission-learner"
 
@@ -566,12 +567,69 @@ def _cmd_propose(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _block_on_unacked_danger(findings: list, unacked: set) -> int:
+    """Print each unacked DANGER finding and the aggregate error summary.
+
+    Returns 1 (the block exit code) unconditionally.
+    """
+    for f in findings:
+        if f.severity == "DANGER" and f.code in unacked:
+            print(f"DANGER [{f.code}]: {f.message}", file=sys.stderr)
+            print(f"See: {f.guide_anchor}", file=sys.stderr)
+    n = len(unacked)
+    print(
+        f"error: {n} DANGER finding(s) block promotion. "
+        f"Use --accept-dangerous <code> to acknowledge and proceed.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _run_safety_gate(
+    verb: str,
+    flags_json: str,
+    subcommand: str | None,
+    path_spec: str | None,
+    accept_dangerous: str | None,
+) -> int | None:
+    """Run evaluate_safety and emit block/warn messages.
+
+    Returns 1 if a DANGER finding blocks promotion, None to proceed.
+    """
+    findings = evaluate_safety(verb, flags_json, subcommand, path_spec)
+    danger_codes = {f.code for f in findings if f.severity == "DANGER"}
+
+    if danger_codes:
+        unacked = danger_codes - ({accept_dangerous} if accept_dangerous else set())
+        if unacked:
+            return _block_on_unacked_danger(findings, unacked)
+        print(
+            f"Accepted DANGER [{accept_dangerous}] for verb={verb!r} — writing anyway.",
+            file=sys.stderr,
+        )
+
+    for f in findings:
+        if f.severity == "WARN":
+            print(f"WARN [{f.code}]: {f.message}", file=sys.stderr)
+
+    return None
+
+
 def _cmd_write_permission(args: argparse.Namespace, decision: str) -> int:
     """Upsert a rule_shape and insert a permission row for the given decision."""
     from nephoscope.lib.mirror.writer import MirrorHashMismatch, sync_affected
 
     flags_json = parse_flags_arg(args.flags)
     path_spec: str | None = args.path_spec
+    accept_dangerous: str | None = getattr(args, "accept_dangerous", None)
+
+    if decision != "rejected":
+        rc = _run_safety_gate(
+            args.verb, flags_json, args.subcommand, path_spec, accept_dangerous
+        )
+        if rc is not None:
+            return rc
+
     conn = connect()
     try:
         session_id, project_id = resolve_tier_ids(
@@ -591,6 +649,7 @@ def _cmd_write_permission(args: argparse.Namespace, decision: str) -> int:
             "learner",
             now,
             args.reason,
+            danger_accepted=accept_dangerous,
         )
         # Mirror sync: session-tier rules have no JSON analogue; skip them.
         if session_id is None:
@@ -1194,6 +1253,16 @@ def main(argv: list[str] | None = None) -> int:
     _add_shape_args(promote)
     _add_tier_args(promote)
     promote.add_argument("--reason", default=None, help=_reason_help)
+    promote.add_argument(
+        "--accept-dangerous",
+        metavar="CODE",
+        default=None,
+        dest="accept_dangerous",
+        help=(
+            "Acknowledge a specific DANGER finding and promote anyway\n"
+            "(e.g. --accept-dangerous transparent_wrapper_wildcard)."
+        ),
+    )
     promote.add_argument(
         "--sync",
         action="store_true",

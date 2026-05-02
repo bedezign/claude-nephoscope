@@ -18,13 +18,14 @@ Dense lookup tables. For concepts, read [how it works](how-it-works.md); for com
 
 Nephoscope reads its settings from a TOML file at `$NEPHOSCOPE_CONFIG` (default `~/.config/nephoscope/config.toml`). An absent file is fine — all settings default silently. Malformed TOML raises an error.
 
-Three keys are supported:
+Four keys are supported:
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `trusted_dirs` | list of strings | `[]` | Top-level project directories. Files under these paths are pre-approved for Read/Edit/Write/MultiEdit/NotebookEdit via injection into the global mirror's `_nephoscopeAllowedTools` key. Also enables the `$TRUSTED_DIR` placeholder. |
 | `auto_register_project_paths` | boolean | `false` | When true, `nephoscope-init` silently adds the current working directory to `trusted_dirs` instead of prompting. |
 | `non_bash_tool_matching` | boolean | `false` | Enables full DB matching for non-Bash tool classes (Write/Edit/MultiEdit/NotebookEdit/Read). When false (default), non-Bash tool matching follows mirror-only behaviour. |
+| `junk_dir` | string | OS temp dir's `claude/` subfolder (e.g. `/tmp/claude`) | Scratch directory for temporary files. Also enables the `$JUNK_DIR` placeholder. Rules targeting this directory can be pre-approved without allowing the verb everywhere. |
 
 Example configuration file:
 
@@ -32,6 +33,7 @@ Example configuration file:
 trusted_dirs = ["/home/you/code/myproject", "/opt/company/shared"]
 auto_register_project_paths = false
 non_bash_tool_matching = false
+junk_dir = "/tmp/claude"   # defaults to OS temp dir's claude/ subfolder
 ```
 
 ## Placeholders
@@ -46,6 +48,7 @@ Path-spec shortcuts that nephoscope expands at the time a rule is evaluated.
 | `$TRUSTED_DIR` | A trusted directory listed in `trusted_dirs` in the config file. | Set when at least one trusted directory is configured. |
 | `$ADDITIONAL_DIR` | An additional directory — listed in `permissions.additionalDirectories` in the settings file or passed via `claude --add-dir` at launch. | Set when at least one additional directory is registered. |
 | `$CLAUDE_DIR` | The Claude Code config directory (typically `~/.claude/`). | Always available. Use in rules for hook scripts and harness files, e.g. `path_spec: "$CLAUDE_DIR/hooks/**"`. |
+| `$JUNK_DIR` | The scratch/junk directory. Configured via `junk_dir` in the config file; defaults to the OS temp directory's `claude/` subfolder (typically `/tmp/claude`). | Always available. Use in rules for short-lived scripts or scratch files, e.g. `path_spec: "$JUNK_DIR/**"`. |
 
 Use them inside `--path-spec` values. Examples:
 

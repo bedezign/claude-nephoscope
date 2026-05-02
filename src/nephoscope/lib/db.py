@@ -349,6 +349,7 @@ def insert_permission(
     source: str,
     ts: str,
     reason: str | None = None,
+    danger_accepted: str | None = None,
 ) -> int:
     """Insert a permission decision row.
 
@@ -364,6 +365,8 @@ def insert_permission(
         source: 'session-ask', 'review', 'learner', 'seed', 'manual', 'migrated'
         ts: ISO-8601 timestamp
         reason: optional explanation
+        danger_accepted: danger code acknowledged by the caller (e.g.
+            'transparent_wrapper_wildcard'), or None if no override.
 
     Returns: permissions.id
     """
@@ -373,16 +376,26 @@ def insert_permission(
     cur = conn.execute(
         "INSERT INTO permissions"
         " (rule_shape_id, session_id, project_id, decision, source, reason,"
-        "  decided_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "  decided_at, danger_accepted)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(rule_shape_id, IFNULL(session_id, 0), IFNULL(project_id, 0))"
         " DO UPDATE SET"
         "   decision = excluded.decision,"
         "   source = excluded.source,"
         "   reason = excluded.reason,"
-        "   decided_at = excluded.decided_at"
+        "   decided_at = excluded.decided_at,"
+        "   danger_accepted = excluded.danger_accepted"
         " RETURNING id;",
-        (rule_shape_id, session_id, project_id, decision, source, reason, ts),
+        (
+            rule_shape_id,
+            session_id,
+            project_id,
+            decision,
+            source,
+            reason,
+            ts,
+            danger_accepted,
+        ),
     )
     return int(cur.fetchone()[0])
 

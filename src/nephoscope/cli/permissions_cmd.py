@@ -466,6 +466,174 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if *column* exists in *table* at runtime.
+
+    Uses PRAGMA table_info so it works against both newly-created and
+    pre-existing DBs that pre-date the column being added.
+    """
+    rows = conn.execute(f'PRAGMA table_info("{table}");').fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def _query_status_data(conn: sqlite3.Connection) -> dict:
+    """Run all status queries and return a raw data dict.
+
+    Kept separate from output formatting so both human and JSON paths share
+    exactly one set of queries.
+    """
+    # Counts by decision (approved / rejected / ask).
+    # DB stores 'rejected'; the public API surface and JSON output use 'denied'
+    # as the key — more intuitive for callers and matches the task spec.
+    counts: dict[str, int] = {"approved": 0, "rejected": 0, "ask": 0}
+    for decision, n in conn.execute(
+        "SELECT decision, COUNT(*) FROM permissions GROUP BY decision;"
+    ).fetchall():
+        if decision in counts:
+            counts[decision] = n
+
+    # Candidates: total and those with at least one observation (observations >= 1
+    # is always true by construction, so candidates_with_hits == candidates_total;
+    # surfaced separately for forward-compatibility should the schema gain a
+    # separate hit-count concept distinct from observations).
+    cand_total = conn.execute("SELECT COUNT(*) FROM permission_candidates;").fetchone()[
+        0
+    ]
+    cand_with_hits = conn.execute(
+        "SELECT COUNT(*) FROM permission_candidates WHERE observations >= 1;"
+    ).fetchone()[0]
+
+    # Top approved verbs (by rule count)
+    top_approved = [
+        {"verb": row[0], "count": row[1]}
+        for row in conn.execute(
+            "SELECT rs.verb, COUNT(*) AS n"
+            " FROM permissions p"
+            " JOIN rule_shapes rs ON rs.id = p.rule_shape_id"
+            " WHERE p.decision = 'approved'"
+            " GROUP BY rs.verb"
+            " ORDER BY n DESC"
+            " LIMIT 10;"
+        ).fetchall()
+    ]
+
+    # Top denied verbs (decision = 'rejected'; displayed as "denied" to users)
+    top_denied = [
+        {"verb": row[0], "count": row[1]}
+        for row in conn.execute(
+            "SELECT rs.verb, COUNT(*) AS n"
+            " FROM permissions p"
+            " JOIN rule_shapes rs ON rs.id = p.rule_shape_id"
+            " WHERE p.decision = 'rejected'"
+            " GROUP BY rs.verb"
+            " ORDER BY n DESC"
+            " LIMIT 10;"
+        ).fetchall()
+    ]
+
+    # Recent hits: verbs matched in the last 7 days
+    recent_hits = [
+        {"verb": row[0], "hits": row[1], "last_hit": row[2][:10] if row[2] else None}
+        for row in conn.execute(
+            "SELECT rs.verb, SUM(p.hit_count) AS hits, MAX(p.last_hit_at)"
+            " FROM permissions p"
+            " JOIN rule_shapes rs ON rs.id = p.rule_shape_id"
+            " WHERE p.last_hit_at >= date('now', '-7 days')"
+            " GROUP BY rs.verb"
+            " ORDER BY hits DESC"
+            " LIMIT 10;"
+        ).fetchall()
+    ]
+
+    # danger_accepted count: guarded against older DBs lacking the column.
+    danger_count: int = 0
+    if _has_column(conn, "permissions", "danger_accepted"):
+        try:
+            danger_count = conn.execute(
+                "SELECT COUNT(*) FROM permissions WHERE danger_accepted IS NOT NULL;"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            danger_count = 0
+
+    return {
+        "approved": counts["approved"],
+        "denied": counts["rejected"],  # external key: 'denied' not 'rejected'
+        "ask": counts["ask"],
+        "candidates_total": cand_total,
+        "candidates_with_hits": cand_with_hits,
+        "top_approved_verbs": top_approved,
+        "top_denied_verbs": top_denied,
+        "recent_hits": recent_hits,
+        "danger_accepted_count": danger_count,
+    }
+
+
+def _print_status_human(data: dict) -> None:
+    """Print the human-readable status summary."""
+    print(f"Approved rules:   {data['approved']}")
+    print(f"Denied rules:     {data['denied']}")
+    print(f"Ask rules:        {data['ask']}")
+    cand_total = data["candidates_total"]
+    cand_hits = data["candidates_with_hits"]
+    print(f"Pending candidates: {cand_total}  ({cand_hits} with hits)")
+
+    if data["top_approved_verbs"]:
+        verbs = ", ".join(
+            f"{v['verb']} ({v['count']} rules)" for v in data["top_approved_verbs"]
+        )
+        print(f"\nTop approved verbs: {verbs}")
+
+    if data["top_denied_verbs"]:
+        verbs = ", ".join(
+            f"{v['verb']} ({v['count']} rules)" for v in data["top_denied_verbs"]
+        )
+        print(f"Top denied verbs:   {verbs}")
+
+    if data["recent_hits"]:
+        print("\nRecent hits (last 7 days):")
+        for entry in data["recent_hits"]:
+            last = entry["last_hit"] or "unknown"
+            print(f"  {entry['verb']}: {entry['hits']} hits  (last: {last})")
+
+    print(
+        f"\nDangerous flags accepted: {data['danger_accepted_count']} rules carry danger_accepted"
+    )
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    """Print a structured summary of the current permission-rule database state.
+
+    By default prints a human-readable snapshot; add --json for machine-readable
+    JSON output.
+
+    Reads from the DB resolved via $OBSERVABILITY_DB / args.db if available.
+    When neither is set, uses the default observations DB path.
+    """
+    from nephoscope.lib.db import _open
+
+    db_attr = getattr(args, "db", None)
+    if db_attr:
+        os.environ.setdefault("OBSERVABILITY_DB", db_attr)
+
+    conn = _open()
+    try:
+        data = _query_status_data(conn)
+    finally:
+        conn.close()
+
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+    else:
+        _print_status_human(data)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -594,6 +762,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path of the settings.json file whose timestamp should be refreshed.",
     )
 
+    status_p = sub.add_parser(
+        "status",
+        help="Print a structured snapshot of the permission-rule database.",
+        description=(
+            "Print a summary of all permission rules stored in the database:\n"
+            "counts by decision, top verbs per decision, recent hit activity,\n"
+            "and how many rules carry an accepted-danger override.\n"
+            "\n"
+            "Use --json for machine-readable output."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    _add_db_arg(status_p)
+    status_p.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        dest="json",
+        help="Emit JSON instead of the human-readable summary.",
+    )
+
     st = sub.add_parser(
         "stats",
         help="Show hit-count statistics for permission rules.",
@@ -675,6 +864,11 @@ def main(argv: list[str] | None = None) -> int:
             return mirror_dry_run_cmd(args.db, args.target_path)
         case "reload-hint":
             return reload_hint_cmd(args.settings_path)
+        case "status":
+            err = _require_db("status", args)
+            if err is not None:
+                return err
+            return _cmd_status(args)
         case "stats":
             return _cmd_stats(args)
         case _:
