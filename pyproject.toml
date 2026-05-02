@@ -25,6 +25,7 @@ Repository = "https://github.com/bedezign/nephoscope"
 Issues     = "https://github.com/bedezign/nephoscope/issues"
 
 [project.scripts]
+nephoscope                   = "nephoscope.cli.main:main"
 nephoscope-recorder          = "nephoscope.recorder.run:main"
 nephoscope-permissions-hook  = "nephoscope.learners.permission.hook:main"
 nephoscope-learn             = "nephoscope.learners.permission.learner:main"
@@ -35,6 +36,7 @@ nephoscope-review            = "nephoscope.cli.review_cmd:main"
 nephoscope-observer          = "nephoscope.cli.observer_cmd:main"
 nephoscope-profiles          = "nephoscope.learners.permission.profiles:main"
 nephoscope-migrate           = "nephoscope.cli.migrate_cmd:main"
+nephoscope-output-scanner    = "nephoscope.hooks.output_scanner:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -51,6 +53,7 @@ nephoscope = [
     "learners/permission/config/fixtures/*.yaml",
     "learners/permission/config/fixtures/profiles/*.yaml",
     "learners/permission/config/fixtures/meta-profiles/*.yaml",
+    "lib/scanner/*.yaml",
 ]
 
 [tool.pytest.ini_options]

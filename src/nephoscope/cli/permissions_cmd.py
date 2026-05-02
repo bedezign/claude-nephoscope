@@ -345,6 +345,25 @@ def _print_workspace_coverage(settings_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _format_time_saved(approved_hits: int, seconds_per_popup: int = 5) -> str:
+    """Format approved-hit time savings as ``"Xm Ys"`` / ``"Ys"`` / ``"0s"``.
+
+    Each approved hit represents one auto-approved popup at
+    ``seconds_per_popup`` seconds saved. Output forms:
+
+    - ``"0s"``       when total seconds is zero
+    - ``"Ns"``       when total seconds is below 60
+    - ``"Mm Ss"``    when total seconds is 60 or more (60 prints as ``1m 0s``)
+
+    Integer arithmetic only — no fractional seconds.
+    """
+    total_seconds = max(0, approved_hits) * seconds_per_popup
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}m {seconds}s"
+
+
 def _rule_label(verb: str, sub: str | None, path_spec: str | None) -> str:
     label = verb
     if sub:
@@ -372,26 +391,69 @@ def _print_never_used(never_used_rows: list[tuple] | None) -> None:
         print(f"  {decision:<10}  {_rule_label(verb, sub, path_spec)}")
 
 
+def _query_redaction_stats(
+    conn: sqlite3.Connection,
+) -> tuple[int, list[tuple[str, int]]] | None:
+    """Return ``(total, top_patterns)`` from ``redaction_events``.
+
+    ``top_patterns`` is a descending list of ``(name, count)`` capped at 5.
+    Returns ``None`` when the table does not exist (older DB). Other
+    sqlite errors propagate — they signify a real problem worth surfacing.
+    """
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM redaction_events;").fetchone()[0]
+        top = conn.execute(
+            "SELECT pattern_name, COUNT(*) AS n"
+            " FROM redaction_events"
+            " GROUP BY pattern_name"
+            " ORDER BY n DESC, pattern_name ASC"
+            " LIMIT 5;"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+    return int(total), [(row[0], int(row[1])) for row in top]
+
+
+def _print_redactions(
+    redaction_data: tuple[int, list[tuple[str, int]]] | None,
+) -> None:
+    if redaction_data is None:
+        print(
+            "\nRedactions:   (table not yet created — run nephoscope-init to upgrade)"
+        )
+        return
+    total, top_patterns = redaction_data
+    print(f"\nRedactions:   {total} total")
+    if total == 0 or not top_patterns:
+        return
+    print("Top patterns:")
+    for name, count in top_patterns:
+        print(f"  {count:>6}  {name}")
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
     """Print hit-count statistics for permission rules.
 
     Prints:
     - Total rules (approved vs rejected)
-    - Total hits across all rules
+    - Total hits across all rules, split by approved/rejected
+    - Saved-time line (approved hits × 5s)
     - Top 10 rules by hit count
     - Rules with 0 hits (count + optional list with --show-unused)
     - Most recently fired rule
+    - Redactions section (total + top patterns)
 
     Reads from the DB resolved via $OBSERVABILITY_DB / args.db if available.
     When neither is set, uses the default observations DB path.
     """
     from nephoscope.lib.db import _open
 
-    # Resolve DB path: args.db (if set), else env, else default.
+    # Resolve DB path: args.db overrides the env var that _open() reads.
+    # setdefault preserves any value the caller set before this process started.
     db_attr = getattr(args, "db", None)
     if db_attr:
-        import os
-
         os.environ.setdefault("OBSERVABILITY_DB", db_attr)
 
     conn = _open()
@@ -405,10 +467,16 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         ).fetchone()[0]
         total = approved + rejected
 
-        # Total hits
-        total_hits = conn.execute(
-            "SELECT COALESCE(SUM(hit_count), 0) FROM permissions;"
+        # Hit counts split by decision
+        approved_hits = conn.execute(
+            "SELECT COALESCE(SUM(hit_count), 0) FROM permissions"
+            " WHERE decision = 'approved';"
         ).fetchone()[0]
+        rejected_hits = conn.execute(
+            "SELECT COALESCE(SUM(hit_count), 0) FROM permissions"
+            " WHERE decision = 'rejected';"
+        ).fetchone()[0]
+        total_hits = approved_hits + rejected_hits
 
         # Never-used count (hit_count = 0)
         never_used = conn.execute(
@@ -445,11 +513,20 @@ def _cmd_stats(args: argparse.Namespace) -> int:
                 " WHERE p.hit_count = 0"
                 " ORDER BY rs.verb, p.decided_at ASC;"
             ).fetchall()
+
+        redaction_data = _query_redaction_stats(conn)
     finally:
         conn.close()
 
     print(f"Rules:        {total} total ({approved} approved, {rejected} rejected)")
-    print(f"Total hits:   {total_hits}")
+    print(
+        f"Total hits:   {total_hits}  ({approved_hits} approved,"
+        f" {rejected_hits} rejected)"
+    )
+    print(
+        f"Saved you:    {_format_time_saved(approved_hits)} of life"
+        " (assuming 5s per popup)"
+    )
     print(f"Never used:   {never_used}")
 
     _print_top_rules(top_rows)
@@ -461,6 +538,8 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         print("\nLast fired:   (none)")
 
     _print_never_used(never_used_rows)
+
+    _print_redactions(redaction_data)
 
     return 0
 
@@ -615,6 +694,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     """
     from nephoscope.lib.db import _open
 
+    # Resolve DB path: args.db overrides the env var that _open() reads.
+    # setdefault preserves any value the caller set before this process started.
     db_attr = getattr(args, "db", None)
     if db_attr:
         os.environ.setdefault("OBSERVABILITY_DB", db_attr)

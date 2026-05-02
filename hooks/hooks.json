@@ -40,6 +40,15 @@
             "command": "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-recorder post"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Grep|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-output-scanner"
+          }
+        ]
       }
     ]
   }

@@ -176,6 +176,18 @@ CREATE TABLE consumer_cursors (
   updated_at        TEXT    NOT NULL
 );
 
+-- PostToolUse output-scanner ledger. One row per redaction match; the hook
+-- writes here after a successful redact pass. Fire-and-forget — DB failure
+-- in the hook is swallowed so the hook always exits 0.
+CREATE TABLE redaction_events (
+    id          INTEGER PRIMARY KEY,
+    session_id  INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    pattern_name TEXT NOT NULL,
+    tool_name    TEXT NOT NULL,
+    ts           TEXT NOT NULL
+);
+CREATE INDEX ix_redaction_events_pattern ON redaction_events(pattern_name);
+
 -- Views (collapsed onto the new tables).
 CREATE VIEW v_tool_calls AS
   SELECT tc.id, tc.ts, tc.completed_ts,

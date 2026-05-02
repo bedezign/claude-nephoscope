@@ -1,6 +1,6 @@
 {
-  "venvPath": ".",
+  "venvPath": "..",
   "venv": ".venv",
-  "extraPaths": ["."],
+  "extraPaths": [".", "src"],
   "reportMissingImports": "warning"
 }

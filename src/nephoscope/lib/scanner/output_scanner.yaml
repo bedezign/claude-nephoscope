@@ -1,0 +1,21 @@
+patterns:
+  - name: anthropic_api_key
+    pattern: "sk-ant-\\S+"
+  - name: stripe_live_key
+    pattern: "sk-live-\\S+"
+  - name: stripe_live_key_alt
+    pattern: "sk_live_\\S+"
+  - name: github_personal_token
+    pattern: "ghp_\\S+"
+  - name: github_oauth_token
+    pattern: "gho_\\S+"
+  - name: aws_access_key_id
+    pattern: "AKIA[A-Z0-9]{16}"
+  - name: slack_token
+    pattern: "xox[bpors]-\\S+"
+  - name: sendgrid_key
+    pattern: "SG\\.\\S+"
+  - name: jwt
+    pattern: "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.\\S*"
+  - name: private_key_material
+    pattern: "-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----[\\s\\S]+?-----END (?:RSA |EC |OPENSSH |)PRIVATE KEY-----"
