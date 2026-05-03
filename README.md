@@ -7,6 +7,8 @@
 
 # nephoscope
 
+*The diff between stuck and done.*
+
 *Stop Claude Code asking about the same commands twice.*
 
 Claude Code asks for permission before every shell command, file write, or web fetch. That's good for safety — until you've answered the same prompt twenty times in a row. Nephoscope watches your answers, turns the recurring ones into persistent rules, and writes those rules straight into your Claude Code settings. The yellow popups quietly disappear. Everything happens locally.
