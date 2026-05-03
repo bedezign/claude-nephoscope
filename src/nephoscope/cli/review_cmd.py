@@ -1,32 +1,36 @@
-"""Interactive per-axis review CLI for permission candidates.
+"""Per-axis review CLI for permission candidates.
 
-Replaces ``src/nephoscope/learners/permission/scripts/review.sh``.
+Two driving modes:
 
-For each eligible candidate from ``propose_promotions``:
+  * **Interactive walker** (no subcommand) — prompts the human reviewer per axis
+    (verb / paths / flags / tier) for every eligible candidate. Replaces
+    ``src/nephoscope/learners/permission/scripts/review.sh``.
+
+  * **Non-interactive subcommands** (``list`` / ``show`` / ``commit``) — emit
+    the same axis choices as JSON (or human-readable text with ``--text``) so
+    a caller without a TTY can drive the workflow one candidate at a time.
+
+Axes (shared between both modes):
 
   Axis 1 (verb)  — only when ``to_pattern_form`` finds a $VAR substitution in
                    the verb (i.e. verb is an absolute path under HOME/CWD/
-                   PROJECT_ROOT). Prompts: literal / generalize / skip.
-
+                   PROJECT_ROOT).
   Axis 2 (paths) — path constraint for the rule_shape.path_spec.
-                   Prompts: a=any(NULL) / numbered path_spec variants / s=skip.
-
   Axis 3 (flags) — literal flags array vs wildcard "*".
-                   Prompts: l=literal / w=wildcard / s=skip.
+  Axis 4 (tier)  — permission tier (global / project / session).
+  Post-promote   — when flags="*" and concrete sibling rules exist: the
+                   interactive walker offers subsume; ``commit`` reports the
+                   count so the caller can decide whether to follow up.
 
-  Axis 4 (tier)  — permission tier.
-                   Prompts: g=global / p=project / s=session / skip / q=quit.
-
-  Post-promote   — when flags="*" and concrete sibling rules exist: offer subsume.
-
-Promotion delegates to ``_cmd_write_permission`` via the learner module (no
-external subprocess). MirrorHashMismatch is caught and surfaces the same
-user-facing wording as the legacy bash script.
+Promotion delegates to the learner module (no external subprocess).
+MirrorHashMismatch is caught and surfaces the same wording as the legacy bash
+script.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -317,7 +321,7 @@ def _build_path_opts(
 
 def _prompt_axis_verb(candidate: Candidate, verb_pattern: str | None) -> str | None:
     """Prompt Axis 1 (verb). Returns chosen verb, or None to signal 'skipped'."""
-    if not verb_pattern or verb_pattern == candidate.verb:
+    if not verb_pattern:
         return candidate.verb
     reply = _prompt(
         f"  Verb:  literal={candidate.verb:<40}  pattern={verb_pattern}\n"
@@ -486,31 +490,294 @@ def _review_candidate(
 
 
 # ---------------------------------------------------------------------------
-# main()
+# Non-interactive helpers (JSON-friendly views shared by list / show / commit)
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="nephoscope-review",
-        description=(
-            "Interactive review of accumulated permission candidates.\n"
-            "\n"
-            "For each candidate: per-axis prompts (verb / paths / flags) then\n"
-            "tier (session / project / global). Promotes directly into the DB\n"
-            "and syncs the JSON mirror."
-        ),
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    parser.parse_args(argv)  # currently no flags; parse for --help support
+_HASH_MISMATCH_MSG = (
+    "Settings file modified externally. Run"
+    " '/nephoscope:permissions reconcile' and retry."
+)
 
-    # Refresh candidates first (mirrors review.sh behaviour).
+
+def _summary_dict(c: Candidate) -> dict:
+    """Compact list-view summary for one candidate."""
+    return {
+        "id": c.id,
+        "verb": c.verb,
+        "subcommand": c.subcommand,
+        "flags": sorted(c.flags),
+        "observations": c.observations,
+        "distinct_sessions": c.distinct_sessions,
+    }
+
+
+def _tier_status(value: int | None, label: str, cwd: str) -> str:
+    return "ok" if value is not None else f"no {label} record for cwd={cwd}"
+
+
+def _show_dict(
+    c: Candidate,
+    home: str,
+    cwd: str,
+    project_root: str,
+    project_id: int | None,
+    session_id: int | None,
+) -> dict:
+    """Full per-axis choice set + recommendation for one candidate."""
+    variants = _pattern_variants(c, home, cwd, project_root)
+    path_opts = _build_path_opts(
+        variants["path_specs"],
+        project_root,
+        cwd,
+        home,
+        suggested=c.suggested_path_spec,
+    )
+    return {
+        **_summary_dict(c),
+        "context": {
+            "home": home or None,
+            "cwd": cwd or None,
+            "project_root": project_root or None,
+        },
+        "axes": {
+            "verb": {
+                "literal": c.verb,
+                "generalize": variants["verb_pattern"],
+            },
+            "paths": {
+                "any_label": "any (no path constraint)",
+                "options": [
+                    {"index": i + 1, "spec": opt} for i, opt in enumerate(path_opts)
+                ],
+                "suggested": c.suggested_path_spec,
+            },
+            "flags": {
+                "literal": variants["flags_literal"],
+                "wildcard": "*",
+            },
+            "tier": {
+                "global": "ok",
+                "project": _tier_status(project_id, "project", cwd),
+                "session": _tier_status(session_id, "session", cwd),
+            },
+        },
+    }
+
+
+def _print_show_text(detail: dict) -> None:
+    """Human-readable rendering for `show --text`."""
+    print(f"candidate #{detail['id']}: {detail['verb']}")
+    if detail["subcommand"]:
+        print(f"  subcommand: {detail['subcommand']}")
+    print(f"  observations: {detail['observations']}")
+    print(f"  distinct_sessions: {detail['distinct_sessions']}")
+    print(f"  flags: {detail['flags']}")
+    axes = detail["axes"]
+    print("  verb axis:")
+    print(f"    literal:    {axes['verb']['literal']}")
+    print(f"    generalize: {axes['verb']['generalize'] or '(none)'}")
+    print("  paths axis:")
+    print(f"    any:  {axes['paths']['any_label']}")
+    for opt in axes["paths"]["options"]:
+        print(f"    {opt['index']}: {opt['spec']}")
+    if axes["paths"]["suggested"]:
+        print(f"    suggested: {axes['paths']['suggested']}")
+    print("  flags axis:")
+    print(f"    literal:  {axes['flags']['literal']}")
+    print(f"    wildcard: {axes['flags']['wildcard']}")
+    print("  tier axis:")
+    for tier in ("global", "project", "session"):
+        print(f"    {tier}: {axes['tier'][tier]}")
+
+
+def _load_candidates() -> list[Candidate]:
+    """Refresh + propose; close the connection. Mirrors the interactive flow."""
     conn = connect()
     try:
         scan_candidates(conn)
-        candidates = propose_promotions(conn)
+        return propose_promotions(conn)
     finally:
         conn.close()
+
+
+def _find_candidate(candidate_id: int) -> Candidate | None:
+    return next((c for c in _load_candidates() if c.id == candidate_id), None)
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive subcommand handlers
+# ---------------------------------------------------------------------------
+
+
+def _cmd_list(args: argparse.Namespace) -> None:
+    candidates = _load_candidates()
+    rows = [_summary_dict(c) for c in candidates]
+    if args.text:
+        if not rows:
+            print("no promotion candidates meet thresholds")
+            return
+        for r in rows:
+            sub = r["subcommand"] or "-"
+            flags = json.dumps(r["flags"], separators=(",", ":"))
+            print(
+                f"#{r['id']:>4}  {r['verb']:<20}  {sub:<10}  flags={flags:<24}"
+                f"  obs={r['observations']:<5} sessions={r['distinct_sessions']}"
+            )
+        return
+    print(json.dumps(rows, indent=2))
+
+
+def _cmd_show(args: argparse.Namespace) -> int:
+    candidate = _find_candidate(args.candidate_id)
+    if candidate is None:
+        print(
+            f"no eligible candidate with id={args.candidate_id}",
+            file=sys.stderr,
+        )
+        return 1
+    home, cwd, project_root, project_id, session_id = _resolve_context()
+    detail = _show_dict(candidate, home, cwd, project_root, project_id, session_id)
+    if args.text:
+        _print_show_text(detail)
+    else:
+        print(json.dumps(detail, indent=2))
+    return 0
+
+
+def _resolve_paths_arg(raw: str, path_opts: list[str]) -> tuple[str | None, str | None]:
+    """Map ``--paths`` value to a (chosen_spec, error) pair.
+
+    Returns:
+        (None, None)       — raw=="any"; no path constraint.
+        (spec, None)       — raw matched a path option (by index or literal).
+        (None, error_msg)  — raw was invalid; ``error_msg`` describes why.
+    """
+    if raw == "any":
+        return None, None
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(path_opts):
+            return path_opts[idx], None
+        return None, (
+            f"--paths {raw}: index out of range (1..{len(path_opts)})"
+            if path_opts
+            else f"--paths {raw}: no path options for this candidate"
+        )
+    if raw in path_opts:
+        return raw, None
+    return None, (
+        f"--paths {raw}: not in this candidate's options"
+        f" ({', '.join(path_opts) or 'no options available'})"
+    )
+
+
+def _cmd_commit(args: argparse.Namespace) -> int:
+    candidate = _find_candidate(args.candidate_id)
+    if candidate is None:
+        print(
+            f"no eligible candidate with id={args.candidate_id}",
+            file=sys.stderr,
+        )
+        return 1
+
+    home, cwd, project_root, project_id, session_id = _resolve_context()
+    variants = _pattern_variants(candidate, home, cwd, project_root)
+
+    if args.verb == "generalize":
+        verb_pattern = variants["verb_pattern"]
+        if not verb_pattern:
+            print(
+                "--verb generalize: no $VAR pattern available for this candidate",
+                file=sys.stderr,
+            )
+            return 1
+        chosen_verb = verb_pattern
+    else:
+        chosen_verb = candidate.verb
+
+    chosen_flags = "*" if args.flags == "wildcard" else variants["flags_literal"]
+
+    path_opts = _build_path_opts(
+        variants["path_specs"],
+        project_root,
+        cwd,
+        home,
+        suggested=candidate.suggested_path_spec,
+    )
+    chosen_path, err = _resolve_paths_arg(args.paths, path_opts)
+    if err is not None:
+        print(err, file=sys.stderr)
+        return 1
+
+    tier_session: int | None = None
+    tier_project: int | None = None
+    if args.tier == "project":
+        if project_id is None:
+            print(
+                f"--tier project: no project record for cwd={cwd}",
+                file=sys.stderr,
+            )
+            return 1
+        tier_project = project_id
+    elif args.tier == "session":
+        if session_id is None:
+            print(
+                f"--tier session: no session record for cwd={cwd}",
+                file=sys.stderr,
+            )
+            return 1
+        tier_session = session_id
+
+    try:
+        _do_promote(
+            chosen_verb,
+            candidate.subcommand,
+            chosen_flags,
+            chosen_path,
+            args.tier,
+            tier_session,
+            tier_project,
+        )
+    except MirrorHashMismatch:
+        print(_HASH_MISMATCH_MSG, file=sys.stderr)
+        return 1
+
+    siblings = 0
+    if chosen_flags == "*":
+        siblings = _count_concrete_siblings(
+            candidate.verb,
+            candidate.subcommand,
+            args.tier,
+            tier_session,
+            tier_project,
+        )
+
+    print(
+        json.dumps(
+            {
+                "result": "promoted",
+                "candidate_id": candidate.id,
+                "verb": chosen_verb,
+                "subcommand": candidate.subcommand,
+                "flags": chosen_flags,
+                "path_spec": chosen_path,
+                "tier": args.tier,
+                "subsumable_concrete_siblings": siblings,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Interactive walker (default mode — no subcommand)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_interactive() -> int:
+    candidates = _load_candidates()
 
     if not candidates:
         print("no promotion candidates meet thresholds")
@@ -530,11 +797,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate, home, cwd, project_root, project_id, session_id
             )
         except MirrorHashMismatch:
-            print(
-                "Settings file modified externally. Run"
-                " '/nephoscope:permissions reconcile' and retry.",
-                file=sys.stderr,
-            )
+            print(_HASH_MISMATCH_MSG, file=sys.stderr)
             return 1
 
         if result == "promoted":
@@ -547,6 +810,83 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(f"summary: promoted {promoted}, skipped {skipped}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="nephoscope-review",
+        description=(
+            "Review accumulated permission candidates.\n"
+            "\n"
+            "Without a subcommand, walks each candidate interactively (verb /\n"
+            "paths / flags / tier prompts).\n"
+            "\n"
+            "With a subcommand, exposes the same axis choices as JSON so a\n"
+            "non-TTY caller can drive list → show → commit one candidate at\n"
+            "a time."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_list = sub.add_parser(
+        "list",
+        help="emit eligible candidates (id + summary) as JSON or text",
+    )
+    p_list.add_argument("--text", action="store_true", help="human-readable format")
+
+    p_show = sub.add_parser(
+        "show",
+        help="emit the four-axis choice set for one candidate",
+    )
+    p_show.add_argument("candidate_id", type=int)
+    p_show.add_argument("--text", action="store_true", help="human-readable format")
+
+    p_commit = sub.add_parser(
+        "commit",
+        help="promote one candidate with explicit per-axis choices",
+    )
+    p_commit.add_argument("candidate_id", type=int)
+    p_commit.add_argument(
+        "--verb",
+        choices=["literal", "generalize"],
+        default="literal",
+        help="use the candidate's verb (literal) or its $VAR pattern (generalize)",
+    )
+    p_commit.add_argument(
+        "--paths",
+        default="any",
+        help="'any', a 1-based index from `show`, or one of its option spec strings",
+    )
+    p_commit.add_argument(
+        "--flags",
+        choices=["literal", "wildcard"],
+        default="literal",
+        help="store the literal flags (literal) or replace with '*' (wildcard)",
+    )
+    p_commit.add_argument(
+        "--tier",
+        choices=["global", "project", "session"],
+        required=True,
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.cmd == "list":
+        _cmd_list(args)
+        return 0
+    if args.cmd == "show":
+        return _cmd_show(args)
+    if args.cmd == "commit":
+        return _cmd_commit(args)
+    return _cmd_interactive()
 
 
 if __name__ == "__main__":  # pragma: no cover

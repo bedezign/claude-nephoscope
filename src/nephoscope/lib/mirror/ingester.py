@@ -117,6 +117,26 @@ def _validate_entry_chars(entry: str, err_fn: Any) -> None:
         raise err_fn("entry contains unbalanced quote characters")
 
 
+def _is_valid_glob(s: str) -> bool:
+    """Return True if ``s`` is an accepted ``*``-glob path spec form.
+
+    Accepted forms:
+    - ``**/...``  — recursive prefix with a path fragment (e.g. ``**/.env``).
+    - ``*/...``   — single-level wildcard directory prefix (e.g. ``*/foo``).
+    - ``*.<ext>`` — extension glob (e.g. ``*.pem``, ``*.env``).
+
+    Rejected: bare ``*``, bare ``**``, ``**/`` alone (no fragment), and
+    ``*foo`` (single ``*`` not followed by ``/`` or ``.``).
+    """
+    if s.startswith("**/"):
+        return len(s) > 3  # something must follow the **/
+    if s.startswith("*"):
+        if len(s) < 2:
+            return False  # bare *
+        return s[1] in {".", "/"}  # *.ext or */something
+    return False
+
+
 def _parse_paren_entry(entry: str, err_fn: Any) -> dict[str, Any]:
     """Parse a ``Verb(args)`` form entry. Caller has confirmed ``(`` in entry."""
     if not entry.endswith(")"):
@@ -146,8 +166,21 @@ def _parse_paren_entry(entry: str, err_fn: Any) -> dict[str, Any]:
         }
 
     if tc == "file":
-        if not args.startswith("//"):
-            raise err_fn(f"file tool path spec must start with '//' (got {args!r})")
+        # Two accepted forms:
+        #   //abs/path       — Claude Code's filesystem-absolute encoding.
+        #   *-glob           — portable glob patterns used in deny rules where
+        #                      an absolute prefix would over-anchor the match.
+        #                      Accepted: **/fragment, */dir, *.ext.
+        #                      Rejected: bare *, bare **, **/ alone, *foo (no
+        #                      separator after the leading *).
+        # The serializer emits both forms; everything else (bare paths, `~/`,
+        # single-slash project-root) is rejected — those forms are not
+        # round-trippable through the current serializer.
+        if not (args.startswith("//") or _is_valid_glob(args)):
+            raise err_fn(
+                f"file tool path spec must start with '//' or be a valid glob "
+                f"('**/...', '*/...', '*.<ext>'); got {args!r}"
+            )
         return {
             "tool": outer_verb,
             "verb": outer_verb,

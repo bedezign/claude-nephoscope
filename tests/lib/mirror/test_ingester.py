@@ -132,7 +132,13 @@ class TestParseBash:
 
 
 class TestParseFileTools:
-    """File entries: ``<Verb>(//abs/path)``.  Path is stored including the ``//``."""
+    """File entries: ``<Verb>(//abs/path)`` or ``<Verb>(*-glob)``.
+
+    The ``//abs`` form is the canonical Claude Code absolute-path encoding;
+    the ``*``-leading glob form (e.g. ``Read(**/.env)``) is the cwd-relative
+    form Claude Code accepts for portable deny rules.  Both are stored in
+    ``path_spec`` verbatim — the prefix carries the matching semantics.
+    """
 
     def test_read_glob_path(self):
         row = parse_entry("Read(//home/user/.claude/**)", source="test")
@@ -169,6 +175,39 @@ class TestParseFileTools:
     def test_read_pyenv_python_glob(self):
         row = parse_entry("Read(//home/user/.pyenv/versions/**)", source="test")
         assert row["path_spec"] == "//home/user/.pyenv/versions/**"
+        assert row["tool_class"] == "file"
+
+    def test_read_relative_glob_double_star(self):
+        row = parse_entry("Read(**/.env)", source="test")
+        assert row["tool"] == "Read"
+        assert row["path_spec"] == "**/.env"
+        assert row["tool_class"] == "file"
+
+    def test_read_relative_glob_recursive(self):
+        row = parse_entry("Read(**/secrets/**)", source="test")
+        assert row["path_spec"] == "**/secrets/**"
+        assert row["tool_class"] == "file"
+
+    def test_write_relative_glob(self):
+        row = parse_entry("Write(**/.env)", source="test")
+        assert row["tool"] == "Write"
+        assert row["path_spec"] == "**/.env"
+        assert row["tool_class"] == "file"
+
+    def test_edit_relative_glob(self):
+        row = parse_entry("Edit(**/.ssh/**)", source="test")
+        assert row["tool"] == "Edit"
+        assert row["path_spec"] == "**/.ssh/**"
+        assert row["tool_class"] == "file"
+
+    def test_read_relative_glob_extension(self):
+        row = parse_entry("Read(**/*.pem)", source="test")
+        assert row["path_spec"] == "**/*.pem"
+        assert row["tool_class"] == "file"
+
+    def test_read_single_star_glob(self):
+        row = parse_entry("Read(*.env)", source="test")
+        assert row["path_spec"] == "*.env"
         assert row["tool_class"] == "file"
 
 
@@ -296,17 +335,19 @@ class TestMalformedEntries:
         with pytest.raises(IngesterError, match="missing closing parenthesis"):
             parse_entry("Read(//path/**", source="test")
 
-    def test_file_tool_missing_double_slash_raises(self):
-        with pytest.raises(IngesterError, match="must start with '//'"):
+    def test_file_tool_bare_path_raises(self):
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
             parse_entry("Read(foo/bar)", source="test")
 
     def test_file_tool_single_slash_raises(self):
-        # Single slash is not the canonical form — requires double slash.
-        with pytest.raises(IngesterError, match="must start with '//'"):
+        # Single slash is not accepted — Claude Code's project-root-relative
+        # form is not currently round-trippable through the serializer
+        # (which would silently rewrite it to `//path`).
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
             parse_entry("Read(/home/user/file)", source="test")
 
     def test_file_tool_relative_path_raises(self):
-        with pytest.raises(IngesterError, match="must start with '//'"):
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
             parse_entry("Read(relative/path)", source="test")
 
     def test_mcp_with_parens_raises(self):
@@ -332,6 +373,30 @@ class TestMalformedEntries:
         msg = str(exc_info.value)
         assert msg.startswith("Malformed permission entry")
         assert " in /some/path" in msg
+
+    # ------------------------------------------------------------------
+    # Gap 4 — bare * / ** / **/ / *foo (no slash, no dot) must all RAISE
+    # ------------------------------------------------------------------
+
+    def test_bare_star_raises(self):
+        """Read(*) — bare single star — is not a valid glob."""
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
+            parse_entry("Read(*)", source="test")
+
+    def test_bare_double_star_raises(self):
+        """Read(**) — bare double star — is not a valid glob."""
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
+            parse_entry("Read(**)", source="test")
+
+    def test_bare_double_star_slash_raises(self):
+        """Read(**/) — trailing slash with no path fragment — is not a valid glob."""
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
+            parse_entry("Read(**/)", source="test")
+
+    def test_star_no_slash_no_dot_raises(self):
+        """Read(*foo) — single star not followed by '/' or '.' — is not a valid glob."""
+        with pytest.raises(IngesterError, match=r"file tool path spec"):
+            parse_entry("Read(*foo)", source="test")
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +617,18 @@ class TestRoundTrip:
 
     def test_write_path_roundtrip(self):
         self._roundtrip("Write(//home/user/data/**)")
+
+    def test_read_relative_glob_roundtrip(self):
+        self._roundtrip("Read(**/.env)")
+
+    def test_write_relative_glob_roundtrip(self):
+        self._roundtrip("Write(**/.env)")
+
+    def test_edit_relative_glob_recursive_roundtrip(self):
+        self._roundtrip("Edit(**/.ssh/**)")
+
+    def test_read_single_star_roundtrip(self):
+        self._roundtrip("Read(*.pem)")
 
     def test_mcp_fully_qualified_roundtrip(self):
         self._roundtrip("mcp__claude-peers__send_message")

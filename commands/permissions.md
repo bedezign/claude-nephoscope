@@ -161,13 +161,57 @@ Emit eligible candidates (thresholds met, not on deny list) for review.
 
 ### `review`
 
-Interactively walk through candidates with per-axis (verb/paths/flags) and tier prompts.
+Walk through eligible candidates one at a time, choosing per-axis (verb / paths / flags) and tier for each. The `nephoscope-review` console script has two modes:
 
-Invoke the `nephoscope-review` console script:
+- **Interactive (TTY mode)** — prompts the user for each axis. Runs only in a real terminal. Cannot be driven from a Bash tool call or a `!` prefix; both supply EOF for every prompt and silently promote with defaults.
+- **Non-interactive subcommands** — `list` / `show <id>` / `commit <id>`. These emit JSON (or `--text`) so the LLM can drive the same workflow from Bash without a TTY.
 
-```bash
-"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review"
+When the user types `/nephoscope:permissions review`, drive the LLM-friendly path:
+
+1. **Enumerate candidates.** Default to JSON for parsing.
+
+   ```bash
+   "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review" list
+   ```
+
+   Output is an array of `{id, verb, subcommand, flags, observations, distinct_sessions}`.
+
+2. **Inspect one candidate.** Pick an id from `list`, then fetch the full per-axis choice set:
+
+   ```bash
+   "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review" show <id>
+   ```
+
+   The payload's `axes` block surfaces:
+   - `verb.literal` and `verb.generalize` (the latter is `null` unless the verb has a `$VAR` pattern).
+   - `paths.options` — an indexed list of path-spec choices.
+   - `paths.suggested` — non-null when ≥90% of stored positional paths fall under one project root or `$HOME` (otherwise `null`).
+   - `flags.literal` (the candidate's own flags as a minified JSON array) and `flags.wildcard` (`"*"`).
+   - `tier.{global,project,session}` — `"ok"` when available, otherwise an explanation of why that tier cannot be selected for the current cwd.
+
+3. **Commit a decision.** All axes default to literal/any; supply only the ones you want to change.
+
+   ```bash
+   "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review" commit <id> \
+       [--verb literal|generalize] \
+       [--paths any|<index>|<spec>] \
+       [--flags literal|wildcard] \
+       --tier global|project|session
+   ```
+
+   `--paths` accepts the literal `any`, a 1-based index from `show`'s `paths.options`, or one of the option spec strings (e.g. `'$PROJECT_ROOT/**'`). Other strings are rejected.
+
+   Output is `{result: "promoted", candidate_id, verb, subcommand, flags, path_spec, tier, subsumable_concrete_siblings}`. When `flags=wildcard` and `subsumable_concrete_siblings > 0`, follow up with `nephoscope-learn subsume-siblings` (see `promote` below) if the user wants to clean up.
+
+4. **MirrorHashMismatch** (exit 1, message to stderr) means the settings file changed externally — surface that to the user verbatim and suggest `/nephoscope:permissions reconcile`.
+
+**To run the interactive walker** (TTY-only), the user must invoke it themselves in their terminal — it cannot be driven from this session. Tell them to run:
+
 ```
+~/.claude/plugins/data/nephoscope-bedezign-nephoscope/.venv/bin/nephoscope-review
+```
+
+(absolute path, not via `!` — `!` does not provide a TTY).
 
 ### `list`
 
