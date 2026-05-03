@@ -71,6 +71,24 @@ python3 install.py --source .  # install from local repo clone
 
 Use this when bootstrapping fresh environments where Claude Code isn't yet set up.
 
+## Upgrading
+
+Pull the latest published version from a Claude Code session:
+
+```
+/plugin update nephoscope@bedezign
+```
+
+**Schema migrations.** When a version bump includes database changes, apply them after the update:
+
+```bash
+nephoscope migrate
+```
+
+`migrate` is safe to run at any time — it applies only pending migrations and does nothing if the schema is already current.
+
+**Seeded rules after an upgrade.** Profiles and credential-leak rules that nephoscope seeded into your database stay as-is across upgrades. Rules you removed stay removed; new versions never overwrite your existing rules. New versions may ship additional credential-leak patterns or new profiles — check the [CHANGELOG](../CHANGELOG.md) and [credential-leak coverage](credential-leak-coverage.md) after upgrading to see what's new.
+
 ## First-run bootstrap
 
 The first time Claude Code loads the plugin, the `SessionStart` hook runs `hooks/bootstrap.sh`, which:
@@ -121,6 +139,23 @@ Profiles that ship out of the box:
 `nephoscope-init` also offers these interactively when stdin is a TTY, but you can load any profile at any time with the slash command above.
 
 See [Configuration file](#configuration-file) in [Reference](reference.md) for environment variables and config options, and [Placeholders](how-it-works.md#placeholders) for how `$TRUSTED_DIR` works.
+
+### Adding trusted directories later
+
+To add a trusted directory after the initial bootstrap, edit the config file directly:
+
+```toml
+# ~/.config/nephoscope/config.toml
+trusted_dirs = ["/home/you/code/myproject", "/home/you/work/client"]
+```
+
+The change takes effect when nephoscope next reconciles its mirror — either automatically on the next session start, or immediately via:
+
+```
+/nephoscope:permissions reconcile
+```
+
+Alternatively, set `auto_register_project_paths = true` in the config to have nephoscope silently add each new working directory to `trusted_dirs` on first visit.
 
 ## Verify install
 

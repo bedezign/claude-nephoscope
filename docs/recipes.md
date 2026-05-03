@@ -65,6 +65,29 @@ Then load whichever match your stack:
 
 ---
 
+## Allow a two-word-subcommand tool
+
+**Problem.** You use a CLI where the subcommand is two words — `vault kv get`, `kubectl get pods`, `terraform state list`. A rule with just `--subcommand kv` won't match; you need the canonical two-word join.
+
+```
+/nephoscope:permissions promote --verb vault --subcommand 'kv get' --flags '*' --tier global
+```
+
+**What this does.** Creates an allow-rule for `vault kv get` with any flags. The value `'kv get'` is the canonical form — both words joined by a single space. Other `vault` subcommands (`vault kv put`, `vault login`) are not covered and need their own rules.
+
+Some real-world examples:
+
+| Command | `--verb` | `--subcommand` |
+|---|---|---|
+| `vault kv get` | `vault` | `'kv get'` |
+| `doppler secrets get` | `doppler` | `'secrets get'` |
+| `kubectl get pods` | `kubectl` | `'get pods'` |
+| `terraform state list` | `terraform` | `'state list'` |
+
+See [Multi-word subcommands](reference.md#multi-word-subcommands) for the full canonical-form rule.
+
+---
+
 ## Reject all `chmod` on your home directory
 
 **Problem.** You never want Claude to change file permissions in your home tree, full stop.

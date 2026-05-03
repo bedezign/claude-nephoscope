@@ -101,7 +101,7 @@ Apply one:
 /nephoscope:permissions profiles load python-dev
 ```
 
-You'll see a summary of what the profile contains and a `[Y/n]` confirm before any rules are inserted.
+You'll see a summary of what the profile contains and a `[Y/n]` confirm before any rules are inserted. The summary is the full preview — it lists every rule that would be added. Answer `n` to cancel cleanly without any changes.
 
 Multiple profiles can be loaded in one command:
 
@@ -146,6 +146,25 @@ nephoscope-permissions stats --show-unused
 
 Prints a summary of how often each permission rule has fired: total approved/rejected counts, total hits, top 10 rules by hit count, and the most recently matched rule. Pass `--show-unused` to list every rule with zero hits — useful for pruning stale entries.
 
+## Routine maintenance
+
+Nephoscope accumulates ask records, candidates, and session-tier rules over time. Running a periodic sweep keeps the database lean and the queue manageable.
+
+The easiest way is to run everything in one step:
+
+```
+/nephoscope:permissions sweep
+```
+
+`sweep` runs two steps in sequence:
+
+- **`prune`** — removes candidates that are no longer backed by pending asks. These are patterns nephoscope noticed but that have since gone quiet. Default cutoff: 30 days. Pass `--stale-days N` to change it.
+- **`gc`** — removes session-tier rules from idle sessions and clears stale pending asks. Pass `--session-idle-days N` (default: 7) and `--ask-pending-hours H` (default: 72) to adjust the cutoffs.
+
+Neither step touches your approved or rejected rules — only candidates, session rules, and stale ask records are affected.
+
+Running `sweep` once a month is plenty for most users. Run it sooner if `/nephoscope:permissions status` shows a large ask or candidate queue that isn't shrinking on its own.
+
 ## Undoing a rule
 
 If you promoted something by mistake, or you changed your mind:
@@ -173,6 +192,8 @@ Most likely explanations, in order:
 1. **You promoted at the session tier and started a new chat.** Session-tier rules live only for the current Claude Code conversation. When the chat ends, the rule is gone. Run `/nephoscope:permissions status` — if the rule you expected is missing, re-promote at `--tier project` or `--tier global` so it sticks.
 2. **The flags don't match.** A rule for `rm` with `--flags '[]'` (no options) won't match `rm -rf`. Use `--flags '*'` if you want any options allowed, or list exactly the flags you use. Re-run `/nephoscope:permissions list` to see what's actually stored.
 3. **The path-spec doesn't cover the path.** `$PROJECT_ROOT/**` matches anywhere in the current project but nothing outside it. If you're running the command from a different working directory, check what `$PROJECT_ROOT` resolves to.
+4. **The subcommand isn't in canonical form.** Commands like `vault kv get` are stored with subcommand `kv get` — both words joined by one space. A rule written with `--subcommand kv` alone won't match. Run `/nephoscope:permissions list` to see the exact subcommand value stored; it must match character-for-character. See [Multi-word subcommands](reference.md#multi-word-subcommands).
+5. **The settings file drifted.** If something edited your `~/.claude/settings.json` or `.claude/settings.local.json` outside of nephoscope — another tool, a manual edit, or Claude Code's own "allow always" option — the database and settings file can fall out of sync. The rule exists in the database but is absent from (or overridden in) the file Claude Code reads. Run `/nephoscope:permissions reconcile` to detect and fix the difference. See [mirror-status shows a mismatch](#mirror-status-shows-a-mismatch) for details.
 
 ### `mirror-status` shows a mismatch
 
