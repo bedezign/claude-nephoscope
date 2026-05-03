@@ -1,5 +1,16 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-05-03
+
+### Added
+
+- `nephoscope-review` non-interactive subcommands (`list` / `show` / `commit`) — emit JSON (or `--text`) so the LLM-driven `/nephoscope:permissions review` flow can iterate one candidate at a time without a TTY. The interactive walker (no subcommand) still works for direct terminal use.
+- File-tool path specs now accept the cwd-relative `*`-glob form (e.g. `Read(**/.env)`, `Read(*.pem)`) for portable deny rules, alongside the existing filesystem-absolute `//abs/path` form.
+
+### Changed
+
+- Stricter validation on file-tool path specs: bare `*`, bare `**`, `**/`, and `*foo` (no `/`, no `.`) now raise instead of being stored verbatim.
+
 ## [0.3.1] — 2026-05-03
 
 First publicly released version.

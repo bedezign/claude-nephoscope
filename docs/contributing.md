@@ -120,13 +120,21 @@ The JSON mirror is the primary gate: once a rule is in `settings.json`, the nati
 
 ## Review CLI
 
-Candidates accumulate as tool calls are observed. The primary entry is `/nephoscope:permissions review` from a Claude Code session. To invoke directly from a terminal:
+Candidates accumulate as tool calls are observed. The primary entry is `/nephoscope:permissions review` from a Claude Code session — the LLM drives a per-axis walkthrough using the non-interactive subcommands described below.
+
+The `nephoscope-review` console script has two modes:
+
+**Interactive walker** — invoke without a subcommand:
 
 ```bash
 nephoscope-review
 ```
 
-Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). Calls into `lib.db` and `learner` directly; on `MirrorHashMismatch` it stops and instructs the user to run `/nephoscope:permissions reconcile`.
+Per eligible candidate: per-axis prompts (verb / paths / flags — literal or generalize) then tier (session / project / global). Requires a real TTY.
+
+**Non-interactive subcommands** — `list` / `show <id>` / `commit <id> --tier <tier> [--verb literal|generalize] [--paths any|<index>|<spec>] [--flags literal|wildcard]`. Emit JSON by default, or text with `--text`. Used by the slash-command flow when there is no TTY.
+
+Both modes call into `lib.db` and `learner` directly; on `MirrorHashMismatch` they stop and instruct the user to run `/nephoscope:permissions reconcile`.
 
 ## Fixture round-trip
 
