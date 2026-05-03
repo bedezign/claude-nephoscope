@@ -83,6 +83,36 @@ At the end of each candidate you either approve it (becomes an allow-rule), reje
 
 If you need to bail out mid-review, hit Ctrl-C. Your already-answered candidates stay as rules; the unanswered ones remain candidates for next time.
 
+## Loading profiles
+
+Use a profile when you're starting fresh, or when you're about to dive into a stack you haven't worked in yet and would rather pre-approve the obvious commands than wait for the ask queue to build up.
+
+Browse what's available:
+
+```
+/nephoscope:permissions profiles list
+```
+
+This prints each profile's id and a one-line description.
+
+Apply one:
+
+```
+/nephoscope:permissions profiles load python-dev
+```
+
+You'll see a summary of what the profile contains and a `[Y/n]` confirm before any rules are inserted.
+
+Multiple profiles can be loaded in one command:
+
+```
+/nephoscope:permissions profiles load dev-tools python-dev
+```
+
+Profiles are idempotent — loading the same one twice is safe and inserts nothing the second time. They also never overwrite or remove rules you've already written; loading a profile only adds.
+
+The `credential-file-tools` profile is worth calling out specifically — it adds file-tool deny rules (Read, Write, Edit, and MultiEdit blocked on credential paths like `.env*`, `*.pem`, `~/.aws/**`, `~/.ssh/**`), which is the complement to the Bash-level credential blocking and output-scanner redaction that are already active by default.
+
 ## Writing a rule by hand
 
 Worked example: you keep getting asked about `rm` while working inside one specific project. You don't want to allow `rm` everywhere — that's too broad — but you do trust yourself to remove files inside this project's tree.

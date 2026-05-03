@@ -348,3 +348,74 @@ class TestExtractAddDirArgs:
             "expected a stderr observability signal on PermissionError, got none; "
             f"stderr was: {captured.err!r}"
         )
+
+
+class TestObservationsDbPath:
+    def test_env_var_tier_overrides_everything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OBSERVABILITY_DB", "/tmp/from-env.db")
+        monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+        result = paths.observations_db_path()
+        assert result == pathlib.Path("/tmp/from-env.db"), (
+            f"OBSERVABILITY_DB env var must win; got {result!r}"
+        )
+
+    def test_config_tier_used_when_env_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        from nephoscope.config import get_config
+
+        config_file = tmp_path / "nephoscope.toml"
+        config_file.write_text('database = "/data/cfg.db"\n')
+
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(config_file))
+        monkeypatch.delenv("OBSERVABILITY_DB", raising=False)
+        monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+
+        get_config.cache_clear()
+        try:
+            result = paths.observations_db_path()
+        finally:
+            get_config.cache_clear()
+
+        assert result == pathlib.Path("/data/cfg.db"), (
+            f"config database field must be used when OBSERVABILITY_DB is absent; got {result!r}"
+        )
+
+    def test_plugin_data_tier_used_when_config_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        from nephoscope.config import get_config
+
+        nonexistent_config = tmp_path / "no-config.toml"
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(nonexistent_config))
+        monkeypatch.delenv("OBSERVABILITY_DB", raising=False)
+        monkeypatch.setenv("CLAUDE_PLUGIN_DATA", "/tmp/plugin")
+
+        get_config.cache_clear()
+        try:
+            result = paths.observations_db_path()
+        finally:
+            get_config.cache_clear()
+
+        assert result == pathlib.Path("/tmp/plugin/observations.db"), (
+            f"CLAUDE_PLUGIN_DATA tier must be used when config has no database; got {result!r}"
+        )
+
+    def test_hard_fail_when_nothing_configured(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        from nephoscope.config import get_config
+
+        nonexistent_config = tmp_path / "no-config.toml"
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(nonexistent_config))
+        monkeypatch.delenv("OBSERVABILITY_DB", raising=False)
+        monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+
+        get_config.cache_clear()
+        try:
+            with pytest.raises(RuntimeError, match="nephoscope init"):
+                paths.observations_db_path()
+        finally:
+            get_config.cache_clear()

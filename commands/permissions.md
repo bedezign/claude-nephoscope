@@ -166,7 +166,7 @@ Interactively walk through candidates with per-axis (verb/paths/flags) and tier 
 Invoke the `nephoscope-review` console script:
 
 ```bash
-nephoscope-review
+"${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review"
 ```
 
 ### `list`

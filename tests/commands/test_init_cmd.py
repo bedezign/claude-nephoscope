@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Generator
 from pathlib import Path
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -219,3 +222,89 @@ class TestInitCmdSecretManagerFixture:
                 )
         finally:
             conn.close()
+
+
+class TestEnsureDatabaseInConfig:
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self) -> Generator[None, None, None]:
+        from nephoscope.config import get_config
+
+        get_config.cache_clear()
+        yield
+        get_config.cache_clear()
+
+    def test_writes_database_key_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from nephoscope.cli.init_cmd import _ensure_database_in_config
+
+        config_path = tmp_path / "nephoscope.toml"
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(config_path))
+
+        _ensure_database_in_config(Path("/data/obs.db"))
+
+        assert config_path.exists(), (
+            "config file must be created by _ensure_database_in_config"
+        )
+        content = config_path.read_text()
+        assert "database" in content, (
+            f'expected "database" key in config, got: {content!r}'
+        )
+        assert "/data/obs.db" in content, (
+            f'expected "/data/obs.db" value in config, got: {content!r}'
+        )
+
+    def test_idempotent_when_key_already_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from nephoscope.cli.init_cmd import _ensure_database_in_config
+
+        config_path = tmp_path / "nephoscope.toml"
+        config_path.write_text('database = "/data/existing.db"\n')
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(config_path))
+
+        _ensure_database_in_config(Path("/data/new.db"))
+
+        content = config_path.read_text()
+        assert "/data/existing.db" in content, (
+            f"existing database value must not be overwritten; got: {content!r}"
+        )
+        assert "/data/new.db" not in content, (
+            f"new path must not replace existing database value; got: {content!r}"
+        )
+
+    def test_clears_get_config_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from nephoscope.cli.init_cmd import _ensure_database_in_config
+        from nephoscope.config import get_config
+
+        config_path = tmp_path / "nephoscope.toml"
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(config_path))
+
+        _ensure_database_in_config(Path("/data/obs.db"))
+
+        config = get_config()
+        assert config.database == "/data/obs.db", (
+            f"get_config() must reflect freshly-written value after cache clear; "
+            f"got {config.database!r}"
+        )
+
+    def test_preserves_existing_config_keys(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from nephoscope.cli.init_cmd import _ensure_database_in_config
+
+        config_path = tmp_path / "nephoscope.toml"
+        config_path.write_text('trusted_dirs = ["/tmp/ws"]\n')
+        monkeypatch.setenv("NEPHOSCOPE_CONFIG", str(config_path))
+
+        _ensure_database_in_config(Path("/data/obs.db"))
+
+        content = config_path.read_text()
+        assert "/tmp/ws" in content, (
+            f"pre-existing trusted_dirs must survive _ensure_database_in_config; got: {content!r}"
+        )
+        assert "/data/obs.db" in content, (
+            f"new database value must be present after write; got: {content!r}"
+        )

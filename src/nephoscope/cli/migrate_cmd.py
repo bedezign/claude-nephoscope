@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 from pathlib import Path
 
 from nephoscope.learners.permission.canonicalize import normalize_flags
@@ -259,7 +260,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    db_path = Path(args.db) if args.db else observations_db_path()
+    if args.db:
+        db_path = Path(args.db)
+    else:
+        try:
+            db_path = observations_db_path()
+        except RuntimeError:
+            print(
+                "nephoscope-migrate: no database path configured — set OBSERVABILITY_DB,"
+                " add 'database = ...' to config, or pass --db.",
+                file=sys.stderr,
+            )
+            return 1
     if not db_path.exists():
         log.error("DB not found: %s", db_path)
         return 1

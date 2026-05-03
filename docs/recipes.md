@@ -10,6 +10,24 @@ For concept background, see [how it works](how-it-works.md). For hands-on walkth
 
 ---
 
+## Jump-start with a profile
+
+**Problem.** Starting from a blank install, Claude will ask about every command. If you already know which tools you use, you'd rather pre-approve the obvious ones than wait for the queue to build up.
+
+```
+/nephoscope:permissions profiles list
+```
+
+Then load whichever match your stack:
+
+```
+/nephoscope:permissions profiles load dev-tools python-dev
+```
+
+**What this does.** `profiles list` shows every bundled profile with its id and a short description. `profiles load` inserts the selected profiles' rules idempotently and syncs the mirror so Claude Code picks them up immediately. A `[Y/n]` prompt shows a summary of what will be added before anything is written. Combine multiple profile ids in one command — they're applied in order and any rule already present is skipped. `project-dev` is the broadest profile (full file access inside trusted directories, plus `python3`/`python`/`bash` script execution) and should only be loaded once you've configured `trusted_dirs`.
+
+---
+
 ## Allow `ls` and `cat` everywhere
 
 **Problem.** Every time Claude wants to list a directory or peek at a file, you get a popup. Both commands are read-only and you trust them anywhere.

@@ -93,17 +93,32 @@ Use `--no-workspace-prompts` to suppress interactive prompts (trusted directorie
 
 ### Workspace-roots configuration
 
-After DB init, `nephoscope-init` may prompt for **trusted directories** — top-level project directories you want pre-approved for all file access — and then offer a numbered menu to apply optional permission profiles. Both prompts only run when stdin is a TTY, so they do not fire when bootstrap runs from Claude Code, in a pipe, or in CI. You can suppress them explicitly using `--no-workspace-prompts`.
+After DB init, `nephoscope-init` may prompt for **trusted directories** — top-level project directories you want pre-approved for all file access. The prompt only runs when stdin is a TTY, so it does not fire when bootstrap runs from Claude Code, in a pipe, or in CI. You can suppress it explicitly using `--no-workspace-prompts`.
 
 If you enter paths at the prompt, each is canonicalized (tilde-expanded and realpath-resolved) and written to `~/.config/nephoscope/config.toml` under the `trusted_dirs` key. Paths you add become eligible for the `$TRUSTED_DIR` placeholder in rules. Pressing Enter on a blank line ends the prompt; nothing is written if no paths are entered.
 
-**Available profiles:**
+#### Jump-starting with a profile
 
+Profiles are bundles of pre-tested rules for common tools — load one and you get a useful starting point without waiting for nephoscope to learn your patterns. Browse what ships with the plugin, then load whichever match your stack:
+
+```
+/nephoscope:permissions profiles list
+/nephoscope:permissions profiles load python-dev
+```
+
+Profiles that ship out of the box:
+
+- `credential-file-tools` — Deny Claude Code's file tools (Read, Write, Edit, MultiEdit) against credential paths
 - `dev-tools` — curl, wget, make, openssl, touch, man
 - `python-dev` — uv, ruff, pytest, pyright, mypy, pip (read-only subcommands)
 - `javascript` — node, npx, deno (scoped to trusted dirs), npm/yarn/pnpm subcommands, tsc, eslint, vite, vitest
+- `git` — Git version control — approve common read-only commands
 - `devops` — kubectl, helm, docker, terraform, ansible (read/inspect subcommands)
 - `project-dev` — full file read/write/edit access within trusted project directories, plus python3/python/bash script execution
+
+`credential-file-tools` is the profile that covers the file-tool layer of the credential-leak protection — loading it adds Read, Write, Edit, and MultiEdit deny rules for credential paths on top of the Bash-level blocking and output-scanner redaction that ship active by default.
+
+`nephoscope-init` also offers these interactively when stdin is a TTY, but you can load any profile at any time with the slash command above.
 
 See [Configuration file](#configuration-file) in [Reference](reference.md) for environment variables and config options, and [Placeholders](how-it-works.md#placeholders) for how `$TRUSTED_DIR` works.
 
@@ -177,6 +192,8 @@ Verify the rule landed:
 ```
 
 The *approved / global* cell should show one more than before. From now on, Claude Code won't ask about `ls` again.
+
+**Terminal use.** The `nephoscope` command is also available at the terminal for scripting or when you're working outside a Claude Code session: `nephoscope stats`, `nephoscope reconcile`, `nephoscope mirror-status`, and others. See [Reference](reference.md) for the full list.
 
 ## Next
 

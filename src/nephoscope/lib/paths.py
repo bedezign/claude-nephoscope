@@ -5,8 +5,8 @@ All lookups are lazy (evaluated on call, not at import) so tests using
 
 Resolution order for each resource:
 
-- Observations DB:     ``OBSERVABILITY_DB`` → ``${CLAUDE_PLUGIN_DATA}/observations.db``
-                       → ``~/.cache/nephoscope/observations.db``
+- Observations DB:     ``OBSERVABILITY_DB`` → config ``database`` key
+                       → ``${CLAUDE_PLUGIN_DATA}/observations.db`` → ``RuntimeError``
 - Disable marker:      ``NEPHOSCOPE_DISABLE_MARKER`` → ``${CLAUDE_PLUGIN_DATA}/disabled``
                        → ``~/.config/nephoscope/disabled``
 - Instincts directory: ``NEPHOSCOPE_INSTINCT_DIR`` → ``${CLAUDE_PLUGIN_DATA}/instincts``
@@ -19,6 +19,8 @@ import os
 import sys
 from pathlib import Path
 
+from nephoscope.config import get_config
+
 
 def _plugin_data_dir() -> Path | None:
     """Return ``${CLAUDE_PLUGIN_DATA}`` as a Path, or None if unset/empty."""
@@ -29,16 +31,22 @@ def _plugin_data_dir() -> Path | None:
 def observations_db_path() -> Path:
     """Resolve the observations DB path.
 
-    Order: ``OBSERVABILITY_DB`` env > ``${CLAUDE_PLUGIN_DATA}/observations.db``
-    > ``~/.cache/nephoscope/observations.db``.
+    Order:
+    1. ``OBSERVABILITY_DB`` env var.
+    2. ``database`` key in the nephoscope config file (non-empty).
+    3. ``${CLAUDE_PLUGIN_DATA}/observations.db``.
+    4. ``RuntimeError`` — no path configured; user must run ``nephoscope init``.
     """
     env = os.environ.get("OBSERVABILITY_DB")
     if env:
         return Path(env)
+    cfg_db = get_config().database
+    if cfg_db:
+        return Path(cfg_db)
     plugin_data = _plugin_data_dir()
     if plugin_data is not None:
         return plugin_data / "observations.db"
-    return Path.home() / ".cache" / "nephoscope" / "observations.db"
+    raise RuntimeError("No database path configured — run: nephoscope init")
 
 
 def disable_marker_path() -> Path:

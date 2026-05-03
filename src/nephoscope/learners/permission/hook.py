@@ -114,7 +114,10 @@ def _mark_denied(
         except sqlite3.Error:
             pass
         return
-    db = _db_path()
+    try:
+        db = _db_path()
+    except RuntimeError:
+        return
     if not db.is_file():
         return
     try:
@@ -446,7 +449,11 @@ def main() -> int:  # NOSONAR S3516 - hook entry points must always exit 0 (doma
         return 0
 
     # No-DB fast path (Bash only): ask tier from deny.py.
-    db = _db_path()
+    try:
+        db = _db_path()
+    except RuntimeError:
+        _emit(None)
+        return 0
     if not db.is_file():
         if tool == "Bash" and _no_db_bash_ask(tool_input):
             return 0

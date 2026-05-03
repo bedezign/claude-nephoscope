@@ -210,3 +210,29 @@ class TestJunkDir:
     def test_junk_dir_is_string_type(self, isolated_config: Path) -> None:
         config = get_config()
         assert isinstance(config.junk_dir, str)
+
+
+class TestDatabaseField:
+    def test_database_default_is_empty_string(self, isolated_config: Path) -> None:
+        assert not isolated_config.exists()
+        config = get_config()
+        assert config.database == "", 'absent config file must yield database == ""'
+
+    def test_database_loaded_from_toml(self, isolated_config: Path) -> None:
+        isolated_config.write_text('database = "/data/obs.db"\n')
+        config = get_config()
+        assert config.database == "/data/obs.db", (
+            f'expected database "/data/obs.db", got {config.database!r}'
+        )
+
+    def test_database_absent_key_yields_empty_string(
+        self, isolated_config: Path
+    ) -> None:
+        isolated_config.write_text("")
+        config = get_config()
+        assert config.database == "", 'empty TOML file must yield database == ""'
+
+    def test_database_wrong_type_raises_type_error(self, isolated_config: Path) -> None:
+        isolated_config.write_text("database = 42\n")
+        with pytest.raises(TypeError, match="database"):
+            get_config()

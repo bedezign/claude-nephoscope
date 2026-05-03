@@ -104,7 +104,7 @@ def main() -> int:
         type=str,
         help=(
             "Path to observations.db (default resolution: OBSERVABILITY_DB > "
-            "${CLAUDE_PLUGIN_DATA}/observations.db > ~/.cache/nephoscope/observations.db)."
+            "config database key > ${CLAUDE_PLUGIN_DATA}/observations.db)."
         ),
     )
     args = ap.parse_args()

@@ -11,8 +11,8 @@ are never deleted. The schema loader is a no-op on an existing database;
 fixture seeding only adds new permission shapes without removing old ones.
 
 Resolution order:
-    ``--db-path`` arg > ``$OBSERVABILITY_DB`` > ``${CLAUDE_PLUGIN_DATA}/observations.db``
-    > ``~/.cache/nephoscope/observations.db``.
+    ``--db-path`` arg > ``$OBSERVABILITY_DB`` > config ``database`` key
+    > ``${CLAUDE_PLUGIN_DATA}/observations.db``.
 
 After DB bootstrap, ``nephoscope-init`` seeds the ``global_mirror`` singleton
 row (id=1) pointing at ``~/.claude/settings.json`` if it does not yet exist.
@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -75,11 +76,40 @@ _AUTO_LOAD_VERB_PROFILES: list[str] = [
 ]
 
 
+def _ensure_database_in_config(db_path: Path) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Write the ``database`` key to the config file if not already present.
+
+    Reads the existing TOML dict, skips silently if ``database`` is already
+    set, otherwise writes the key and clears the ``get_config`` cache so the
+    next call sees the freshly-written value.
+
+    Called from the SessionStart hook with the resolved ``$CLAUDE_PLUGIN_DATA``
+    path — the only site guaranteed to have ``CLAUDE_PLUGIN_DATA`` in env.
+    """
+    from nephoscope.config import get_config
+
+    config_path = _config_path()
+    existing = _load_config_dict(config_path)
+    if existing.get("database"):
+        return
+    existing["database"] = str(db_path)
+    _write_config_file(config_path, existing)
+    get_config.cache_clear()
+
+
 def _resolve_target(cli_path: str | None) -> Path:
     """Return the DB path honouring the CLI override first, then env/defaults."""
     if cli_path:
         return Path(cli_path)
-    return observations_db_path()
+    try:
+        return observations_db_path()
+    except RuntimeError:
+        print(
+            "nephoscope: no database path configured — set OBSERVABILITY_DB,"
+            " add 'database = ...' to config, or pass --db-path.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -149,18 +179,20 @@ def _write_config_file(path: Path, data: dict[str, Any]) -> None:
                 f"_write_config_file: unsupported value type {type(value)!r} for key {key!r}"
             )
     content = ("\n".join(lines) + "\n").encode("utf-8")
-    tmp_path = path.parent / (path.name + ".tmp")
+    tmp_path: Path | None = None
     try:
-        with tmp_path.open("wb") as fh:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as fh:
+            tmp_path = Path(fh.name)
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
         os.rename(tmp_path, path)
     except BaseException:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
 
 

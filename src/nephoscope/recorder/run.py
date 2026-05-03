@@ -55,6 +55,7 @@ from nephoscope.lib.db import (  # noqa: E402
     write_extra,
 )
 from nephoscope.lib.paths import (  # noqa: E402
+    _plugin_data_dir,
     canonicalize,
     extract_add_dir_args,
     is_disabled,
@@ -349,6 +350,40 @@ def _handle(phase: str, data: dict[str, Any]) -> None:
         conn.close()
 
 
+def _sweep_stale_tmp(
+    conn: sqlite3.Connection, query: str, args: tuple = (), *, label: str
+) -> None:
+    """Query a settings_json_path and sweep stale .tmp files from its parent dir.
+
+    Errors are swallowed — a sweep failure must never crash the session.
+    """
+    try:
+        row = conn.execute(query, args).fetchone()
+        if row and row[0]:
+            cleanup_stale_tmp(Path(row[0]).parent, 300)
+    except Exception as exc:  # noqa: BLE001 — sweep failure must not crash the session.
+        print(
+            f"WARNING: _handle_session_start sweep failed ({label}): {exc}",
+            file=sys.stderr,
+        )
+
+
+def _warm_additional_dirs(
+    conn: sqlite3.Connection, scope: Scope, *, label: str
+) -> None:
+    """Warm the additionalDirectories cache for *scope*.
+
+    Errors are swallowed — a cache-refresh failure must never crash the session.
+    """
+    try:
+        get_additional_dirs(conn, scope)
+    except Exception as exc:  # noqa: BLE001 — cache refresh must not crash.
+        print(
+            f"WARNING: _handle_session_start cache warm-up failed ({label}): {exc}",
+            file=sys.stderr,
+        )
+
+
 def _handle_session_start(data: dict[str, Any]) -> None:
     """Handle a SessionStart hook payload.
 
@@ -366,6 +401,17 @@ def _handle_session_start(data: dict[str, Any]) -> None:
         return
     cwd = data.get("cwd") or ""
     now = _now()
+    plugin_data = _plugin_data_dir()
+    if plugin_data is not None:
+        try:
+            from nephoscope.cli.init_cmd import _ensure_database_in_config
+
+            _ensure_database_in_config(plugin_data / "observations.db")
+        except Exception as exc:  # noqa: BLE001 — config write must not crash the session.
+            print(
+                f"WARNING: _ensure_database_in_config failed: {exc}",
+                file=sys.stderr,
+            )
     conn = _open()
     try:
         project_id: int | None = None
@@ -383,39 +429,23 @@ def _handle_session_start(data: dict[str, Any]) -> None:
                 file=sys.stderr,
             )
 
-        def _sweep(query: str, args: tuple = (), *, label: str) -> None:
-            try:
-                row = conn.execute(query, args).fetchone()
-                if row and row[0]:
-                    cleanup_stale_tmp(Path(row[0]).parent, 300)
-            except Exception as exc:  # noqa: BLE001 — sweep failure must not crash the session.
-                print(
-                    f"WARNING: _handle_session_start sweep failed ({label}): {exc}",
-                    file=sys.stderr,
-                )
-
-        def _warm(scope: Scope, *, label: str) -> None:
-            try:
-                get_additional_dirs(conn, scope)
-            except Exception as exc:  # noqa: BLE001 — cache refresh must not crash.
-                print(
-                    f"WARNING: _handle_session_start cache warm-up failed ({label}): {exc}",
-                    file=sys.stderr,
-                )
-
         # Sweep stale .tmp files and warm the additionalDirectories cache.
-        _sweep(
+        _sweep_stale_tmp(
+            conn,
             "SELECT settings_json_path FROM global_mirror WHERE id = 1;",
             label="global mirror",
         )
-        _warm(Scope("global_mirror", 1), label="global mirror")
+        _warm_additional_dirs(conn, Scope("global_mirror", 1), label="global mirror")
         if project_id is not None:
-            _sweep(
+            _sweep_stale_tmp(
+                conn,
                 "SELECT settings_json_path FROM projects WHERE id = ?;",
                 (project_id,),
                 label="active project",
             )
-            _warm(Scope("projects", project_id), label="active project")
+            _warm_additional_dirs(
+                conn, Scope("projects", project_id), label="active project"
+            )
     finally:
         conn.close()
 
@@ -428,7 +458,10 @@ def _ensure_db_bootstrapped() -> None:
     when the DB is empty, so this helper just needs to touch the path
     (opening + closing a connection is enough).
     """
-    db_path = observations_db_path()
+    try:
+        db_path = observations_db_path()
+    except RuntimeError:
+        return
     if db_path.exists():
         return
     try:

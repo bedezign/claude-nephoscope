@@ -12,6 +12,7 @@ dist/
 
 .pytest_cache/
 .ruff_cache/
+uv.lock
 .mypy_cache/
 .coverage
 coverage.xml

@@ -18,13 +18,14 @@ Dense lookup tables. For concepts, read [how it works](how-it-works.md); for com
 
 Nephoscope reads its settings from a TOML file at `$NEPHOSCOPE_CONFIG` (default `~/.config/nephoscope/config.toml`). An absent file is fine — all settings default silently. Malformed TOML raises an error.
 
-Four keys are supported:
+Five keys are supported:
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
+| `database` | string | (unset) | Override the observations database path. When set, takes precedence over `$OBSERVABILITY_DB` and the plugin data directory default. Useful for custom install locations or shared databases. |
 | `trusted_dirs` | list of strings | `[]` | Top-level project directories. Files under these paths are pre-approved for Read/Edit/Write/MultiEdit/NotebookEdit via injection into the global mirror's `_nephoscopeAllowedTools` key. Also enables the `$TRUSTED_DIR` placeholder. |
 | `auto_register_project_paths` | boolean | `false` | When true, `nephoscope-init` silently adds the current working directory to `trusted_dirs` instead of prompting. |
-| `non_bash_tool_matching` | boolean | `false` | Enables full DB matching for non-Bash tool classes (Write/Edit/MultiEdit/NotebookEdit/Read). When false (default), non-Bash tool matching follows mirror-only behaviour. |
+| `non_bash_tool_matching` | boolean | `true` | Enables full DB matching for non-Bash tool classes (Write/Edit/MultiEdit/NotebookEdit/Read). When false, non-Bash tool matching follows mirror-only behaviour. |
 | `junk_dir` | string | OS temp dir's `claude/` subfolder (e.g. `/tmp/claude`) | Scratch directory for temporary files. Also enables the `$JUNK_DIR` placeholder. Rules targeting this directory can be pre-approved without allowing the verb everywhere. |
 
 Example configuration file:
@@ -106,6 +107,24 @@ Short summary. Every one of these is invoked as `/nephoscope:permissions <sub>`.
 | `mirror-dry-run [--project <path>]` | Render the settings file content to stdout without writing anything. |
 | `reload-hint` | Touch the settings file's modification time so Claude Code re-reads it. |
 
+## CLI dispatcher
+
+The `nephoscope` command is a single entry point for terminal use (added v0.3.0). All subcommands delegate to the same underlying logic as the legacy console scripts, which remain as shims for backward compatibility.
+
+| Subcommand | What it does |
+|---|---|
+| `init` | First-run bootstrap — create the observations database and run initial configuration. |
+| `stats` | Rule usage counters: hit counts, top-matched rules. Pass `--show-unused` to list zero-hit rules. |
+| `status` | Permission state dashboard — rule counts per tier, pending asks and candidates, suggested next step. |
+| `reconcile` | Diff the JSON mirror against the database and (optionally) apply a resolution. |
+| `mirror-status` | Table of every settings file with its sync status: `stamped`, `null`, or `mismatch`. |
+| `mirror-dry-run` | Render the mirror JSON from the database to stdout without writing anything. |
+| `reload-hint` | Touch the settings file's modification time so Claude Code re-reads it. |
+| `profiles` | Meta-profile management — `list` bundled and user profiles, `load` one or more by id. |
+| `migrate` | Run pending schema migrations. |
+
+The preferred interface for interactive permission management is the slash command (`/nephoscope:permissions`), which runs within a Claude Code session. Use the CLI dispatcher for scripting or when working outside a session.
+
 ## File layout (plugin package)
 
 The shape of the installed plugin. Most of this is interesting only if you plan to contribute.
@@ -116,7 +135,7 @@ nephoscope/
     plugin.json           plugin manifest
     marketplace.json      local marketplace definition
   hooks/
-    hooks.json            declares the 4 runtime hooks
+    hooks.json            declares the runtime hooks
     bootstrap.sh          idempotent environment + package install
   commands/
     permissions.md        /nephoscope:permissions slash command doc
@@ -133,6 +152,8 @@ For a full breakdown of the `src/nephoscope/` tree, see [contributing](contribut
 ## Data files
 
 Where nephoscope keeps its state and where the settings mirrors land.
+
+A PostToolUse hook (`nephoscope-output-scanner`) runs automatically against `Bash`, `Grep`, and `Read` output and redacts credential patterns before they reach the model; matches are recorded in the `redaction_events` table of the observations database.
 
 | Path | Contents |
 |---|---|

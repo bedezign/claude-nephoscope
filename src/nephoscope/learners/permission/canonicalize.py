@@ -104,7 +104,10 @@ def _load_verb_categories() -> _VerbCategories:
     Returns empty collections when the DB is absent or the table does not exist,
     so parse_command degrades gracefully rather than raising.
     """
-    db = observations_db_path()
+    try:
+        db = observations_db_path()
+    except RuntimeError:
+        return _empty_verb_categories()
     if not db.exists():
         return _empty_verb_categories()
     result = _empty_verb_categories()

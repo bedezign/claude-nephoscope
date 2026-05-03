@@ -14,9 +14,11 @@ Claude Code asks for permission before every shell command, file write, or web f
 ## What it does
 
 - **Learns from your answers.** Every *Allow* or *Deny* you click is recorded, and recurring patterns surface as rules you can promote with one command.
+- **Ships with ready-to-use rule sets.** Five bundled profiles cover common stacks — Python, JavaScript, DevOps, developer tools, and project-level file access. Load one in a single command and skip the learning period entirely.
 - **Scopes rules the way you work.** Allow a tool everywhere, or only inside one project, or just for this one chat — your choice, per rule.
 - **Stays out of the way.** Rules are written into your normal `settings.json`, so Claude Code's built-in permission gate handles them without any hook round-trip.
-- **Ships with credential-leak guards.** Out of the box, nephoscope blocks credential files at two levels: Bash commands and Claude Code's native Read, Write, and Edit tools are both denied access to `.env` files, `~/.aws/credentials`, `~/.kube/config`, `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, bash and zsh history, PEM and key files, and common secrets directories. Standalone secret-manager reads (`op read`, `vault kv get`, and others) are also blocked. The safe inline form — `$(op read 'op://...')` — is unaffected.
+- **Ships with credential-leak guards.** All deny rules go into `settings.json` and are enforced by Claude Code's permission gate — no advisory `CLAUDE.md` text, no model goodwill required. Two protections are active from day one: Bash commands are blocked from reading credential files (`.env*`, `*.pem`, `*.key`, `~/.aws/**`, `~/.ssh/**`, `~/.npmrc`, `~/.netrc`, bash and zsh history, common secrets directories, and more), and a PostToolUse output scanner redacts known API key patterns (Anthropic, Stripe, GitHub, AWS, Slack, SendGrid, JWTs, private key blocks) from Bash, Grep, and Read tool output before it reaches the model. Standalone secret-manager reads (`op read`, `vault kv get`, and others) are also blocked; the safe inline form — `$(op read 'op://...')` — is unaffected.
+- **File-tool protection via the `credential-file-tools` profile.** Claude Code's native Read, Write, Edit, and MultiEdit tools are denied against the same credential paths once you load the profile (`/nephoscope:permissions profiles load credential-file-tools`). Together with the two Bash and output-scanner defaults above, this closes the three ways secrets leak from Claude Code sessions: direct file reads, runtime command output that contains credentials, and grep matches that hit config files.
 
 ## Why nephoscope
 
@@ -35,21 +37,37 @@ The first new session auto-installs a small Python environment under the plugin'
 
 ## In a hurry?
 
+Three commands cover the most common day-one moves — check what's been observed, promote a rule, and walk through pending suggestions:
+
 ```
-/nephoscope:permissions status                                   # see what's learned
-/nephoscope:permissions promote --verb ls --flags '*' --tier global   # allow ls everywhere
-/nephoscope:permissions review                                   # walk through pending suggestions
+/nephoscope:permissions status
 ```
+Prints a snapshot of recorded answers and which patterns are eligible for promotion.
+
+```
+/nephoscope:permissions promote --verb ls --flags '*' --tier global
+```
+Writes an *Allow* rule for `ls` (with any flags) into your global `settings.json`.
+
+```
+/nephoscope:permissions review
+```
+Walks you through every pending suggestion interactively, one at a time.
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md) — install, verify, your first rule
-- [How it works](docs/how-it-works.md) — concepts and flow, in plain language
-- [Daily use](docs/daily-use.md) — reading status, reviewing, troubleshooting
-- [Recipes](docs/recipes.md) — copy-pasteable rule patterns for common situations
+Read in order — each page builds on the last:
+
+1. [Getting started](docs/getting-started.md) — install, verify, your first rule
+2. [How it works](docs/how-it-works.md) — concepts and flow, in plain language
+3. [Daily use](docs/daily-use.md) — reading status, reviewing, troubleshooting
+4. [Recipes](docs/recipes.md) — copy-pasteable rule patterns for common situations
+5. [Reference](docs/reference.md) — environment variables, placeholders, subcommand table
+6. [Contributing](docs/contributing.md) — architecture, data flow, tests
+
+Supplementary:
+
 - [Credential-leak coverage](docs/credential-leak-coverage.md) — what's blocked by default and why
-- [Reference](docs/reference.md) — environment variables, placeholders, subcommand table
-- [Contributing](docs/contributing.md) — architecture, data flow, tests
 
 ## License
 

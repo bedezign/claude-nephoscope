@@ -29,6 +29,7 @@ class NephoscopeConfig:
     junk_dir: str = field(
         default_factory=lambda: str(Path(tempfile.gettempdir()) / "claude")
     )
+    database: str = ""
 
 
 def _coerce_trusted_dirs(value: object) -> list[str]:
@@ -63,6 +64,14 @@ def _coerce_junk_dir(value: object) -> str:
     raise TypeError(f"config: junk_dir must be a string, got {type(value).__name__}")
 
 
+def _coerce_database(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"config: database must be a string, got {type(value).__name__}")
+
+
 def _config_path() -> Path:
     env = os.environ.get("NEPHOSCOPE_CONFIG")
     if env:
@@ -90,4 +99,5 @@ def get_config() -> NephoscopeConfig:
         ),
         non_bash_tool_matching=bool(data.get("non_bash_tool_matching", True)),
         junk_dir=_coerce_junk_dir(data.get("junk_dir")),
+        database=_coerce_database(data.get("database")),
     )
