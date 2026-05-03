@@ -31,7 +31,7 @@ Nephoscope works the same way regardless of which Claude Code tier you're on (Pr
 From inside a Claude Code session:
 
 ```
-/plugin marketplace add bedezign/nephoscope
+/plugin marketplace add bedezign/claude-and-me
 /plugin install nephoscope@bedezign
 ```
 
@@ -70,6 +70,10 @@ Read in order — each page builds on the last:
 Supplementary:
 
 - [Credential-leak coverage](docs/credential-leak-coverage.md) — what's blocked by default and why
+
+## Part of
+
+nephoscope ships in **[Claude & Me](https://github.com/bedezign/claude-and-me)** — the bedezign Claude Code plugin marketplace.
 
 ## License
 
