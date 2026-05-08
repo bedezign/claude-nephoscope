@@ -27,8 +27,10 @@ from nephoscope.cli.review_cmd import (
     _build_path_opts,
     _load_candidates,
     _read_line,
+    _resolve_context,
     _resolve_paths_arg,
 )
+from nephoscope.lib import db as lib_db_mod
 
 
 # ---------------------------------------------------------------------------
@@ -1066,3 +1068,526 @@ def test_show_empty_path_specs_and_no_suggested_uses_fallbacks(conn, capsys):
     assert "$CWD/**" in specs
     assert "$HOME/**" in specs
     assert len(axes["paths"]["options"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_context — env-aware (CLAUDE_CODE_SESSION_ID)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveContext:
+    """Tests for _resolve_context() consulting CLAUDE_CODE_SESSION_ID."""
+
+    def _seed_project_and_session(
+        self,
+        conn: sqlite3.Connection,
+        cwd: str,
+        session_uuid: str,
+        ts: str = "2024-01-01T00:00:00Z",
+    ) -> tuple[int, int]:
+        """Insert a project + a session linked to it. Returns (project_id, session_id)."""
+        proj_id = lib_db_mod.upsert_project(conn, cwd, ts)
+        sess_id = lib_db_mod.upsert_session(conn, session_uuid, proj_id, ts)
+        conn.commit()
+        return proj_id, sess_id
+
+    def test_env_var_set_uses_session_uuid(self, conn, monkeypatch, tmp_path):
+        """When CLAUDE_CODE_SESSION_ID is set and matches a row, returned ids
+        come from that session — not from cwd-based reconstruction."""
+        proj_id, sess_id = self._seed_project_and_session(
+            conn, str(tmp_path / "proj"), "uuid-env-1"
+        )
+        monkeypatch.chdir(tmp_path)  # cwd has no project row
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-env-1")
+
+        _home, _cwd, _root, p_id, s_id = _resolve_context()
+
+        assert s_id == sess_id
+        assert p_id == proj_id
+
+    def test_env_var_unset_falls_back_to_cwd(self, conn, monkeypatch, tmp_path):
+        """When env var is unset and two sessions exist for the cwd's project,
+        the most-recent-by-last_activity is returned (existing behaviour)."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        proj_id = lib_db_mod.upsert_project(conn, str(proj_dir), "2024-01-01T00:00:00Z")
+        # Older session first.
+        older_id = lib_db_mod.upsert_session(
+            conn, "uuid-older", proj_id, "2024-01-01T00:00:00Z"
+        )
+        # Newer session — should be picked.
+        newer_id = lib_db_mod.upsert_session(
+            conn, "uuid-newer", proj_id, "2024-06-01T00:00:00Z"
+        )
+        conn.commit()
+        assert older_id != newer_id  # sanity
+
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        _home, cwd, _root, p_id, s_id = _resolve_context()
+
+        assert cwd == str(proj_dir)
+        assert p_id == proj_id
+        assert s_id == newer_id
+
+    def test_env_var_set_but_uuid_unknown_falls_through(
+        self, conn, monkeypatch, tmp_path, capsys
+    ):
+        """Env var set to a UUID not in sessions table → fall through to cwd
+        path; emit a stderr breadcrumb naming the bad UUID."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        proj_id = lib_db_mod.upsert_project(conn, str(proj_dir), "2024-01-01T00:00:00Z")
+        sess_id = lib_db_mod.upsert_session(
+            conn, "uuid-real", proj_id, "2024-01-01T00:00:00Z"
+        )
+        conn.commit()
+
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ghost-uuid-not-in-db")
+
+        _home, _cwd, _root, p_id, s_id = _resolve_context()
+
+        # Falls through to cwd-based lookup.
+        assert p_id == proj_id
+        assert s_id == sess_id
+        # Breadcrumb on stderr names the bad uuid.
+        err = capsys.readouterr().err
+        assert "CLAUDE_CODE_SESSION_ID" in err
+        assert "ghost-uuid-not-in-db" in err
+
+    def test_env_var_set_session_outside_cwd(self, conn, monkeypatch, tmp_path):
+        """Env points at a session in project_b while cwd is in project_a;
+        env wins — returned context reflects project_b."""
+        proj_a = tmp_path / "proj-a"
+        proj_a.mkdir()
+        proj_b = tmp_path / "proj-b"
+        proj_b.mkdir()
+        ts = "2024-01-01T00:00:00Z"
+        a_proj_id = lib_db_mod.upsert_project(conn, str(proj_a), ts)
+        b_proj_id = lib_db_mod.upsert_project(conn, str(proj_b), ts)
+        lib_db_mod.upsert_session(conn, "uuid-in-a", a_proj_id, ts)
+        b_sess_id = lib_db_mod.upsert_session(conn, "uuid-in-b", b_proj_id, ts)
+        conn.commit()
+
+        monkeypatch.chdir(proj_a)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-in-b")
+
+        _home, _cwd, _root, p_id, s_id = _resolve_context()
+
+        assert s_id == b_sess_id
+        assert p_id == b_proj_id
+
+
+# ---------------------------------------------------------------------------
+# --session flag wiring
+# ---------------------------------------------------------------------------
+
+
+class TestSessionFlag:
+    """Tests for --session flag and _session_filter_id helper."""
+
+    def _seed_sessions(
+        self,
+        conn: sqlite3.Connection,
+        proj_dir: Path,
+        sessions: list[tuple[str, str]],
+    ) -> tuple[int, dict[str, int]]:
+        """Seed a project + multiple (uuid, ts) sessions. Returns (proj_id, {uuid: id})."""
+        ts0 = "2024-01-01T00:00:00Z"
+        proj_id = lib_db_mod.upsert_project(conn, str(proj_dir), ts0)
+        ids: dict[str, int] = {}
+        for uuid, ts in sessions:
+            ids[uuid] = lib_db_mod.upsert_session(conn, uuid, proj_id, ts)
+        conn.commit()
+        return proj_id, ids
+
+    def test_session_all_overrides_env(self, conn, monkeypatch, tmp_path):
+        """--session=all → filter id is None even when CLAUDE_CODE_SESSION_ID is set."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        _, ids = self._seed_sessions(
+            conn, proj_dir, [("uuid-x", "2024-01-01T00:00:00Z")]
+        )
+
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-x")
+
+        load_mock = mock.MagicMock(return_value=[])
+        with mock.patch("nephoscope.cli.review_cmd._load_candidates", load_mock):
+            rc = main(["list", "--session=all"])
+
+        assert rc == 0
+        assert load_mock.call_count == 1
+        kwargs = load_mock.call_args.kwargs
+        args = load_mock.call_args.args
+        # filter_session_id passed either as kwarg or positional
+        passed = kwargs.get("filter_session_id", args[0] if args else "MISSING")
+        assert passed is None, (
+            f"--session=all must override env; got filter_session_id={passed!r}"
+        )
+
+    def test_session_uuid_explicit(self, conn, monkeypatch, tmp_path):
+        """--session=<uuid> → filter id resolves to that session's int id."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        _, ids = self._seed_sessions(
+            conn, proj_dir, [("uuid-explicit", "2024-01-01T00:00:00Z")]
+        )
+
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        load_mock = mock.MagicMock(return_value=[])
+        with mock.patch("nephoscope.cli.review_cmd._load_candidates", load_mock):
+            rc = main(["list", "--session=uuid-explicit"])
+
+        assert rc == 0
+        # First call is the scoped fetch; the second (when present) is the
+        # unfiltered total for the scope-header. Assert on the first.
+        first_call = load_mock.call_args_list[0]
+        passed = first_call.kwargs.get(
+            "filter_session_id", first_call.args[0] if first_call.args else "MISSING"
+        )
+        assert passed == ids["uuid-explicit"]
+
+    def test_session_unknown_uuid_exits_nonzero(
+        self, conn, monkeypatch, tmp_path, capsys
+    ):
+        """--session=<unknown-uuid> → exit 1 with explicit not-found message."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        self._seed_sessions(conn, proj_dir, [("uuid-real", "2024-01-01T00:00:00Z")])
+
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["list", "--session=ghost-uuid"])
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "ghost-uuid" in err
+        assert "not found in sessions" in err
+
+    def test_session_current_honours_env(self, conn, monkeypatch, tmp_path):
+        """--session=current → consults env (not most-recent-by-cwd).
+
+        Two sessions on the same project: 'older' (env target) and 'newer'.
+        With --session=current and env pointing at the older session, the
+        filter id is the older session's id, not the newer one.
+        """
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        _, ids = self._seed_sessions(
+            conn,
+            proj_dir,
+            [
+                ("uuid-older", "2024-01-01T00:00:00Z"),
+                ("uuid-newer", "2024-06-01T00:00:00Z"),
+            ],
+        )
+
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-older")
+
+        load_mock = mock.MagicMock(return_value=[])
+        with mock.patch("nephoscope.cli.review_cmd._load_candidates", load_mock):
+            rc = main(["list", "--session=current"])
+
+        assert rc == 0
+        first_call = load_mock.call_args_list[0]
+        passed = first_call.kwargs.get(
+            "filter_session_id", first_call.args[0] if first_call.args else "MISSING"
+        )
+        assert passed == ids["uuid-older"]
+        assert passed != ids["uuid-newer"]
+
+
+# ---------------------------------------------------------------------------
+# Scope header
+# ---------------------------------------------------------------------------
+
+
+class TestScopeHeader:
+    """Tests for _print_scope_header — UX hint when filtering is active."""
+
+    def _seed_filtered_candidates(
+        self,
+        conn: sqlite3.Connection,
+        tmp_path: Path,
+        scoped_uuid: str,
+        scoped_count: int,
+        unscoped_count: int,
+    ) -> int:
+        """Seed candidates linked vs. not linked to a target session.
+
+        Returns the target session id.
+        """
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir(exist_ok=True)
+        ts = "2024-01-01T00:00:00Z"
+        proj_id = lib_db_mod.upsert_project(conn, str(proj_dir), ts)
+        target_sess = lib_db_mod.upsert_session(conn, scoped_uuid, proj_id, ts)
+        other_sess = lib_db_mod.upsert_session(conn, "uuid-other", proj_id, ts)
+        for i in range(scoped_count):
+            cur = conn.execute(
+                "INSERT INTO permission_candidates"
+                "(verb, subcommand, flags, observations, distinct_sessions,"
+                " first_seen, last_seen)"
+                " VALUES (?, NULL, '[]', 5, 2, ?, ?)",
+                (f"scoped-{i}", ts, ts),
+            )
+            cand_id = int(cur.lastrowid or 0)
+            conn.execute(
+                "INSERT INTO permission_candidate_sessions"
+                "(candidate_id, session_id, last_seen) VALUES (?, ?, ?)",
+                (cand_id, target_sess, ts),
+            )
+        for i in range(unscoped_count):
+            cur = conn.execute(
+                "INSERT INTO permission_candidates"
+                "(verb, subcommand, flags, observations, distinct_sessions,"
+                " first_seen, last_seen)"
+                " VALUES (?, NULL, '[]', 5, 2, ?, ?)",
+                (f"unscoped-{i}", ts, ts),
+            )
+            cand_id = int(cur.lastrowid or 0)
+            conn.execute(
+                "INSERT INTO permission_candidate_sessions"
+                "(candidate_id, session_id, last_seen) VALUES (?, ?, ?)",
+                (cand_id, other_sess, ts),
+            )
+        conn.commit()
+        return target_sess
+
+    def test_list_with_session_filter_emits_scope_header_to_stderr(
+        self, conn, monkeypatch, tmp_path, capsys
+    ):
+        """env set → list emits header to stderr; stdout stays JSON."""
+        scoped_uuid = "uuid-scope-header-1234567890"
+        self._seed_filtered_candidates(
+            conn, tmp_path, scoped_uuid, scoped_count=2, unscoped_count=3
+        )
+
+        monkeypatch.chdir(tmp_path / "proj")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", scoped_uuid)
+
+        rc = main(["list"])
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        assert "Scoped to session" in captured.err
+        assert scoped_uuid[:8] in captured.err
+        # Counts: 2 scoped, 5 total.
+        assert "2" in captured.err
+        assert "5" in captured.err
+        # stdout must remain valid JSON (no header pollution).
+        json.loads(captured.out)
+
+    def test_list_session_all_no_header(self, conn, monkeypatch, tmp_path, capsys):
+        """env set + flag=all → no header anywhere."""
+        scoped_uuid = "uuid-no-header-when-all"
+        self._seed_filtered_candidates(
+            conn, tmp_path, scoped_uuid, scoped_count=2, unscoped_count=3
+        )
+
+        monkeypatch.chdir(tmp_path / "proj")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", scoped_uuid)
+
+        rc = main(["list", "--session=all"])
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        assert "Scoped" not in captured.err
+        assert "Scoped" not in captured.out
+
+    def test_list_no_env_no_header(self, conn, monkeypatch, tmp_path, capsys):
+        """env unset → no header (existing behaviour)."""
+        scoped_uuid = "uuid-no-env-cron"
+        self._seed_filtered_candidates(
+            conn, tmp_path, scoped_uuid, scoped_count=2, unscoped_count=3
+        )
+
+        monkeypatch.chdir(tmp_path / "proj")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        rc = main(["list"])
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        assert "Scoped" not in captured.err
+        assert "Scoped" not in captured.out
+
+    def test_interactive_emits_scope_header(self, conn, monkeypatch, tmp_path, capsys):
+        """Interactive mode with env set → header on stdout; user quits at first prompt."""
+        scoped_uuid = "uuid-interactive-header"
+        self._seed_filtered_candidates(
+            conn, tmp_path, scoped_uuid, scoped_count=1, unscoped_count=2
+        )
+
+        monkeypatch.chdir(tmp_path / "proj")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", scoped_uuid)
+        # Quit at the first tier prompt — no promotion happens.
+        monkeypatch.setattr("nephoscope.cli.review_cmd._read_line", lambda: "q")
+
+        rc = main([])
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        assert "Scoped to session" in captured.out
+        assert scoped_uuid[:8] in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Doom-path adversarial pass
+# ---------------------------------------------------------------------------
+
+
+class TestSessionFlagDoomPath:
+    """Doom-path coverage for the --session flag and env-var resolution."""
+
+    def test_empty_session_arg_errors(self, conn, monkeypatch, tmp_path, capsys):
+        """--session= (empty value) must reject cleanly, not silently accept."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["list", "--session="])
+
+        assert excinfo.value.code != 0
+        err = capsys.readouterr().err
+        assert "session" in err.lower()
+
+    def test_session_uuid_case_sensitive_lookup(self, conn, tmp_path, monkeypatch):
+        """UUID lookup is byte-exact: uppercase variant must NOT match lowercase row."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        ts = "2024-01-01T00:00:00Z"
+        proj_id = lib_db_mod.upsert_project(conn, str(proj_dir), ts)
+        lower = "uuid-mixed-case-abc"
+        sess_id = lib_db_mod.upsert_session(conn, lower, proj_id, ts)
+        conn.commit()
+
+        # Sanity: lowercase resolves to the seeded id.
+        assert lib_db_mod.lookup_session_id_by_uuid(conn, lower) == sess_id
+        # Uppercase variant must miss — recorder writes byte-exact.
+        upper = lower.upper()
+        assert lib_db_mod.lookup_session_id_by_uuid(conn, upper) is None
+
+    def test_db_unavailable_falls_through_silently(
+        self, conn, monkeypatch, tmp_path, capsys
+    ):
+        """env set + connect() raises → no crash, fall through to cwd path."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-anything")
+
+        # First, a successful pass to seed propose_promotions (no candidates).
+        # Then break connect() and re-run.
+        original_connect = __import__(
+            "nephoscope.cli.review_cmd", fromlist=["connect"]
+        ).connect
+
+        call_count = {"n": 0}
+
+        def flaky_connect():
+            call_count["n"] += 1
+            # First call (env-resolution) raises; subsequent calls succeed so
+            # the cwd-fallback path can still run.
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated DB connect failure")
+            return original_connect()
+
+        with mock.patch("nephoscope.cli.review_cmd.connect", flaky_connect):
+            # Should not raise — env path swallows the connect failure.
+            rc = main(["list"])
+
+        assert rc == 0
+
+    def test_repeated_invocation_is_idempotent(
+        self, conn, monkeypatch, tmp_path, capsys
+    ):
+        """Two consecutive list calls produce identical JSON output."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        ts = "2024-01-01T00:00:00Z"
+        proj_id = lib_db_mod.upsert_project(conn, str(proj_dir), ts)
+        sess_id = lib_db_mod.upsert_session(conn, "uuid-idem", proj_id, ts)
+        cur = conn.execute(
+            "INSERT INTO permission_candidates"
+            "(verb, subcommand, flags, observations, distinct_sessions,"
+            " first_seen, last_seen)"
+            " VALUES ('verb-idem', NULL, '[]', 5, 2, ?, ?)",
+            (ts, ts),
+        )
+        cand_id = int(cur.lastrowid or 0)
+        conn.execute(
+            "INSERT INTO permission_candidate_sessions"
+            "(candidate_id, session_id, last_seen) VALUES (?, ?, ?)",
+            (cand_id, sess_id, ts),
+        )
+        conn.commit()
+
+        monkeypatch.chdir(proj_dir)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-idem")
+
+        main(["list"])
+        first_out = capsys.readouterr().out
+        main(["list"])
+        second_out = capsys.readouterr().out
+
+        assert first_out == second_out
+        # Sanity: payload contains our candidate.
+        assert "verb-idem" in first_out
+
+    def test_first_run_no_db_env_set_does_not_crash(self, monkeypatch, tmp_path):
+        """First-run scenario: no DB on disk, env set → auto-create + fall through."""
+        nonexistent = tmp_path / "fresh.db"
+        assert not nonexistent.exists()
+        monkeypatch.setenv("OBSERVABILITY_DB", str(nonexistent))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "uuid-not-yet-seen")
+
+        # Should not raise — schema bootstraps on first connect, env miss
+        # emits a stderr breadcrumb and falls through.
+        rc = main(["list"])
+        assert rc == 0
+        assert nonexistent.exists()
+
+    def test_flag_value_with_shell_metacharacters(
+        self, conn, monkeypatch, tmp_path, capsys
+    ):
+        """Adversarial: a shell-injection-flavoured UUID is treated as a literal string.
+
+        argparse forwards the raw value; the lookup misses; exit 1.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["list", "--session=$(rm -rf /)"])
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "not found in sessions" in err
+        assert "$(rm -rf /)" in err

@@ -158,6 +158,22 @@ def upsert_session(
     return int(cur.lastrowid or 0)
 
 
+def lookup_session_id_by_uuid(
+    conn: sqlite3.Connection, session_uuid: str
+) -> int | None:
+    """Return the integer session id for a given UUID, or None if not present.
+
+    Read-only counterpart to :func:`upsert_session`. Used by the review CLI to
+    resolve the ``CLAUDE_CODE_SESSION_ID`` env var to a session row without
+    creating one. Match is byte-exact (no normalization) — the recorder writes
+    the raw hook-payload value, so divergence would silently miss.
+    """
+    row = conn.execute(
+        "SELECT id FROM sessions WHERE session_uuid = ?;", (session_uuid,)
+    ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
 def set_session_extra_dirs(
     conn: sqlite3.Connection, session_id: int, dirs_json: str
 ) -> None:

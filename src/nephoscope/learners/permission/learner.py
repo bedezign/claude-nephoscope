@@ -262,7 +262,9 @@ def _candidate_leaf(
     )
 
 
-def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
+def propose_promotions(
+    conn: sqlite3.Connection, session_id: int | None = None
+) -> list[Candidate]:
     """Return candidates meeting thresholds, not yet globally permitted, and not denied.
 
     Exclusion criteria (applied in order):
@@ -271,29 +273,59 @@ def propose_promotions(conn: sqlite3.Connection) -> list[Candidate]:
        rule_shape matching (verb, subcommand, flags) — any path_spec.
     3. Deny filter applies (deny or ask tier) — these commands are never
        auto-promoted.
+
+    When ``session_id`` is set, the result is additionally restricted to
+    candidates linked to that session via ``permission_candidate_sessions``.
+    Thresholds remain unchanged (lowering them for in-session ad-hoc review
+    is a separate feature).
     """
     thresholds = load_thresholds()
-    rows = conn.execute(
-        """
-        SELECT c.id, c.verb, c.subcommand, c.flags,
-               c.observations, c.distinct_sessions, c.positional_paths
-          FROM permission_candidates c
-         WHERE c.observations >= ?
-           AND c.distinct_sessions >= ?
-           AND NOT EXISTS (
-             SELECT 1
-               FROM rule_shapes rs
-               JOIN permissions p ON p.rule_shape_id = rs.id
-              WHERE rs.verb = c.verb
-                AND IFNULL(rs.subcommand, '') = IFNULL(c.subcommand, '')
-                AND rs.flags = c.flags
-                AND p.session_id IS NULL
-                AND p.project_id IS NULL
-           )
-         ORDER BY c.observations DESC, c.verb, c.subcommand;
-        """,
-        (thresholds.min_observations, thresholds.min_distinct_sessions),
-    ).fetchall()
+    if session_id is None:
+        rows = conn.execute(
+            """
+            SELECT c.id, c.verb, c.subcommand, c.flags,
+                   c.observations, c.distinct_sessions, c.positional_paths
+              FROM permission_candidates c
+             WHERE c.observations >= ?
+               AND c.distinct_sessions >= ?
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM rule_shapes rs
+                   JOIN permissions p ON p.rule_shape_id = rs.id
+                  WHERE rs.verb = c.verb
+                    AND IFNULL(rs.subcommand, '') = IFNULL(c.subcommand, '')
+                    AND rs.flags = c.flags
+                    AND p.session_id IS NULL
+                    AND p.project_id IS NULL
+               )
+             ORDER BY c.observations DESC, c.verb, c.subcommand;
+            """,
+            (thresholds.min_observations, thresholds.min_distinct_sessions),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT c.id, c.verb, c.subcommand, c.flags,
+                   c.observations, c.distinct_sessions, c.positional_paths
+              FROM permission_candidates c
+              JOIN permission_candidate_sessions pcs ON pcs.candidate_id = c.id
+             WHERE pcs.session_id = ?
+               AND c.observations >= ?
+               AND c.distinct_sessions >= ?
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM rule_shapes rs
+                   JOIN permissions p ON p.rule_shape_id = rs.id
+                  WHERE rs.verb = c.verb
+                    AND IFNULL(rs.subcommand, '') = IFNULL(c.subcommand, '')
+                    AND rs.flags = c.flags
+                    AND p.session_id IS NULL
+                    AND p.project_id IS NULL
+               )
+             ORDER BY c.observations DESC, c.verb, c.subcommand;
+            """,
+            (session_id, thresholds.min_observations, thresholds.min_distinct_sessions),
+        ).fetchall()
 
     known_roots: frozenset[str] = frozenset(
         r[0]

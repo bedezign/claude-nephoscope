@@ -519,6 +519,93 @@ class TestProposeDenyFilter:
         assert any(c.verb == "git" for c in proposals)
 
 
+def _link_candidate_session(
+    conn: sqlite3.Connection, candidate_id: int, session_id: int
+) -> None:
+    """Insert a permission_candidate_sessions link row."""
+    now = _now()
+    conn.execute(
+        "INSERT OR IGNORE INTO permission_candidate_sessions"
+        "(candidate_id, session_id, last_seen) VALUES (?, ?, ?)",
+        (candidate_id, session_id, now),
+    )
+    conn.commit()
+
+
+class TestProposePromotionsSessionFilter:
+    """Tests for propose_promotions(conn, session_id=...) — session-scoped view."""
+
+    def _seed_three_candidates_two_sessions(
+        self, conn: sqlite3.Connection
+    ) -> tuple[int, int, int, int, int]:
+        """Seed: session 1 owns A; session 2 owns B; both share C.
+
+        Returns (sess1_id, sess2_id, cand_a_id, cand_b_id, cand_c_id).
+        """
+        sess1 = _insert_session(conn, "uuid-sess-1")
+        sess2 = _insert_session(conn, "uuid-sess-2")
+        cand_a = _seed_candidate(conn, "a-only", None, "[]", 5, 2)
+        cand_b = _seed_candidate(conn, "b-only", None, "[]", 5, 2)
+        cand_c = _seed_candidate(conn, "shared", None, "[]", 5, 2)
+        _link_candidate_session(conn, cand_a, sess1)
+        _link_candidate_session(conn, cand_b, sess2)
+        _link_candidate_session(conn, cand_c, sess1)
+        _link_candidate_session(conn, cand_c, sess2)
+        return sess1, sess2, cand_a, cand_b, cand_c
+
+    def test_filter_by_session_returns_only_session_candidates(self, conn):
+        """Filtering by session 1 returns A and shared C; not B."""
+        sess1, _sess2, cand_a, _cand_b, cand_c = (
+            self._seed_three_candidates_two_sessions(conn)
+        )
+
+        proposals = propose_promotions(conn, session_id=sess1)
+
+        verbs = {c.verb for c in proposals}
+        assert verbs == {"a-only", "shared"}
+        ids = {c.id for c in proposals}
+        assert ids == {cand_a, cand_c}
+
+    def test_filter_by_session_excludes_other_sessions_candidates(self, conn):
+        """B is owned by session 2 only; filtering by session 1 must exclude it."""
+        sess1, _sess2, _cand_a, _cand_b, _cand_c = (
+            self._seed_three_candidates_two_sessions(conn)
+        )
+
+        proposals = propose_promotions(conn, session_id=sess1)
+
+        assert all(c.verb != "b-only" for c in proposals)
+
+    def test_no_filter_returns_all(self, conn):
+        """Default kwarg (no filter) returns the full set — existing behaviour."""
+        self._seed_three_candidates_two_sessions(conn)
+
+        proposals = propose_promotions(conn)
+
+        verbs = {c.verb for c in proposals}
+        assert verbs == {"a-only", "b-only", "shared"}
+
+    def test_filter_uses_permission_candidate_sessions_columns(self, conn):
+        """Contract: filter joins on permission_candidate_sessions(candidate_id, session_id).
+
+        Insert link row directly via raw SQL using exact schema column names —
+        if the JOIN ever switched to a different table or columns, this fails.
+        """
+        sess_id = _insert_session(conn, "uuid-contract")
+        cand_id = _seed_candidate(conn, "contract-verb", None, "[]", 5, 2)
+        now = _now()
+        conn.execute(
+            "INSERT INTO permission_candidate_sessions"
+            "(candidate_id, session_id, last_seen) VALUES (?, ?, ?)",
+            (cand_id, sess_id, now),
+        )
+        conn.commit()
+
+        proposals = propose_promotions(conn, session_id=sess_id)
+
+        assert any(c.id == cand_id for c in proposals)
+
+
 # ===========================================================================
 # _candidate_leaf
 # ===========================================================================

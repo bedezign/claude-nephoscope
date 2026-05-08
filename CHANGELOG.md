@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - `nephoscope-review` non-interactive subcommands (`list` / `show` / `commit`) — emit JSON (or `--text`) so the LLM-driven `/nephoscope:permissions review` flow can iterate one candidate at a time without a TTY. The interactive walker (no subcommand) still works for direct terminal use.
+- `nephoscope-review --session=<uuid|all|current>` flag — scope candidates by session. With `CLAUDE_CODE_SESSION_ID` set in the environment, the default scope becomes "current session" (visible in a stderr scope header `Scoped to session <short-uuid> — N candidates (M total in DB)`); add `--session=all` to opt out. Available on the interactive walker and the `list` subcommand. Outside a Claude Code session (cron / CI / no env var) behaviour is unchanged.
 - File-tool path specs now accept the cwd-relative `*`-glob form (e.g. `Read(**/.env)`, `Read(*.pem)`) for portable deny rules, alongside the existing filesystem-absolute `//abs/path` form.
 
 ### Changed

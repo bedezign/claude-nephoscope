@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import sys
+from typing import TextIO
 
 from nephoscope.learners.permission.learner import (
     Candidate,
@@ -70,24 +71,74 @@ def _prompt(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_context() -> tuple[str, str, str, int | None, int | None]:
-    """Resolve HOME/CWD/PROJECT_ROOT and project/session ids.
+def _resolve_uuid_session(
+    session_arg: str,
+) -> tuple[int | None, int]:
+    """Look up an explicit session UUID. Calls sys.exit(1) if not found.
 
-    Returns (home, cwd, project_root, project_id, session_id).
-    All values are best-effort; empty strings / None on failure.
+    Returns (project_id, session_id) on success.
     """
-    from nephoscope.lib.scope import resolve_project_root
+    from nephoscope.lib.db import lookup_session_id_by_uuid
 
-    home = os.environ.get("HOME", "")
-    cwd = os.getcwd()
-
-    project_root = ""
+    conn = connect()
     try:
-        result = resolve_project_root(cwd)
-        project_root = result or ""
+        session_id = lookup_session_id_by_uuid(conn, session_arg)
+        if session_id is None:
+            print(
+                f"error: --session={session_arg}: not found in sessions table",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        p_row = conn.execute(
+            "SELECT project_id FROM sessions WHERE id = ?;",
+            (session_id,),
+        ).fetchone()
+        project_id = int(p_row[0]) if p_row and p_row[0] is not None else None
+        return project_id, session_id
+    finally:
+        conn.close()
+
+
+def _resolve_env_session() -> tuple[int | None, int] | None:
+    """Resolve from CLAUDE_CODE_SESSION_ID env var if set and resolvable.
+
+    Returns (project_id, session_id) on success, or None when the env var is
+    unset, the lookup misses (with stderr breadcrumb), or DB access fails
+    (silent fall-through).
+    """
+    from nephoscope.lib.db import lookup_session_id_by_uuid
+
+    env_session_uuid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not env_session_uuid:
+        return None
+    try:
+        conn = connect()
+        try:
+            session_id = lookup_session_id_by_uuid(conn, env_session_uuid)
+            if session_id is not None:
+                p_row = conn.execute(
+                    "SELECT project_id FROM sessions WHERE id = ?;",
+                    (session_id,),
+                ).fetchone()
+                project_id = int(p_row[0]) if p_row and p_row[0] is not None else None
+                return project_id, session_id
+            print(
+                f"warning: CLAUDE_CODE_SESSION_ID={env_session_uuid}"
+                " not found in sessions table; falling back to cwd",
+                file=sys.stderr,
+            )
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001
         pass
+    return None
 
+
+def _resolve_cwd_session(cwd: str) -> tuple[int | None, int | None]:
+    """Cwd-based fallback: project lookup + most-recent session.
+
+    Returns (project_id, session_id); either may be None.
+    """
     project_id: int | None = None
     session_id: int | None = None
     try:
@@ -109,8 +160,78 @@ def _resolve_context() -> tuple[str, str, str, int | None, int | None]:
             conn.close()
     except Exception:  # noqa: BLE001
         pass
+    return project_id, session_id
 
+
+def _resolve_context(
+    session_arg: str | None = None,
+) -> tuple[str, str, str, int | None, int | None]:
+    """Resolve HOME/CWD/PROJECT_ROOT and project/session ids.
+
+    Returns (home, cwd, project_root, project_id, session_id).
+    All values are best-effort; empty strings / None on failure.
+
+    Precedence for the session_id (and its project_id):
+      1. ``session_arg`` is an explicit UUID (anything other than ``"all"`` or
+         ``"current"``): look it up; abort with exit 1 if not found.
+      2. ``session_arg == "all"``: skip env entirely, run cwd→most-recent path.
+      3. ``session_arg in (None, "current")`` AND ``CLAUDE_CODE_SESSION_ID``
+         env var resolves to a sessions row: env wins over cwd.
+      4. Otherwise: cwd→project→most-recent-session (existing behaviour).
+    """
+    from nephoscope.lib.scope import resolve_project_root
+
+    home = os.environ.get("HOME", "")
+    cwd = os.getcwd()
+
+    project_root = ""
+    try:
+        result = resolve_project_root(cwd)
+        project_root = result or ""
+    except Exception:  # noqa: BLE001
+        pass
+
+    if session_arg == "":
+        print(
+            "error: --session: empty value, expected uuid|all|current",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if session_arg and session_arg not in ("all", "current"):
+        project_id, session_id = _resolve_uuid_session(session_arg)
+        return home, cwd, project_root, project_id, session_id
+
+    if session_arg != "all":
+        env_result = _resolve_env_session()
+        if env_result is not None:
+            project_id, session_id = env_result
+            return home, cwd, project_root, project_id, session_id
+
+    project_id, session_id = _resolve_cwd_session(cwd)
     return home, cwd, project_root, project_id, session_id
+
+
+def _session_filter_id(
+    session_arg: str | None, resolved_session_id: int | None
+) -> int | None:
+    """Multiplexer: decide which session id (if any) to use as the candidate filter.
+
+    - ``--session=all`` → never filter (caller chose the global view).
+    - ``--session=<uuid>`` → filter by that session's id (supplied via
+      ``resolved_session_id``; resolution and abort-on-unknown were already
+      performed by :func:`_resolve_context`).
+    - ``--session=current`` or no flag, when env var is set; resolution was
+      already performed by ``_resolve_context`` → filter by ``resolved_session_id``.
+    - Otherwise → no filter (default behaviour preserved).
+    """
+    if session_arg == "all":
+        return None
+    if session_arg and session_arg != "current":
+        return resolved_session_id
+    if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return None
+    return resolved_session_id
 
 
 # ---------------------------------------------------------------------------
@@ -591,14 +712,54 @@ def _print_show_text(detail: dict) -> None:
         print(f"    {tier}: {axes['tier'][tier]}")
 
 
-def _load_candidates() -> list[Candidate]:
-    """Refresh + propose; close the connection. Mirrors the interactive flow."""
+def _load_candidates(filter_session_id: int | None = None) -> list[Candidate]:
+    """Refresh + propose; close the connection. Mirrors the interactive flow.
+
+    ``filter_session_id`` scopes the proposal to candidates first observed in
+    the named session via the ``permission_candidate_sessions`` junction. None
+    means no filter (the global accumulator).
+    """
     conn = connect()
     try:
         scan_candidates(conn)
-        return propose_promotions(conn)
+        return propose_promotions(conn, session_id=filter_session_id)
     finally:
         conn.close()
+
+
+def _lookup_session_uuid(session_id: int) -> str | None:
+    """Resolve a session id back to its UUID for header display."""
+    try:
+        conn = connect()
+        try:
+            row = conn.execute(
+                "SELECT session_uuid FROM sessions WHERE id = ?;", (session_id,)
+            ).fetchone()
+            return str(row[0]) if row else None
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _print_scope_header(
+    session_uuid: str,
+    scoped_count: int,
+    total_count: int,
+    *,
+    target: TextIO,
+) -> None:
+    """Print the per-invocation scope hint to ``target``.
+
+    ``target`` is a writable stream (stdout or stderr); JSON callers send
+    the header to stderr so the stdout JSON contract is preserved.
+    """
+    short = session_uuid[:8]
+    print(
+        f"Scoped to session {short} — {scoped_count} candidates"
+        f" ({total_count} total in DB)",
+        file=target,
+    )
 
 
 def _find_candidate(candidate_id: int) -> Candidate | None:
@@ -611,8 +772,23 @@ def _find_candidate(candidate_id: int) -> Candidate | None:
 
 
 def _cmd_list(args: argparse.Namespace) -> None:
-    candidates = _load_candidates()
+    session_arg = getattr(args, "session", None)
+    _, _, _, _, resolved_session_id = _resolve_context(session_arg)
+    filter_id = _session_filter_id(session_arg, resolved_session_id)
+    candidates = _load_candidates(filter_session_id=filter_id)
     rows = [_summary_dict(c) for c in candidates]
+
+    if filter_id is not None:
+        sess_uuid = _lookup_session_uuid(filter_id)
+        if sess_uuid:
+            conn = connect()
+            try:
+                total = len(propose_promotions(conn))
+            finally:
+                conn.close()
+            target = sys.stdout if args.text else sys.stderr
+            _print_scope_header(sess_uuid, len(candidates), total, target=target)
+
     if args.text:
         if not rows:
             print("no promotion candidates meet thresholds")
@@ -776,8 +952,20 @@ def _cmd_commit(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_interactive() -> int:
-    candidates = _load_candidates()
+def _cmd_interactive(session_arg: str | None = None) -> int:
+    home, cwd, project_root, project_id, session_id = _resolve_context(session_arg)
+    filter_id = _session_filter_id(session_arg, session_id)
+    candidates = _load_candidates(filter_session_id=filter_id)
+
+    if filter_id is not None:
+        sess_uuid = _lookup_session_uuid(filter_id)
+        if sess_uuid:
+            conn = connect()
+            try:
+                total = len(propose_promotions(conn))
+            finally:
+                conn.close()
+            _print_scope_header(sess_uuid, len(candidates), total, target=sys.stdout)
 
     if not candidates:
         print("no promotion candidates meet thresholds")
@@ -785,8 +973,6 @@ def _cmd_interactive() -> int:
 
     total = len(candidates)
     print(f"reviewing {total} candidate(s) — (q)uit at any tier prompt to stop early")
-
-    home, cwd, project_root, project_id, session_id = _resolve_context()
 
     promoted = 0
     skipped = 0
@@ -817,6 +1003,13 @@ def _cmd_interactive() -> int:
 # ---------------------------------------------------------------------------
 
 
+_SESSION_FLAG_HELP = (
+    "scope candidates by session: 'all' (no filter), 'current' (consult"
+    " CLAUDE_CODE_SESSION_ID env var), or a session UUID. Default: 'current'"
+    " when env var is set, else no filter."
+)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nephoscope-review",
@@ -832,6 +1025,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
+    parser.add_argument("--session", default=None, help=_SESSION_FLAG_HELP)
     sub = parser.add_subparsers(dest="cmd")
 
     p_list = sub.add_parser(
@@ -839,6 +1033,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit eligible candidates (id + summary) as JSON or text",
     )
     p_list.add_argument("--text", action="store_true", help="human-readable format")
+    p_list.add_argument("--session", default=None, help=_SESSION_FLAG_HELP)
 
     p_show = sub.add_parser(
         "show",
@@ -886,7 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_show(args)
     if args.cmd == "commit":
         return _cmd_commit(args)
-    return _cmd_interactive()
+    return _cmd_interactive(getattr(args, "session", None))
 
 
 if __name__ == "__main__":  # pragma: no cover

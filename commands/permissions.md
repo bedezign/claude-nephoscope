@@ -166,12 +166,14 @@ Walk through eligible candidates one at a time, choosing per-axis (verb / paths 
 - **Interactive (TTY mode)** — prompts the user for each axis. Runs only in a real terminal. Cannot be driven from a Bash tool call or a `!` prefix; both supply EOF for every prompt and silently promote with defaults.
 - **Non-interactive subcommands** — `list` / `show <id>` / `commit <id>`. These emit JSON (or `--text`) so the LLM can drive the same workflow from Bash without a TTY.
 
+**Session filtering.** Both modes accept `--session=<uuid|all|current>`. When `CLAUDE_CODE_SESSION_ID` is set in the environment (the standard case during any Claude Code session), the default scope becomes "current session" — the candidate list is restricted to candidates first observed in that session, and a header `Scoped to session <short-uuid> — N candidates (M total in DB)` is printed (to stderr for `list` JSON, stdout for interactive and `--text`). Use `--session=all` to disable the filter for a single invocation. `--session=<uuid>` targets a specific past session; an unknown UUID exits 1 with a clear error. The flag attaches to the top-level command (interactive) and to the `list` subcommand; `show`/`commit` ignore it because candidate ids are globally addressable.
+
 When the user types `/nephoscope:permissions review`, drive the LLM-friendly path:
 
 1. **Enumerate candidates.** Default to JSON for parsing.
 
    ```bash
-   "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review" list
+   "${CLAUDE_PLUGIN_DATA}/.venv/bin/nephoscope-review" list [--session=<uuid|all|current>]
    ```
 
    Output is an array of `{id, verb, subcommand, flags, observations, distinct_sessions}`.

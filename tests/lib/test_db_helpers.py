@@ -210,6 +210,44 @@ class TestUpsertSession:
         assert row[1] == now2  # updated
 
 
+class TestLookupSessionIdByUuid:
+    """Tests for lookup_session_id_by_uuid()."""
+
+    def test_returns_session_id_when_uuid_present(self, temp_db):
+        """Upserting a session and looking it up by UUID returns the same id."""
+        now = db._now()
+        sess_id = db.upsert_session(temp_db, "uuid-lookup-1", None, now)
+
+        looked_up = db.lookup_session_id_by_uuid(temp_db, "uuid-lookup-1")
+
+        assert looked_up == sess_id
+
+    def test_returns_none_when_uuid_absent(self, temp_db):
+        """Lookup against an empty sessions table returns None."""
+        result = db.lookup_session_id_by_uuid(temp_db, "ghost-uuid")
+        assert result is None
+
+    def test_uses_session_uuid_column_not_id(self, temp_db):
+        """Contract: helper queries the session_uuid column from schema.sql.
+
+        Inserts a row via raw SQL using the exact column names from
+        schema.sql (not via upsert_session). If lookup_session_id_by_uuid
+        ever switched to querying by id or another column, this would fail.
+        """
+        now = db._now()
+        cur = temp_db.execute(
+            "INSERT INTO sessions(session_uuid, project_id, started_at, last_activity)"
+            " VALUES (?, ?, ?, ?);",
+            ("contract-uuid-xyz", None, now, now),
+        )
+        inserted_id = int(cur.lastrowid or 0)
+        assert inserted_id > 0
+
+        looked_up = db.lookup_session_id_by_uuid(temp_db, "contract-uuid-xyz")
+
+        assert looked_up == inserted_id
+
+
 class TestUpsertCandidate:
     """Tests for upsert_candidate()."""
 

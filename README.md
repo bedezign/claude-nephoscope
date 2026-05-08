@@ -54,7 +54,7 @@ Writes an *Allow* rule for `ls` (with any flags) into your global `settings.json
 ```
 /nephoscope:permissions review
 ```
-Walks you through every pending suggestion interactively, one at a time.
+Walks you through every pending suggestion interactively, one at a time. Inside a Claude Code session, this defaults to the current session's candidates (look for the `Scoped to session …` header); add `--session=all` to see the full global view, or `--session=<uuid>` for a specific past session.
 
 ## Documentation
 

@@ -28,6 +28,8 @@ from nephoscope.lib.db import (
 )
 from nephoscope.lib.mirror.writer import sync_project
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -174,7 +176,7 @@ class TestSyncProjectNullPathIsNoOp:
 
 class TestStatusHintTierGlobal:
     def _get_hint_section(self) -> str:
-        cmd_file = Path("/work/bedezign/nephoscope/repository/commands/permissions.md")
+        cmd_file = PROJECT_ROOT / "commands" / "permissions.md"
         text = cmd_file.read_text()
         # The promote example lives in the awk block under "Try next".
         # We extract from "Try next" to the first occurrence of "EOF" that closes the block.
