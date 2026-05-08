@@ -83,6 +83,8 @@ At the end of each candidate you either approve it (becomes an allow-rule), reje
 
 If you need to bail out mid-review, hit Ctrl-C. Your already-answered candidates stay as rules; the unanswered ones remain candidates for next time.
 
+**Session scope (in-session default).** When you run `review` from inside a Claude Code session, the candidate list defaults to candidates first observed in *that* session — the header line `Scoped to session <short-uuid> — N candidates (M total in DB)` makes it visible. Add `--session=all` to see the full global view, or `--session=<uuid>` for a specific past session. Outside a Claude Code session (cron, CI, manual shell with no `CLAUDE_CODE_SESSION_ID`), behaviour is unchanged — you see all candidates.
+
 ## Loading profiles
 
 Use a profile when you're starting fresh, or when you're about to dive into a stack you haven't worked in yet and would rather pre-approve the obvious commands than wait for the ask queue to build up.

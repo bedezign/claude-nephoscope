@@ -7,6 +7,7 @@ Dense lookup tables. For concepts, read [how it works](how-it-works.md); for com
 | Variable | Purpose | Default |
 |---|---|---|
 | `OBSERVABILITY_DB` | Observations database path | `${CLAUDE_PLUGIN_DATA}/observations.db`, else `~/.cache/nephoscope/observations.db` |
+| `CLAUDE_CODE_SESSION_ID` | UUID of the active Claude Code session. Read by `nephoscope-review` to scope candidates to the current session by default; not set by nephoscope itself (Claude Code exports it). | unset (outside a Claude Code session) |
 | `NEPHOSCOPE_CONFIG` | Path to the nephoscope config file (TOML) | `~/.config/nephoscope/config.toml` |
 | `NEPHOSCOPE_DISABLE_MARKER` | Opt-out marker path — if the file exists, all hooks short-circuit silently | `${CLAUDE_PLUGIN_DATA}/disabled`, else `~/.config/nephoscope/disabled` |
 | `NEPHOSCOPE_INSTINCT_DIR` | Where the instinct summarizer expects the observer to write `.md` files | `${CLAUDE_PLUGIN_DATA}/instincts`, else `~/.claude/instincts` |
@@ -93,7 +94,7 @@ Short summary. Every one of these is invoked as `/nephoscope:permissions <sub>`.
 | `status` (default) | Show the dashboard — rule counts per tier, pending asks, top verbs, suggested next step. |
 | `scan` | Group recent asks into candidates. |
 | `propose` | List candidates that are ready for review. |
-| `review` | Interactive walkthrough — per candidate, pick verb/paths/flags match style and tier. |
+| `review` | Interactive walkthrough — per candidate, pick verb/paths/flags match style and tier. Inside a Claude Code session, defaults to the current session's candidates; pass `--session=all` for the full view or `--session=<uuid>` for a specific session. |
 | `list [approved\|rejected\|candidates] [--tier ...]` | Query rules or candidates and print a table. |
 | `promote` | Turn a shape into an approved rule immediately, without going through the queue. |
 | `reject` | Add a rejected rule (hard block). |
