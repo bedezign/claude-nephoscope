@@ -1,6 +1,6 @@
 {
   "name": "nephoscope",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Session recording, permission learning, and behavioural pattern extraction for Claude Code",
   "author": {
     "name": "B&E DeZign",

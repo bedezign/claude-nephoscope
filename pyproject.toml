@@ -1,6 +1,6 @@
 [project]
 name = "nephoscope"
-version = "0.3.3"
+version = "0.3.4"
 description = "Cloud-observation instrument for Claude Code — session recording, permission learning, and behavioural pattern extraction"
 requires-python = ">=3.11"
 dependencies = ["bashlex", "pyyaml"]

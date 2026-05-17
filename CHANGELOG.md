@@ -1,5 +1,11 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] — 2026-05-17
+
+### Fixed
+
+- **bootstrap.sh:** rebuild the plugin venv when the entry-point binary is missing, not only when `pyproject.toml` changes; wipe any incomplete `.venv/` before recreating. Fixes broken hooks on machines where `~/.claude/plugins/data` was synced (carrying `pyproject.toml.cached`) but `.venv/` was excluded, and also recovers from interrupted installs or interpreter mismatches.
+
 ## [0.3.3] — 2026-05-08
 
 ### Added

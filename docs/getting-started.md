@@ -95,7 +95,7 @@ The first time Claude Code loads the plugin, the `SessionStart` hook runs `hooks
 
 1. Creates a private Python environment at `${CLAUDE_PLUGIN_DATA}/.venv`.
 2. Installs the plugin's Python package into that environment.
-3. Caches the manifest at `${CLAUDE_PLUGIN_DATA}/pyproject.toml.cached`, so subsequent sessions skip the install step unless the manifest changed.
+3. Caches the manifest at `${CLAUDE_PLUGIN_DATA}/pyproject.toml.cached`, so subsequent sessions skip the install step unless the manifest changed or the venv's entry-point binary is missing.
 
 You may notice a short delay on the first session while the environment is built. Later sessions start instantly.
 
